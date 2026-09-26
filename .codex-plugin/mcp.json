@@ -1,0 +1,9 @@
+{
+  "ilostat-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/ilostat-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

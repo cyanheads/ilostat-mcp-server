@@ -1,0 +1,32 @@
+{
+  "manifest_version": "0.3",
+  "name": "ilostat-mcp-server",
+  "version": "0.1.0",
+  "description": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
+  "author": { "name": "cyanheads" },
+  "homepage": "https://github.com/cyanheads/ilostat-mcp-server#readme",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/ilostat-mcp-server"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {}
+}

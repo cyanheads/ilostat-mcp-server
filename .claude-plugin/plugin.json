@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "ilostat-mcp-server",
+  "version": "0.1.0",
+  "description": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/ilostat-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/ilostat-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ilostat",
+    "ilo",
+    "labour-statistics",
+    "labor-statistics",
+    "employment",
+    "unemployment",
+    "labour-market",
+    "statistics",
+    "open-data"
+  ],
+  "mcpServers": {
+    "ilostat-mcp-server": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cyanheads/ilostat-mcp-server"
+      ],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
