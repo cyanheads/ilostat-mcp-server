@@ -4,6 +4,15 @@
     "args": ["-y", "@cyanheads/ilostat-mcp-server"],
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio"
-    }
+    },
+    "env_vars": [
+      "ILOSTAT_CATALOG_REFRESH_HOURS",
+      "ILOSTAT_MAX_ROWS",
+      "ILOSTAT_PREVIEW_CHARS",
+      "ILOSTAT_CACHE_TTL_SECONDS",
+      "ILOSTAT_DATASET_TTL_SECONDS",
+      "ILOSTAT_DATAFRAME_DROP_ENABLED",
+      "CANVAS_PROVIDER_TYPE"
+    ]
   }
 }

@@ -73,6 +73,10 @@ COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner
 # actually imports belongs in its own `dependencies`, so nothing needed at
 # runtime is lost. The OTEL step below carries the same flag — without it, that
 # install re-resolves the graph and pulls every optional peer back in.
+# This stage runs on the target platform, so the install resolves the DuckDB
+# native binding for that architecture: the bindings are os/cpu-gated
+# optionalDependencies of @duckdb/node-bindings with no install scripts, and
+# @duckdb/node-api survives --omit=peer as a direct dependency.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --omit=peer --frozen-lockfile --ignore-scripts
 
@@ -108,31 +112,17 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
       && bun add --omit=dev --omit=peer --ignore-scripts $specs; \
     fi
 
-# Copy the compiled application code from the build stage
+# Copy the compiled application code from the build stage. Only dist/ crosses
+# over: the build stage's node_modules holds the build machine's DuckDB binding.
 COPY --from=build /usr/src/app/dist ./dist
-
-# Mirror CLI (MirrorService adopters only — Tier 3, opt-in):
-# Copy your mirror lifecycle scripts and emit a runtime tsconfig so Bun resolves
-# the @/ path alias against ./dist/ rather than ./src/.
-# See the api-mirror skill for the full recipe.
-#
-# COPY --from=build /usr/src/app/scripts/<your>-mirror-init.ts \
-#                   /usr/src/app/scripts/<your>-mirror-refresh.ts \
-#                   /usr/src/app/scripts/<your>-mirror-verify.ts \
-#                   /usr/src/app/scripts/_mirror-context.ts \
-#                   ./scripts/
-# RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
 
 # Create and set permissions for the log directory, assigning ownership to the 'bun' user.
+# Nothing else is written to disk: the catalog lives in memory, and DuckDB spill
+# files go to CANVAS_TEMP_PATH, which defaults to the OS temp dir.
 RUN mkdir -p /var/log/ilostat-mcp-server && chown -R bun:bun /var/log/ilostat-mcp-server
-
-# Writable data dirs for on-disk SQLite stores (catalog index / observations
-# mirror), owned by the runtime user. Mount a volume over either in production.
-RUN mkdir -p /usr/src/app/.cache /usr/src/app/.mirror \
-  && chown -R bun:bun /usr/src/app/.cache /usr/src/app/.mirror
 
 # Switch to the non-root user
 USER bun

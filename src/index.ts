@@ -5,30 +5,42 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from './mcp-server/tools/definitions/echo-app.app-tool.js';
+import { getServerConfig } from '@/config/server-config.js';
+import { buildInstructions } from '@/mcp-server/server-instructions.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
+import { disposeIlostatServices, initIlostatServices } from '@/services/ilostat-services.js';
+
+// The framework reads ./.env only inside createApp(), but the canvas default and
+// the drop gate below are read before it, so load the file first. A missing file
+// is not an error: every variable has a default.
+try {
+  process.loadEnvFile();
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+}
+
+// DataCanvas is on by default — DuckDB ships as a direct dependency. A blank value
+// (what a bundle form sends when left empty) counts as unset; set
+// CANVAS_PROVIDER_TYPE=none to turn dataframes off.
+process.env.CANVAS_PROVIDER_TYPE ||= 'duckdb';
+const canvasEnabled = process.env.CANVAS_PROVIDER_TYPE !== 'none';
+const { dataframeDropEnabled } = getServerConfig();
 
 await createApp({
   name: 'ilostat-mcp-server',
   title: 'ilostat-mcp-server',
-  tools: [echoTool, echoAppTool],
-  resources: [echoResource, echoAppUiResource],
-  prompts: [echoPrompt],
-  // Server-level orientation forwarded to the model on every initialize: two to three
-  // cohesive sentences in one string literal, written for the calling agent (which tool
-  // opens a workflow, what chains into what). Operator configuration stays in the README.
-  // instructions: 'Resolve a name to an id with example_search, then pass that id to example_get for the full record. Results are paged; follow nextOffset until it is absent.',
-
-  // Session posture in code rather than in a Dockerfile. MCP_SESSION_MODE still
-  // wins when it is set. Add `require: 'stateful'` — `{ default: 'stateful',
-  // require: 'stateful' }` — when a tool asks the caller for input mid-handler,
-  // so a stateless deployment fails at startup instead of losing that tool.
-  // sessionMode: 'stateless',
-
-  // Release what setup() allocated: a watcher, a socket, a timer the framework
-  // cannot see. Runs after the transport stops and before the logger closes.
-  // teardown(core) { core.logger.info('bye', { requestId: 'shutdown', timestamp: new Date().toISOString() }); },
+  tools: buildToolDefinitions({ canvasEnabled, dropEnabled: dataframeDropEnabled }),
+  resources: [],
+  prompts: [],
+  // No tool asks the caller for input mid-handler, so every HTTP request can land on
+  // any instance. MCP_SESSION_MODE still overrides this when it carries a value.
+  sessionMode: 'stateless',
+  instructions: buildInstructions({ canvasEnabled }),
+  setup(core) {
+    initIlostatServices({ canvas: core.canvas }).catalog.start();
+  },
+  // Release the catalog refresh timer, in-flight loads, and both upstream pacers.
+  teardown() {
+    disposeIlostatServices();
+  },
 });

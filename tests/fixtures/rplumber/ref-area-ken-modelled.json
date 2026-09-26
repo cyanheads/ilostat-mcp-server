@@ -1,0 +1,287 @@
+[
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "SDG_0111_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 33.058,
+    "obs_status": "A"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EAP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 67.385
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EAP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 35.405
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EAP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 71.85
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EAP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 37.616
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EAP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 63.036
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EAP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 33.211
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2EMP_SEX_AGE_NB",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 23365.248
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2EMP_SEX_AGE_NB",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 3714.369
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2EMP_SEX_AGE_NB",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 12443.503
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2EMP_SEX_AGE_NB",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 2041.692
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2EMP_SEX_AGE_NB",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 10921.745
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2EMP_SEX_AGE_NB",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 1672.677
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 63.713
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 30.007
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 68.773
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 33.126
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 58.786
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EMP_2WAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 26.913
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 5.449
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 15.246
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE25",
+    "time": "2024",
+    "obs_value": 3.337
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 4.284
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 11.936
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE25",
+    "time": "2024",
+    "obs_value": 2.623
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2024",
+    "obs_value": 6.743
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2024",
+    "obs_value": 18.964
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "UNE_2EAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE25",
+    "time": "2024",
+    "obs_value": 4.128
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EIP_2EET_SEX_RT",
+    "sex": "SEX_T",
+    "time": "2024",
+    "obs_value": 19.54
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EIP_2EET_SEX_RT",
+    "sex": "SEX_M",
+    "time": "2024",
+    "obs_value": 13.283
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "EIP_2EET_SEX_RT",
+    "sex": "SEX_F",
+    "time": "2024",
+    "obs_value": 25.745
+  },
+  {
+    "ref_area": "KEN",
+    "source": "XA:1909",
+    "indicator": "LAP_2GDP_NOC_RT",
+    "time": "2024",
+    "obs_value": 33.276,
+    "obs_status": "M"
+  }
+]

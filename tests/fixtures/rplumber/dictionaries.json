@@ -1,0 +1,417 @@
+{
+  "ref_area": [
+    {
+      "ref_area": "ABW",
+      "ref_area.label": "Aruba"
+    },
+    {
+      "ref_area": "JOR",
+      "ref_area.label": "Jordan"
+    },
+    {
+      "ref_area": "KEN",
+      "ref_area.label": "Kenya"
+    },
+    {
+      "ref_area": "USA",
+      "ref_area.label": "United States of America"
+    },
+    {
+      "ref_area": "X01",
+      "ref_area.label": "World"
+    },
+    {
+      "ref_area": "X02",
+      "ref_area.label": "World: Low income"
+    },
+    {
+      "ref_area": "X06",
+      "ref_area.label": "Africa"
+    },
+    {
+      "ref_area": "X36",
+      "ref_area.label": "Arab States"
+    },
+    {
+      "ref_area": "ANT",
+      "ref_area.label": "Netherlands Antilles"
+    }
+  ],
+  "indicator": [
+    {
+      "indicator": "EAP_DWAP_SEX_AGE_RT",
+      "indicator.label": "Labour force participation rate by sex and age (%)"
+    },
+    {
+      "indicator": "EMP_TEMP_SEX_IND_NB",
+      "indicator.label": "Employment by ILO sector and sex (thousands)",
+      "indicator.description": "<p>Employment by ILO sector&nbsp;&ndash; sector definitions may differ from those used elsewhere on ILOSTAT.<br/>See the <i>sectoral</i> notes &amp; sources.</p>"
+    },
+    {
+      "indicator": "EMP_TEMP_SEX_INS_DSB_NB",
+      "indicator.label": "Employment by sex, public/private sector and disability status (thousands)",
+      "indicator.description": "The employed comprise all persons of working age who were in paid employment or self-employment. For more information, refer to the &lt;a href = \"https://ilostat.ilo.org/methods/concepts-and-definitions/description-labour-force-statistics/\"&gt;Labour Force Statistics (LFS) database description&lt;/a&gt;.</p>"
+    },
+    {
+      "indicator": "LAP_2GDP_NOC_RT",
+      "indicator.label": "Labour income share as a percent of GDP -- ILO modelled estimates, Nov. 2025 (%)",
+      "indicator.description": "The labour income share in GDP is the ratio, in percentage, between total labour income and gross domestic product."
+    },
+    {
+      "indicator": "LAP_2LID_QTL_RT",
+      "indicator.label": "Labour income distribution by decile -- ILO modelled estimates, Sept. 2025 (%)",
+      "indicator.description": "This indicator shows in percentage the share of total labour income that accrues to each decile. For more information, refer to the <a href=\"https://ilostat.ilo.org/methods/concepts-and-definitions/ilo-modelled-estimates/\">ILO Modelled Estimates (ILOEST) database description</a>.</p>"
+    },
+    {
+      "indicator": "POP_2POP_SEX_NB",
+      "indicator.label": "Population by sex -- UN estimates and projections, July 2024 (thousands)",
+      "indicator.description": "The total population comprises persons of all ages living in the country. The source is the United Nations' <i>World Population Prospects</i>. For more information, refer to the <a href=\"https://ilostat.ilo.org/methods/concepts-and-definitions/ilo-modelled-estimates/\">ILO Modelled Estimates (ILOEST) database description</a>.</p>"
+    },
+    {
+      "indicator": "SDG_0552_NOC_RT",
+      "indicator.label": "SDG indicator 5.5.2: Proportion of women in senior and middle management positions (%)",
+      "indicator.description": "<strong>Data may differ from nationally reported figures and the Global SDG Indicators Database.</strong> The female share of employment in managerial positions conveys the number of women in management as a percentage of employment in management."
+    },
+    {
+      "indicator": "UNE_2EAP_SEX_AGE_RT",
+      "indicator.label": "Unemployment rate by sex and age -- ILO modelled estimates, Nov. 2025 (%)",
+      "indicator.description": "<strong>Imputed observations are not based on national data, are subject to high uncertainty and should not be used for country comparisons or rankings. </strong>The unemployment rate conveys the number of persons who are unemployed as a percent of the labour force."
+    },
+    {
+      "indicator": "UNE_DEAP_SEX_AGE_RT",
+      "indicator.label": "Unemployment rate by sex and age (%)",
+      "indicator.description": "<strong>With the aim of promoting international comparability, statistics presented on ILOSTAT are based on standard international definitions wherever feasible and may differ from official national figures. </strong>The unemployment rate conveys the number of persons who are unemployed as a percent of the labour force. For more information, refer to the <a href = \"https://ilostat.ilo.org/methods/concepts-and-definitions/description-labour-force-statistics/\">Labour Force Statistics (LFS and STLFS) database description</a>."
+    },
+    {
+      "indicator": "UNE_DEAP_SEX_EDU_RT",
+      "indicator.label": "Unemployment rate by sex and education (%)",
+      "indicator.description": "The unemployment rate conveys the number of persons who are unemployed as a percent of the labour force, by level of education."
+    }
+  ],
+  "sex": [
+    {
+      "sex": "SEX_T",
+      "sex.label": "Total"
+    },
+    {
+      "sex": "SEX_M",
+      "sex.label": "Male"
+    },
+    {
+      "sex": "SEX_F",
+      "sex.label": "Female"
+    },
+    {
+      "sex": "SEX_O",
+      "sex.label": "Other"
+    }
+  ],
+  "classif1": [
+    {
+      "classif1": "AGE_YTHADULT_YGE15",
+      "classif1.label": "Age (Youth, adults): 15+"
+    },
+    {
+      "classif1": "AGE_YTHADULT_Y15-64",
+      "classif1.label": "Age (Youth, adults): 15-64"
+    },
+    {
+      "classif1": "AGE_YTHADULT_Y15-24",
+      "classif1.label": "Age (Youth, adults): 15-24"
+    },
+    {
+      "classif1": "AGE_YTHADULT_YGE25",
+      "classif1.label": "Age (Youth, adults): 25+"
+    },
+    {
+      "classif1": "AGE_AGGREGATE_YGE15",
+      "classif1.label": "Age (Aggregate bands): 15+"
+    },
+    {
+      "classif1": "AGE_AGGREGATE_Y15-24",
+      "classif1.label": "Age (Aggregate bands): 15-24"
+    },
+    {
+      "classif1": "EDU_AGGREGATE_TOTAL",
+      "classif1.label": "Education (Aggregate levels): Total"
+    },
+    {
+      "classif1": "EDU_AGGREGATE_BAS",
+      "classif1.label": "Education (Aggregate levels): Basic"
+    },
+    {
+      "classif1": "INS_SECTOR_TOTAL",
+      "classif1.label": "Institutional sector: Total"
+    },
+    {
+      "classif1": "INS_SECTOR_PUB",
+      "classif1.label": "Institutional sector: Public"
+    },
+    {
+      "classif1": "INS_SECTOR_PRI",
+      "classif1.label": "Institutional sector: Private"
+    },
+    {
+      "classif1": "INS_SECTOR_X",
+      "classif1.label": "Institutional sector: X - Not elsewhere classified"
+    },
+    {
+      "classif1": "DSB_STATUS_TOTAL",
+      "classif1.label": "Disability status: Total"
+    },
+    {
+      "classif1": "DSB_STATUS_NODIS",
+      "classif1.label": "Disability status: Persons without disability"
+    },
+    {
+      "classif1": "DSB_STATUS_DIS",
+      "classif1.label": "Disability status: Persons with disability"
+    },
+    {
+      "classif1": "DSB_STATUS_X",
+      "classif1.label": "Disability status: Not elsewhere classified"
+    },
+    {
+      "classif1": "DCL_DECILE_01",
+      "classif1.label": "Decile: Decile 1"
+    },
+    {
+      "classif1": "DCL_DECILE_02",
+      "classif1.label": "Decile: Decile 2"
+    },
+    {
+      "classif1": "DCL_DECILE_03",
+      "classif1.label": "Decile: Decile 3"
+    },
+    {
+      "classif1": "DCL_DECILE_04",
+      "classif1.label": "Decile: Decile 4"
+    },
+    {
+      "classif1": "DCL_DECILE_05",
+      "classif1.label": "Decile: Decile 5"
+    },
+    {
+      "classif1": "DCL_DECILE_06",
+      "classif1.label": "Decile: Decile 6"
+    },
+    {
+      "classif1": "DCL_DECILE_07",
+      "classif1.label": "Decile: Decile 7"
+    },
+    {
+      "classif1": "DCL_DECILE_08",
+      "classif1.label": "Decile: Decile 8"
+    },
+    {
+      "classif1": "DCL_DECILE_09",
+      "classif1.label": "Decile: Decile 9"
+    },
+    {
+      "classif1": "DCL_DECILE_10",
+      "classif1.label": "Decile: Decile 10"
+    }
+  ],
+  "classif2": [
+    {
+      "classif2": "GEO_COV_NAT",
+      "classif2.label": "Area type: National"
+    },
+    {
+      "classif2": "GEO_COV_URB",
+      "classif2.label": "Area type: Urban"
+    },
+    {
+      "classif2": "DSB_STATUS_TOTAL",
+      "classif2.label": "Disability status: Total"
+    },
+    {
+      "classif2": "DSB_STATUS_NODIS",
+      "classif2.label": "Disability status: Persons without disability"
+    },
+    {
+      "classif2": "DSB_STATUS_DIS",
+      "classif2.label": "Disability status: Persons with disability"
+    },
+    {
+      "classif2": "DSB_STATUS_X",
+      "classif2.label": "Disability status: Not elsewhere classified"
+    }
+  ],
+  "obs_status": [
+    {
+      "obs_status": "A",
+      "obs_status.label": "Adjusted"
+    },
+    {
+      "obs_status": "B",
+      "obs_status.label": "Break in series"
+    },
+    {
+      "obs_status": "M",
+      "obs_status.label": "Model-based extrapolation"
+    },
+    {
+      "obs_status": "U",
+      "obs_status.label": "Unreliable"
+    },
+    {
+      "obs_status": "R",
+      "obs_status.label": "Real value"
+    },
+    {
+      "obs_status": "I",
+      "obs_status.label": "Imputation"
+    },
+    {}
+  ],
+  "note_classif": [
+    {
+      "note_classif": "C30:6542",
+      "note_classif.label": "Currency: ABW - Florin (AWG)"
+    }
+  ],
+  "note_indicator": [
+    {
+      "note_indicator": "I20:4077",
+      "note_indicator.label": "Employment definition: Excluding own-use production workers"
+    },
+    {
+      "note_indicator": "I20:3359",
+      "note_indicator.label": "Employment definition: Including subsistence workers"
+    }
+  ],
+  "note_source": [
+    {
+      "note_source": "R1:3513",
+      "note_source.label": "Repository: ILO-STATISTICS - Micro data processing"
+    },
+    {
+      "note_source": "R1:2383",
+      "note_source.label": "Repository: Eurostat"
+    }
+  ],
+  "source": [
+    {
+      "source": "BA:829",
+      "source.label": "LFS - Labour Force Survey",
+      "ref_area": "ABW"
+    },
+    {
+      "source": "BA:7008",
+      "source.label": "LFS - Labour Force Survey",
+      "ref_area": "KEN"
+    },
+    {
+      "source": "AA:1311",
+      "source.label": "PC - Population Census",
+      "ref_area": "KEN"
+    },
+    {
+      "source": "BA:453",
+      "source.label": "LFS - Current Population Survey",
+      "ref_area": "USA"
+    },
+    {
+      "source": "AA:1763",
+      "source.label": "PC - Population Census",
+      "ref_area": "USA"
+    },
+    {
+      "source": "BA:682",
+      "source.label": "LFS - Employment and Unemployment Survey",
+      "ref_area": "JOR"
+    },
+    {
+      "source": "XA:9001",
+      "source.label": "Administrative records",
+      "ref_area": "ABW"
+    }
+  ],
+  "classif_type": [
+    {
+      "classif_type": "SEX",
+      "classif_type.label": "Sex"
+    },
+    {
+      "classif_type": "AGE",
+      "classif_type.label": "Age"
+    },
+    {
+      "classif_type": "GEO",
+      "classif_type.label": "Rural/urban areas"
+    },
+    {
+      "classif_type": "EDU",
+      "classif_type.label": "Education"
+    },
+    {
+      "classif_type": "DSB",
+      "classif_type.label": "Disability status"
+    },
+    {
+      "classif_type": "INS",
+      "classif_type.label": "Public/private sector"
+    },
+    {
+      "classif_type": "DCL",
+      "classif_type.label": "Decile"
+    },
+    {
+      "classif_type": "IND",
+      "classif_type.label": "ILO sector"
+    }
+  ],
+  "database": [
+    {
+      "database": "ILOSDG",
+      "database.label": "SDG Labour Market Indicators (ILOSDG)"
+    },
+    {
+      "database": "LFS",
+      "database.label": "Labour Force Statistics (LFS)"
+    },
+    {
+      "database": "EMI",
+      "database.label": "Education and Mismatch Indicators (EMI)"
+    },
+    {
+      "database": "DLMI",
+      "database.label": "Disability Labour Market Indicators (DLMI)"
+    },
+    {
+      "database": "ILOEST",
+      "database.label": "ILO Modelled Estimates (ILOEST)"
+    },
+    {
+      "database": "CHILD",
+      "database.label": "Child Labour Statistics (CHILD)"
+    }
+  ],
+  "subject": [
+    {
+      "subject": "POP",
+      "subject.label": "Population"
+    },
+    {
+      "subject": "EAP",
+      "subject.label": "Labour force"
+    },
+    {
+      "subject": "EMP",
+      "subject.label": "Employment"
+    },
+    {
+      "subject": "LUU",
+      "subject.label": "Unemployment and labour underutilization"
+    },
+    {
+      "subject": "EAR",
+      "subject.label": "Earnings and income"
+    },
+    {
+      "subject": "CLD",
+      "subject.label": "Child labour"
+    }
+  ]
+}

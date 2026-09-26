@@ -1,0 +1,508 @@
+{
+  "data": {
+    "dataflows": [
+      {
+        "id": "DF_UNE_DEAP_SEX_AGE_RT",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "Unemployment rate by sex and age",
+        "annotations": [
+          {
+            "title": "20/09/2026 07:33:33",
+            "type": "LAST_UPDATE"
+          },
+          {
+            "title": "AGE",
+            "type": "LAYOUT_COLUMN"
+          },
+          {
+            "title": "FREQ=A,endPeriod=2027-12-31,AGE=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-64+AGE_YTHADULT_Y15-24+AGE_YTHADULT_YGE25,SEX=SEX_T,LASTNOBSERVATIONS=1",
+            "type": "DEFAULT"
+          }
+        ]
+      }
+    ],
+    "dataStructures": [
+      {
+        "id": "UNE_DEAP_SEX_AGE_RT",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "Unemployment rate by sex and age",
+        "dataStructureComponents": {
+          "attributeList": {
+            "id": "AttributeDescriptor",
+            "attributes": [
+              {
+                "id": "OBS_STATUS",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).OBS_STATUS",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_OBS_STATUS(1.0)"
+                },
+                "assignmentStatus": "Conditional",
+                "attributeRelationship": {
+                  "primaryMeasure": "OBS_VALUE"
+                }
+              },
+              {
+                "id": "UNIT_MEASURE_TYPE",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).UNIT_MEASURE_TYPE",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_UNIT_MEASURE_TYPE(1.0)"
+                },
+                "assignmentStatus": "Conditional",
+                "attributeRelationship": {
+                  "dimensions": ["MEASURE"]
+                }
+              },
+              {
+                "id": "UNIT_MEASURE",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).UNIT_MEASURE",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_UNIT_MEASURE(1.0)"
+                },
+                "assignmentStatus": "Conditional",
+                "attributeRelationship": {
+                  "dimensions": ["MEASURE"]
+                }
+              },
+              {
+                "id": "UNIT_MULT",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).UNIT_MULT",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_UNIT_MULT(1.0)"
+                },
+                "assignmentStatus": "Conditional",
+                "attributeRelationship": {
+                  "dimensions": ["MEASURE"]
+                }
+              },
+              {
+                "id": "SOURCE",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_NOTE_TYPE(1.0).SOURCE",
+                "assignmentStatus": "Conditional",
+                "attributeRelationship": {
+                  "dimensions": ["REF_AREA", "MEASURE", "TIME_PERIOD"]
+                }
+              }
+            ]
+          },
+          "dimensionList": {
+            "id": "DimensionDescriptor",
+            "dimensions": [
+              {
+                "id": "REF_AREA",
+                "position": 0,
+                "type": "Dimension",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).REF_AREA",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_AREA(1.0)"
+                }
+              },
+              {
+                "id": "FREQ",
+                "position": 1,
+                "type": "Dimension",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).FREQ",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_FREQ(1.0)"
+                }
+              },
+              {
+                "id": "MEASURE",
+                "position": 2,
+                "type": "Dimension",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).MEASURE",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_MEASURE(1.0)"
+                }
+              },
+              {
+                "id": "SEX",
+                "position": 3,
+                "type": "Dimension",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_CLASSIF_TYPE(1.0).SEX",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_SEX(1.0)"
+                }
+              },
+              {
+                "id": "AGE",
+                "position": 4,
+                "type": "Dimension",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_CLASSIF_TYPE(1.0).AGE",
+                "localRepresentation": {
+                  "enumeration": "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ILO:CL_AGE(1.0)"
+                }
+              }
+            ],
+            "timeDimensions": [
+              {
+                "id": "TIME_PERIOD",
+                "position": 5,
+                "type": "TimeDimension",
+                "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).TIME_PERIOD",
+                "localRepresentation": {
+                  "textFormat": {
+                    "textType": "ObservationalTimePeriod",
+                    "isSequence": false,
+                    "isMultiLingual": false
+                  }
+                }
+              }
+            ]
+          },
+          "measureList": {
+            "id": "MeasureDescriptor",
+            "primaryMeasure": {
+              "id": "OBS_VALUE",
+              "conceptIdentity": "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept=ILO:CS_ILOSTAT(1.0).OBS_VALUE",
+              "localRepresentation": {
+                "textFormat": {
+                  "textType": "Double",
+                  "isSequence": false,
+                  "isMultiLingual": false
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "codelists": [
+      {
+        "id": "CL_AGE",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "Classification: AGE",
+        "isPartial": true,
+        "codes": [
+          {
+            "id": "AGE_YTHADULT",
+            "name": "Youth and adults",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_AGGREGATE",
+            "name": "Aggregate age bands",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_YTHADULT_YGE15",
+            "name": "15+",
+            "parent": "AGE_YTHADULT",
+            "annotations": [
+              {
+                "title": "Y",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_YTHADULT_Y15-64",
+            "name": "15-64",
+            "parent": "AGE_YTHADULT",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_YTHADULT_Y15-24",
+            "name": "15-24",
+            "parent": "AGE_YTHADULT",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_YTHADULT_YGE25",
+            "name": "25+",
+            "parent": "AGE_YTHADULT",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_AGGREGATE_YGE15",
+            "name": "15+",
+            "parent": "AGE_AGGREGATE",
+            "annotations": [
+              {
+                "title": "Y",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_AGGREGATE_Y15-24",
+            "name": "15-24",
+            "parent": "AGE_AGGREGATE",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "AGE_AGGREGATE_Y25-54",
+            "name": "25-54",
+            "parent": "AGE_AGGREGATE",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "CL_AREA",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "Reference Area",
+        "isPartial": true,
+        "codes": [
+          {
+            "id": "ABW",
+            "name": "Aruba"
+          },
+          {
+            "id": "KEN",
+            "name": "Kenya"
+          },
+          {
+            "id": "USA",
+            "name": "United States of America"
+          },
+          {
+            "id": "X01",
+            "name": "World"
+          },
+          {
+            "id": "X06",
+            "name": "Africa"
+          }
+        ]
+      },
+      {
+        "id": "CL_FREQ",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "FREQ",
+        "isPartial": true,
+        "codes": [
+          {
+            "id": "A",
+            "name": "Annual"
+          },
+          {
+            "id": "Q",
+            "name": "Quarterly"
+          },
+          {
+            "id": "M",
+            "name": "Monthly"
+          }
+        ]
+      },
+      {
+        "id": "CL_MEASURE",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "Measure",
+        "isPartial": true,
+        "codes": [
+          {
+            "id": "UNE_DEAP_RT",
+            "name": "Unemployment rate (previous ILO definition - ICLS13)"
+          }
+        ]
+      },
+      {
+        "id": "CL_SEX",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "Classification: SEX",
+        "isPartial": true,
+        "codes": [
+          {
+            "id": "SEX_T",
+            "name": "Total",
+            "annotations": [
+              {
+                "title": "Y",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "SEX_M",
+            "name": "Male",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "SEX_F",
+            "name": "Female",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          },
+          {
+            "id": "SEX_O",
+            "name": "Other",
+            "annotations": [
+              {
+                "title": "N",
+                "type": "IS_TOTAL"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "CL_UNIT_MEASURE",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "UNIT_MEASURE",
+        "isPartial": false,
+        "codes": [
+          {
+            "id": "PS",
+            "name": "Persons"
+          },
+          {
+            "id": "PT",
+            "name": "Percentage"
+          },
+          {
+            "id": "LC",
+            "name": "Local currency"
+          }
+        ]
+      },
+      {
+        "id": "CL_UNIT_MEASURE_TYPE",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "UNIT_MEASURE_TYPE",
+        "isPartial": false,
+        "codes": [
+          {
+            "id": "NB",
+            "name": "Number"
+          },
+          {
+            "id": "RT",
+            "name": "Rate"
+          }
+        ]
+      },
+      {
+        "id": "CL_UNIT_MULT",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "name": "UNIT_MULT",
+        "isPartial": false,
+        "codes": [
+          {
+            "id": "0",
+            "name": "Units"
+          },
+          {
+            "id": "3",
+            "name": "Thousands"
+          },
+          {
+            "id": "6",
+            "name": "Millions"
+          }
+        ]
+      }
+    ],
+    "contentConstraints": [
+      {
+        "id": "CCA_DF_UNE_DEAP_SEX_AGE_RT",
+        "version": "1.0",
+        "agencyID": "ILO",
+        "type": "Actual",
+        "constraintAttachment": {
+          "dataflows": [
+            "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=ILO:DF_UNE_DEAP_SEX_AGE_RT(1.0)"
+          ]
+        },
+        "cubeRegions": [
+          {
+            "isIncluded": true,
+            "keyValues": [
+              {
+                "id": "REF_AREA",
+                "values": ["ABW", "KEN", "USA", "X06", "X01"]
+              },
+              {
+                "id": "FREQ",
+                "values": ["A", "Q", "M"]
+              },
+              {
+                "id": "MEASURE",
+                "values": ["UNE_DEAP_RT"]
+              },
+              {
+                "id": "SEX",
+                "values": ["SEX_T", "SEX_M", "SEX_F", "SEX_O"]
+              },
+              {
+                "id": "AGE",
+                "values": [
+                  "AGE_YTHADULT",
+                  "AGE_AGGREGATE",
+                  "AGE_YTHADULT_YGE15",
+                  "AGE_YTHADULT_Y15-64",
+                  "AGE_YTHADULT_Y15-24",
+                  "AGE_YTHADULT_YGE25",
+                  "AGE_AGGREGATE_YGE15",
+                  "AGE_AGGREGATE_Y15-24",
+                  "AGE_AGGREGATE_Y25-54"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "meta": {
+    "schema": "https://raw.githubusercontent.com/sdmx-twg/sdmx-json/develop/structure-message/tools/schemas/1.0/sdmx-json-structure-schema.json",
+    "contentLanguages": ["en"],
+    "id": "IDREF46",
+    "prepared": "2026-09-26T14:55:22Z",
+    "test": false
+  }
+}

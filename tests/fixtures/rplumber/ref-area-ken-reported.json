@@ -1,0 +1,326 @@
+[
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 68.698,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 36.443,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 73.795,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 39.293,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 64.105,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 33.721,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 19575.268,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 3073.553,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 10152.169,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 1695.538,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 9423.099,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 1378.014,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 64.861,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 31.948,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 70.968,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 36.077,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 59.358,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 28.004,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_NIFL_SEX_RT",
+    "sex": "SEX_T",
+    "time": "2019",
+    "obs_value": 86.489,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_NIFL_SEX_RT",
+    "sex": "SEX_M",
+    "time": "2019",
+    "obs_value": 83.125,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EMP_NIFL_SEX_RT",
+    "sex": "SEX_F",
+    "time": "2019",
+    "obs_value": 90.187,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 5.585,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 12.335,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE25",
+    "time": "2021",
+    "obs_value": 4.211,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 3.831,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 8.185,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_M",
+    "classif1": "AGE_YTHADULT_YGE25",
+    "time": "2021",
+    "obs_value": 2.908,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2021",
+    "obs_value": 7.405,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_Y15-24",
+    "time": "2021",
+    "obs_value": 16.954,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_F",
+    "classif1": "AGE_YTHADULT_YGE25",
+    "time": "2021",
+    "obs_value": 5.544,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EIP_NEET_SEX_RT",
+    "sex": "SEX_T",
+    "time": "2021",
+    "obs_value": 18.503,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EIP_NEET_SEX_RT",
+    "sex": "SEX_M",
+    "time": "2021",
+    "obs_value": 12.08,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "KEN",
+    "source": "BX:3465",
+    "indicator": "EIP_NEET_SEX_RT",
+    "sex": "SEX_F",
+    "time": "2021",
+    "obs_value": 24.637,
+    "note_source": "R1:3513"
+  }
+]

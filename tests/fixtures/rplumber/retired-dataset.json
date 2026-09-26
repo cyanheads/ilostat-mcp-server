@@ -1,0 +1,4 @@
+{
+  "error": "deprecated or invalid dataset id=FOO_BAR_A",
+  "documentation": "check workflow and id with: https://rplumber.ilo.org/metadata/toc/indicator?lang=en&format=.csv"
+}

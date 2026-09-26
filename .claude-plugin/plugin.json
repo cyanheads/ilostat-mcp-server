@@ -25,6 +25,44 @@
     "statistics",
     "open-data"
   ],
+  "userConfig": {
+    "ILOSTAT_CATALOG_REFRESH_HOURS": {
+      "type": "number",
+      "title": "Catalog refresh interval (hours)",
+      "description": "Hours between checks of the ILOSTAT tables of contents (1–168).",
+      "default": 6
+    },
+    "ILOSTAT_MAX_ROWS": {
+      "type": "number",
+      "title": "Row ceiling per query",
+      "description": "Ceiling on the rows one query may return or stage (1,000–2,000,000).",
+      "default": 500000
+    },
+    "ILOSTAT_PREVIEW_CHARS": {
+      "type": "number",
+      "title": "Inline preview budget (characters)",
+      "description": "Inline preview budget in serialized characters; a larger result is staged as a dataframe.",
+      "default": 40000
+    },
+    "ILOSTAT_CACHE_TTL_SECONDS": {
+      "type": "number",
+      "title": "Response cache TTL (seconds)",
+      "description": "Seconds a small upstream data response stays cached (0 disables the cache).",
+      "default": 900
+    },
+    "ILOSTAT_DATASET_TTL_SECONDS": {
+      "type": "number",
+      "title": "Dataframe TTL (seconds)",
+      "description": "Per-table TTL for staged dataframes, in seconds (at least 60).",
+      "default": 86400
+    },
+    "ILOSTAT_DATAFRAME_DROP_ENABLED": {
+      "type": "boolean",
+      "title": "Enable dataframe drop",
+      "description": "Expose ilostat_dataframe_drop; staged dataframes otherwise expire on their TTL.",
+      "default": false
+    }
+  },
   "mcpServers": {
     "ilostat-mcp-server": {
       "command": "npx",
@@ -33,7 +71,13 @@
         "@cyanheads/ilostat-mcp-server"
       ],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "ILOSTAT_CATALOG_REFRESH_HOURS": "${user_config.ILOSTAT_CATALOG_REFRESH_HOURS}",
+        "ILOSTAT_MAX_ROWS": "${user_config.ILOSTAT_MAX_ROWS}",
+        "ILOSTAT_PREVIEW_CHARS": "${user_config.ILOSTAT_PREVIEW_CHARS}",
+        "ILOSTAT_CACHE_TTL_SECONDS": "${user_config.ILOSTAT_CACHE_TTL_SECONDS}",
+        "ILOSTAT_DATASET_TTL_SECONDS": "${user_config.ILOSTAT_DATASET_TTL_SECONDS}",
+        "ILOSTAT_DATAFRAME_DROP_ENABLED": "${user_config.ILOSTAT_DATAFRAME_DROP_ENABLED}"
       }
     }
   }

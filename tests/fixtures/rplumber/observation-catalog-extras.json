@@ -1,0 +1,287 @@
+{
+  "indicatorToc": [
+    {
+      "id": "EAP_2WAP_SEX_AGE_RT_A",
+      "indicator": "EAP_2WAP_SEX_AGE_RT",
+      "indicator.label": "Labour force participation rate by sex and age -- ILO modelled estimates, Nov. 2025 (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EAP_2WAP_RT",
+      "rep_var.label": "Labour force participation rate (ILO modelled estimates)",
+      "classification": "SEX_AGE",
+      "classif.labels": "sex, age",
+      "data.start": 1990,
+      "data.end": 2027,
+      "last.update": "02/12/2025 16:36:06",
+      "n.records": 282528,
+      "n.records.all": 282528,
+      "n.ref_area": 276,
+      "with.region": "Y",
+      "subject": "EAP",
+      "subject.label": "Labour force",
+      "database": "ILOEST",
+      "database.label": "ILO Modelled Estimates (ILOEST)"
+    },
+    {
+      "id": "EMP_DWAP_SEX_AGE_RT_A",
+      "indicator": "EMP_DWAP_SEX_AGE_RT",
+      "indicator.label": "Employment-to-population ratio by sex and age (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EMP_DWAP_RT",
+      "rep_var.label": "Employment-to-population ratio (previous ILO definition - ICLS13)",
+      "classification": "SEX_AGE",
+      "classif.labels": "sex, age",
+      "data.start": 1947,
+      "data.end": 2027,
+      "last.update": "24/09/2026 07:10:19",
+      "n.records": 320707,
+      "n.records.all": 360989,
+      "n.ref_area": 312,
+      "with.region": "Y",
+      "subject": "EMP",
+      "subject.label": "Employment",
+      "database": "LFS",
+      "database.label": "Labour Force Statistics (LFS)"
+    },
+    {
+      "id": "EMP_2WAP_SEX_AGE_RT_A",
+      "indicator": "EMP_2WAP_SEX_AGE_RT",
+      "indicator.label": "Employment-to-population ratio by sex and age -- ILO modelled estimates, Nov. 2025 (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EMP_2WAP_RT",
+      "rep_var.label": "Employment-to-population ratio (ILO modelled estimates)",
+      "classification": "SEX_AGE",
+      "classif.labels": "sex, age",
+      "data.start": 1991,
+      "data.end": 2027,
+      "last.update": "02/12/2025 12:33:47",
+      "n.records": 91692,
+      "n.records.all": 91692,
+      "n.ref_area": 276,
+      "with.region": "Y",
+      "subject": "EMP",
+      "subject.label": "Employment",
+      "database": "ILOEST",
+      "database.label": "ILO Modelled Estimates (ILOEST)"
+    },
+    {
+      "id": "EIP_NEET_SEX_RT_A",
+      "indicator": "EIP_NEET_SEX_RT",
+      "indicator.label": "NEET rate: Share of youth not in employment, education or training by sex (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EIP_NEET_RT",
+      "rep_var.label": "NEET rate: Share of youth not in employment, education or training (previous ILO definition - ICLS13)",
+      "classification": "SEX",
+      "classif.labels": "sex",
+      "data.start": 1970,
+      "data.end": 2027,
+      "last.update": "24/09/2026 07:10:19",
+      "n.records": 13751,
+      "n.records.all": 14618,
+      "n.ref_area": 278,
+      "with.region": "Y",
+      "subject": "LUU",
+      "subject.label": "Unemployment and labour underutilization",
+      "database": "LFS",
+      "database.label": "Labour Force Statistics (LFS)"
+    },
+    {
+      "id": "EIP_2EET_SEX_RT_A",
+      "indicator": "EIP_2EET_SEX_RT",
+      "indicator.label": "NEET rate: Share of youth not in employment, education or training by sex -- ILO modelled estimates, Nov. 2025 (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EIP_2EET_RT",
+      "rep_var.label": "NEET rate: Share of youth not in employment, education or training (ILO modelled estimates)",
+      "classification": "SEX",
+      "classif.labels": "sex",
+      "data.start": 2005,
+      "data.end": 2027,
+      "last.update": "02/12/2025 10:34:13",
+      "n.records": 18972,
+      "n.records.all": 18972,
+      "n.ref_area": 276,
+      "with.region": "Y",
+      "subject": "LUU",
+      "subject.label": "Unemployment and labour underutilization",
+      "database": "ILOEST",
+      "database.label": "ILO Modelled Estimates (ILOEST)"
+    },
+    {
+      "id": "EMP_NIFL_SEX_RT_A",
+      "indicator": "EMP_NIFL_SEX_RT",
+      "indicator.label": "Informal employment rate by sex (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EMP_NIFL_RT",
+      "rep_var.label": "Informal employment rate (previous ILO definition - ICLS13)",
+      "classification": "SEX",
+      "classif.labels": "sex",
+      "data.start": 1997,
+      "data.end": 2027,
+      "last.update": "25/09/2026 07:06:48",
+      "n.records": 10360,
+      "n.records.all": 10568,
+      "n.ref_area": 234,
+      "with.region": "Y",
+      "subject": "IFL",
+      "subject.label": "Informal economy",
+      "database": "LFS",
+      "database.label": "Labour Force Statistics (LFS)"
+    },
+    {
+      "id": "EMP_2IFL_SEX_RT_A",
+      "indicator": "EMP_2IFL_SEX_RT",
+      "indicator.label": "Informal employment rate by sex -- ILO modelled estimates, Nov. 2025 (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EMP_2IFL_RT",
+      "rep_var.label": "Informal employment rate (ILO modelled estimates)",
+      "classification": "SEX",
+      "classif.labels": "sex",
+      "data.start": 2004,
+      "data.end": 2027,
+      "last.update": "06/03/2026 17:37:06",
+      "n.records": 6264,
+      "n.records.all": 6264,
+      "n.ref_area": 87,
+      "with.region": "Y",
+      "subject": "IFL",
+      "subject.label": "Informal economy",
+      "database": "ILOEST",
+      "database.label": "ILO Modelled Estimates (ILOEST)"
+    },
+    {
+      "id": "EMP_TEMP_SEX_AGE_NB_A",
+      "indicator": "EMP_TEMP_SEX_AGE_NB",
+      "indicator.label": "Employment by sex and age (thousands)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EMP_TEMP_NB",
+      "rep_var.label": "Employment (previous ILO definition - ICLS13)",
+      "classification": "SEX_AGE",
+      "classif.labels": "sex, age",
+      "data.start": 1947,
+      "data.end": 2025,
+      "last.update": "24/09/2026 07:10:19",
+      "n.records": 308057,
+      "n.records.all": 392986,
+      "n.ref_area": 226,
+      "subject": "EMP",
+      "subject.label": "Employment",
+      "database": "LFS",
+      "database.label": "Labour Force Statistics (LFS)"
+    },
+    {
+      "id": "EMP_2EMP_SEX_AGE_NB_A",
+      "indicator": "EMP_2EMP_SEX_AGE_NB",
+      "indicator.label": "Employment by sex and age -- ILO modelled estimates, Nov. 2025 (thousands)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "EMP_2EMP_NB",
+      "rep_var.label": "Employment (ILO modelled estimates)",
+      "classification": "SEX_AGE",
+      "classif.labels": "sex, age",
+      "data.start": 1991,
+      "data.end": 2027,
+      "last.update": "02/12/2025 12:33:47",
+      "n.records": 91692,
+      "n.records.all": 91692,
+      "n.ref_area": 276,
+      "with.region": "Y",
+      "subject": "EMP",
+      "subject.label": "Employment",
+      "database": "ILOEST",
+      "database.label": "ILO Modelled Estimates (ILOEST)"
+    },
+    {
+      "id": "SDG_0111_SEX_AGE_RT_A",
+      "indicator": "SDG_0111_SEX_AGE_RT",
+      "indicator.label": "SDG indicator 1.1.1: Working poverty rate by sex and age (%)",
+      "freq": "A",
+      "freq.label": "Annual",
+      "rep_var": "SDG_0111_RT",
+      "rep_var.label": "SDG indicator 1.1.1: Working poverty rate",
+      "classification": "SEX_AGE",
+      "classif.labels": "sex, age",
+      "data.start": 2000,
+      "data.end": 2025,
+      "last.update": "03/12/2025 18:32:36",
+      "n.records": 42030,
+      "n.records.all": 42030,
+      "n.ref_area": 193,
+      "with.region": "Y",
+      "subject": "POV",
+      "subject.label": "Working poverty",
+      "database": "ILOSDG",
+      "database.label": "SDG Labour Market Indicators (ILOSDG)"
+    }
+  ],
+  "dictionaries": {
+    "source": [
+      {
+        "source": "XA:1909",
+        "source.label": "ILO - Modelled Estimates",
+        "ref_area": "KEN"
+      },
+      {
+        "source": "XA:2174",
+        "source.label": "ILO - Modelled Estimates",
+        "ref_area": "USA"
+      },
+      {
+        "source": "XA:8405",
+        "source.label": "ILO - Modelled Estimates",
+        "ref_area": "X01"
+      },
+      {
+        "source": "XA:8372",
+        "source.label": "ILO - Modelled Estimates",
+        "ref_area": "X06"
+      },
+      {
+        "source": "BX:3465",
+        "source.label": "HS - Continuous household survey",
+        "ref_area": "KEN"
+      },
+      {
+        "source": "BB:7021",
+        "source.label": "HIES - Household Budget Survey",
+        "ref_area": "KEN"
+      }
+    ],
+    "note_source": [
+      {
+        "note_source": "R1:2803",
+        "note_source.label": "Repository: Annual estimates for 2025 are 11-month averages that exclude October. Data for October 2025 were not collected due to the federal government shutdown"
+      },
+      {
+        "note_source": "T2:85",
+        "note_source.label": "Age coverage - minimum age: 16 years old"
+      },
+      {
+        "note_source": "S3:19",
+        "note_source.label": "Data reference period: August"
+      }
+    ],
+    "note_indicator": [
+      {
+        "note_indicator": "I11:264",
+        "note_indicator.label": "Break in series: Methodology revised"
+      },
+      {
+        "note_indicator": "I12:422",
+        "note_indicator.label": "Frequency: Monthly"
+      }
+    ],
+    "note_classif": [
+      {
+        "note_classif": "C6:1058",
+        "note_classif.label": "Nonstandard age group: Excluding age 15"
+      }
+    ]
+  }
+}

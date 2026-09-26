@@ -26,6 +26,55 @@
       ],
       "environmentVariables": [
         {
+          "name": "ILOSTAT_CATALOG_REFRESH_HOURS",
+          "description": "Hours between checks of the ILOSTAT tables of contents (1–168).",
+          "format": "number",
+          "isRequired": false,
+          "default": "6"
+        },
+        {
+          "name": "ILOSTAT_MAX_ROWS",
+          "description": "Ceiling on the rows one query may return or stage (1,000–2,000,000).",
+          "format": "number",
+          "isRequired": false,
+          "default": "500000"
+        },
+        {
+          "name": "ILOSTAT_PREVIEW_CHARS",
+          "description": "Inline preview budget in serialized characters; a larger result is staged as a dataframe.",
+          "format": "number",
+          "isRequired": false,
+          "default": "40000"
+        },
+        {
+          "name": "ILOSTAT_CACHE_TTL_SECONDS",
+          "description": "Seconds a small upstream data response stays cached (0 disables the cache).",
+          "format": "number",
+          "isRequired": false,
+          "default": "900"
+        },
+        {
+          "name": "ILOSTAT_DATASET_TTL_SECONDS",
+          "description": "Per-table TTL for staged dataframes, in seconds (at least 60).",
+          "format": "number",
+          "isRequired": false,
+          "default": "86400"
+        },
+        {
+          "name": "ILOSTAT_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to expose ilostat_dataframe_drop; staged dataframes otherwise expire on their TTL.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "CANVAS_PROVIDER_TYPE",
+          "description": "DataCanvas engine for staged dataframes: duckdb (default) or none to turn dataframes off.",
+          "format": "string",
+          "isRequired": false,
+          "default": "duckdb"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -54,6 +103,55 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "ILOSTAT_CATALOG_REFRESH_HOURS",
+          "description": "Hours between checks of the ILOSTAT tables of contents (1–168).",
+          "format": "number",
+          "isRequired": false,
+          "default": "6"
+        },
+        {
+          "name": "ILOSTAT_MAX_ROWS",
+          "description": "Ceiling on the rows one query may return or stage (1,000–2,000,000).",
+          "format": "number",
+          "isRequired": false,
+          "default": "500000"
+        },
+        {
+          "name": "ILOSTAT_PREVIEW_CHARS",
+          "description": "Inline preview budget in serialized characters; a larger result is staged as a dataframe.",
+          "format": "number",
+          "isRequired": false,
+          "default": "40000"
+        },
+        {
+          "name": "ILOSTAT_CACHE_TTL_SECONDS",
+          "description": "Seconds a small upstream data response stays cached (0 disables the cache).",
+          "format": "number",
+          "isRequired": false,
+          "default": "900"
+        },
+        {
+          "name": "ILOSTAT_DATASET_TTL_SECONDS",
+          "description": "Per-table TTL for staged dataframes, in seconds (at least 60).",
+          "format": "number",
+          "isRequired": false,
+          "default": "86400"
+        },
+        {
+          "name": "ILOSTAT_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to expose ilostat_dataframe_drop; staged dataframes otherwise expire on their TTL.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "CANVAS_PROVIDER_TYPE",
+          "description": "DataCanvas engine for staged dataframes: duckdb (default) or none to turn dataframes off.",
+          "format": "string",
+          "isRequired": false,
+          "default": "duckdb"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
