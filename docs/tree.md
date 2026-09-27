@@ -1,6 +1,6 @@
 # ilostat-mcp-server - Directory Structure
 
-Generated on: 2026-09-27 00:23:45
+Generated on: 2026-09-27 02:53:57
 
 ```text
 ilostat-mcp-server/
@@ -24,6 +24,7 @@ ilostat-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -238,6 +239,7 @@ ilostat-mcp-server/
 │   │   │   └── parse-csv.test.ts
 │   │   ├── observations/
 │   │   │   ├── comparison.test.ts
+│   │   │   ├── observation-rows.test.ts
 │   │   │   └── response-cache.test.ts
 │   │   ├── rplumber/
 │   │   │   ├── rplumber-client.test.ts
@@ -258,6 +260,7 @@ ilostat-mcp-server/
 │   │   ├── dataframe-query.tool.test.ts
 │   │   ├── describe-indicator.tool.test.ts
 │   │   ├── get-country-profile.tool.test.ts
+│   │   ├── input-caps.test.ts
 │   │   ├── list-reference.tool.test.ts
 │   │   ├── query-indicator.tool.test.ts
 │   │   ├── search-indicators.tool.test.ts
@@ -273,6 +276,7 @@ ilostat-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** ilostat-mcp-server
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.8`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
