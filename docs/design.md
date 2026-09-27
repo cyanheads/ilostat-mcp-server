@@ -706,7 +706,8 @@ Never sent: `region` (documented, but live requests return every area regardless
 | `region=AFRICA` does not filter; `ILO_GEO_X06` as a `ref_area` matches nothing; a 234-code `ref_area` list works | Area groups expanded locally from the ToC into X-free `ref_area` lists |
 | `timefrom`/`timeto` read the year only; `time` accepts `YYYY`, `YYYYQn`, `YYYYMmm` | Separate year and period inputs |
 | `time` takes `+`-joined periods (`time=2014+2024` returns both years) | Compare's period mode fetches the period and its change base in one call |
-| `latestyear=TRUE` = latest period per area and indicator; honors `timeto` | `latest_only`; profile modelled call bounded by the cutoff |
+| `latestyear=TRUE` = latest period per area and indicator; honors `timeto`. It applies after the `sex`/`classif1` filters, so a slice requested alone gets its own latest period, but slices requested together share the newest one (CHN: 15+ unemployment 2022 drops youth's 2021) | `latest_only`; profile modelled call bounded by the cutoff; the shared-period gap is #12 |
+| No `User-Agent` → `200` with an empty body, not even the CSV header | Identifying `User-Agent` on every request |
 | `best_source=yes` hides secondary sources, and a secondary `source` filter under it returns nothing | `sources` defaults `source_selection` to `all` |
 | A `sex`/`classif1`/`classif2` filter leaves rows of a dataset lacking that column unfiltered (`sex=SEX_T` on `LAP_2GDP_NOC_RT_A` returns every row) | Query notice that the filter did not apply to that dataset |
 | Upstream is case-insensitive for `id` and `ref_area` | Uppercasing is safe and needed for dictionary lookup |
