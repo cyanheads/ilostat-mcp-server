@@ -7,9 +7,17 @@
  * Producers route their rows through {@link routeRows}: inline when they fit the
  * preview, staged in full through the framework's `spillover()` when they do not,
  * refused when they pass the row ceiling, and cut to the preview when the canvas
- * is off or staging fails. SQL runs through the framework gate with system
+ * is off or staging fails. A tenant holds at most {@link STAGING_ROW_BUDGET} rows
+ * in {@link STAGING_DATAFRAME_CAP} dataframes: a new table evicts the oldest
+ * others until it fits, one admission per tenant at a time, and one larger than
+ * the row budget is never kept.
+ * SQL runs through the framework gate with system
  * catalogs denied; its rejections are rebuilt with the calling tool's contract
  * recovery, and a canvas whose DuckDB engine cannot load fails `canvas_unavailable`.
+ * Engine and filesystem error text reaches the caller, in an error or a
+ * `ctx.log` warning, only with its quoted paths redacted.
+ * Where every caller shares one canvas (HTTP with auth `none`), listing every
+ * dataframe is off; a dataframe is reached by its exact name only.
  * @module services/canvas-bridge/canvas-bridge
  */
 
@@ -22,6 +30,7 @@ import {
   type SpilloverResult,
   spillover,
 } from '@cyanheads/mcp-ts-core/canvas';
+import { config } from '@cyanheads/mcp-ts-core/config';
 import {
   internalError,
   JsonRpcErrorCode,
@@ -30,10 +39,11 @@ import {
   serviceUnavailable,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
+import { ErrorHandler, idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { ATTRIBUTION } from '@/services/attribution.js';
 import type { Basis } from '@/services/basis/basis.js';
+import { mintedDataframeName, scanSql } from '@/services/canvas-bridge/scan-sql.js';
 
 /** One dataset a staged dataframe holds. */
 export interface DataframeDataset {
@@ -67,6 +77,8 @@ export interface DataframeMeta extends Provenance {
 
 /** A staged table as producers report it. */
 export interface StagedTable {
+  /** Dataframes dropped, oldest first, to make room for this one. */
+  evicted: string[];
   expiresAt: string;
   name: string;
   rowCount: number;
@@ -85,7 +97,10 @@ export type RouteOutcome<T> =
 
 export interface RouteOptions<T> {
   ctx: Context;
-  /** Ceiling on staged rows; passing it drops the table and reports `too_large`. */
+  /**
+   * Ceiling on staged rows, at most {@link STAGING_ROW_BUDGET} (the budget when
+   * unset); passing it drops the table and reports `too_large`.
+   */
   maxRows?: number;
   /** Inline preview budget in serialized characters, measured on the rows as given. */
   previewChars: number;
@@ -103,10 +118,17 @@ export interface BridgeQueryOptions {
   sourceTool: string;
 }
 
+/** Staged rows one tenant may hold across its dataframes. */
+export const STAGING_ROW_BUDGET = 1_000_000;
+/** Dataframes one tenant may hold. */
+export const STAGING_DATAFRAME_CAP = 100;
+
 const META_PREFIX = 'df-meta/';
 const CANVAS_ID_KEY = 'canvas-id';
 const TABLE_NAME_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-const TABLE_NAME_PATTERN = /\bdf_[A-Za-z0-9]{5}_[A-Za-z0-9]{5}\b/gi;
+/** The `missing_table` recovery where listing is off, in place of the contract's pointer at a listing. */
+const UNLISTED_MISSING_TABLE_HINT =
+  'Check the name against the df_XXXXX_XXXXX name the producing tool returned, or re-run the producing tool to stage the data again.';
 
 /** Framework SQL-gate and engine reasons the dataframe tools declare, rebuilt with their contract recovery. */
 const DECLARED_CANVAS_REASONS = new Set([
@@ -130,6 +152,47 @@ export function dataframeNotice(table: StagedTable): string {
   return `Full result staged as ${table.name} (${table.rowCount} rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL.`;
 }
 
+/** The sentence naming the dataframes a new one evicted; one helper for every tool that stages. */
+export function evictionNotice(evicted: readonly string[]): string {
+  return `Evicted ${evicted.join(', ')} (oldest first) to keep this tenant within ${STAGING_ROW_BUDGET.toLocaleString('en-US')} staged rows and ${STAGING_DATAFRAME_CAP} dataframes.`;
+}
+
+/** A quoted absolute filesystem path, as DuckDB (`"…"`) and Node's fs errors (`'…'`) print one. */
+const QUOTED_PATH = /(["'])(?:[A-Za-z]:)?[\\/][^"'\r\n]+\1/g;
+
+/**
+ * `text` with every quoted absolute path replaced by `[path]`. A DuckDB I/O error
+ * names its spill file under `CANVAS_TEMP_PATH`, and a failed `mkdir` of that
+ * root names the directory; neither reaches the caller.
+ */
+export function redactPaths(text: string): string {
+  return text.replace(QUOTED_PATH, '$1[path]$1');
+}
+
+/** A thrown value's message for the client-visible `ctx.log`, paths redacted. */
+function logText(error: unknown): string {
+  return redactPaths(error instanceof Error ? error.message : String(error));
+}
+
+/**
+ * `error` with the paths redacted from the message a caller would see; the same
+ * value when it names none. The code is the one the framework gives the thrown
+ * value (an McpError's own; a raw engine or filesystem error's, classified from
+ * its name and message), an McpError keeps its data, and `error` is the cause.
+ */
+function withoutPaths(error: unknown): unknown {
+  const { code, message } = ErrorHandler.classifyOnly(error);
+  const redacted = redactPaths(message);
+  if (redacted === message) return error;
+  const data = error instanceof McpError ? error.data : undefined;
+  return new McpError(code, redacted, data, { cause: error });
+}
+
+/** Rethrows `error` through {@link withoutPaths}; the `.catch()` of an engine call. */
+function rethrowWithoutPaths(error: unknown): never {
+  throw withoutPaths(error);
+}
+
 /** `canvas_unavailable`, carrying the calling tool's recovery. */
 function canvasUnavailable(ctx: Context, cause?: unknown): McpError {
   return serviceUnavailable(
@@ -139,38 +202,30 @@ function canvasUnavailable(ctx: Context, cause?: unknown): McpError {
   );
 }
 
-/** A single-quoted string literal or a double-quoted identifier, whichever opens first. */
-const QUOTED_PATTERN = /'(?:[^']|'')*'|"(?:[^"]|"")*"/g;
-
 /**
- * Blanks single-quoted string literals so a `df_` name inside one is never read
- * as a table reference. A double-quoted identifier names a table, so it is kept;
- * it is matched in the same left-to-right pass so an apostrophe inside it cannot
- * open a literal. An opening quote with a like quote anywhere after it always
- * matches, so at most one opening of each kind scans to the end unmatched: the
- * pass stays linear in the SQL's length.
+ * Whether a caller may list every dataframe on its tenant's canvas, from the
+ * framework config. False on HTTP with auth `none`: every caller resolves to
+ * tenant `default` there, so all of them share one canvas, and a listing would
+ * show each caller the others' dataframes and the SQL behind them.
  */
-function stripStringLiterals(sql: string): string {
-  return sql.replace(QUOTED_PATTERN, (quoted) => (quoted.startsWith("'") ? "''" : quoted));
-}
-
-/**
- * Minted dataframe names the SQL references, in any case, folded to the minted
- * `df_XXXXX_XXXXX` form (DuckDB identifiers are case-insensitive).
- */
-function referencedDataframes(sql: string): string[] {
-  const names = stripStringLiterals(sql).match(TABLE_NAME_PATTERN) ?? [];
-  return [...new Set(names.map((name) => `df_${name.slice(3).toUpperCase()}`))];
+export function dataframeListingAllowed(): boolean {
+  return !(config.mcpTransportType === 'http' && config.mcpAuthMode === 'none');
 }
 
 export interface CanvasBridgeOptions {
   dropEnabled: boolean;
+  /** Whether describe may list every dataframe; see {@link dataframeListingAllowed}. */
+  listingEnabled: boolean;
   now?: () => Date;
   /** Per-table TTL for staged dataframes. */
   tableTtlMs: number;
 }
 
 export class CanvasBridge {
+  /** The last admission queued per tenant; settles, never rejects, once it has run. */
+  private readonly admissions = new Map<string | undefined, Promise<void>>();
+  /** The mint in flight per tenant. */
+  private readonly mints = new Map<string | undefined, Promise<CanvasInstance>>();
   private readonly now: () => Date;
 
   constructor(
@@ -180,22 +235,51 @@ export class CanvasBridge {
     this.now = options.now ?? (() => new Date());
   }
 
+  /** Whether describe may list every dataframe; off where every caller shares one canvas. */
+  get listingEnabled(): boolean {
+    return this.options.listingEnabled;
+  }
+
   /**
    * The tenant's shared canvas, minting one when the stored ID is unknown or
-   * expired. A minted canvas starts empty, so every provenance record left in
+   * expired. One mint per tenant runs at a time, and it re-reads the stored ID
+   * first, so concurrent calls that find no live canvas all land on the one
+   * minted; a second mint would orphan a canvas that counts toward the
+   * framework's per-tenant cap until it expires, and clear the provenance of
+   * tables the first call had already staged.
+   */
+  async acquire(ctx: Context): Promise<CanvasInstance> {
+    const live = await this.acquireStored(ctx);
+    if (live) return live;
+    const pending = this.mints.get(ctx.tenantId);
+    if (pending) return await this.canvas.acquire((await pending).canvasId, ctx);
+    const mint = this.mint(ctx).finally(() => this.mints.delete(ctx.tenantId));
+    this.mints.set(ctx.tenantId, mint);
+    return await mint;
+  }
+
+  /** The canvas the stored ID names, or `undefined` once an unknown or expired ID is cleared. */
+  private async acquireStored(ctx: Context): Promise<CanvasInstance | undefined> {
+    const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
+    if (!stored) return undefined;
+    try {
+      return await this.canvas.acquire(stored, ctx);
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+      await ctx.state.delete(CANVAS_ID_KEY);
+      return undefined;
+    }
+  }
+
+  /**
+   * A new canvas for the tenant, unless one minted since {@link acquire} read the
+   * stored ID. A minted canvas starts empty, so every provenance record left in
    * `ctx.state` names a table that is gone: they are cleared before the new ID
    * is stored.
    */
-  async acquire(ctx: Context): Promise<CanvasInstance> {
-    const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
-    if (stored) {
-      try {
-        return await this.canvas.acquire(stored, ctx);
-      } catch (error) {
-        if (ctx.signal.aborted) throw error;
-        await ctx.state.delete(CANVAS_ID_KEY);
-      }
-    }
+  private async mint(ctx: Context): Promise<CanvasInstance> {
+    const live = await this.acquireStored(ctx);
+    if (live) return live;
     const instance = await this.canvas.acquire(undefined, ctx);
     const staleKeys: string[] = [];
     for await (const { key } of this.iterateMeta(ctx)) staleKeys.push(key);
@@ -204,7 +288,11 @@ export class CanvasBridge {
     return instance;
   }
 
-  /** {@link acquire}, with an engine that cannot load reported as `canvas_unavailable`. */
+  /**
+   * {@link acquire}, with an engine that cannot load reported as
+   * `canvas_unavailable` and any other failure's paths redacted: a temp root
+   * the canvas cannot create is named in the `mkdir` error.
+   */
   async acquireForTool(ctx: Context): Promise<CanvasInstance> {
     try {
       return await this.acquire(ctx);
@@ -212,7 +300,7 @@ export class CanvasBridge {
       if (error instanceof McpError && error.code === JsonRpcErrorCode.ConfigurationError) {
         throw canvasUnavailable(ctx, error);
       }
-      throw error;
+      throw withoutPaths(error);
     }
   }
 
@@ -247,9 +335,69 @@ export class CanvasBridge {
   }
 
   /**
+   * {@link recordTable} once the tenant has room for the new table: its other
+   * dataframes are dropped, oldest first, until the new one fits within
+   * {@link STAGING_ROW_BUDGET} rows and {@link STAGING_DATAFRAME_CAP} dataframes,
+   * totalled from the `df-meta/` records. The caller keeps a single table within
+   * the row budget. The log carries only the eviction count, never a name.
+   * Admissions on a tenant run one at a time, each once the one before it has
+   * settled, so each totals the records the others wrote: run side by side, two
+   * admissions read the same records, each found room, and together they passed
+   * the budget.
+   */
+  async admitTable(
+    ctx: Context,
+    instance: CanvasInstance,
+    table: { columnSchema: ColumnSchema[]; rowCount: number; tableName: string },
+    provenance: Provenance,
+  ): Promise<{ evicted: string[]; meta: DataframeMeta }> {
+    const tenant = ctx.tenantId;
+    const admission = (this.admissions.get(tenant) ?? Promise.resolve()).then(() =>
+      this.admitNow(ctx, instance, table, provenance),
+    );
+    const settled: Promise<void> = admission
+      .catch(() => undefined)
+      .then(() => {
+        if (this.admissions.get(tenant) === settled) this.admissions.delete(tenant);
+      });
+    this.admissions.set(tenant, settled);
+    return await admission;
+  }
+
+  /** {@link admitTable}'s eviction and record, run while no other admission on the tenant is. */
+  private async admitNow(
+    ctx: Context,
+    instance: CanvasInstance,
+    table: { columnSchema: ColumnSchema[]; rowCount: number; tableName: string },
+    provenance: Provenance,
+  ): Promise<{ evicted: string[]; meta: DataframeMeta }> {
+    const others: DataframeMeta[] = [];
+    for await (const { meta } of this.iterateMeta(ctx)) others.push(meta);
+    others.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    let rows = others.reduce((sum, meta) => sum + meta.rowCount, table.rowCount);
+    let count = others.length + 1;
+    const evicted: string[] = [];
+    for (const meta of others) {
+      if (rows <= STAGING_ROW_BUDGET && count <= STAGING_DATAFRAME_CAP) break;
+      await instance.drop(meta.tableName);
+      await ctx.state.delete(`${META_PREFIX}${meta.tableName}`);
+      rows -= meta.rowCount;
+      count--;
+      evicted.push(meta.tableName);
+    }
+    if (evicted.length > 0) {
+      ctx.log.info('Evicted dataframes to stay within the tenant staging budget', {
+        count: evicted.length,
+      });
+    }
+    return { evicted, meta: await this.recordTable(ctx, table, provenance) };
+  }
+
+  /**
    * Provenance of the staged dataframes, newest first; one name, or all. Expired
    * entries are swept first, and a record whose table is no longer on the canvas
-   * is deleted rather than listed.
+   * is deleted rather than listed. A named lookup reads that one table from the
+   * canvas, never the whole listing.
    */
   async describe(ctx: Context, tableName?: string): Promise<DataframeMeta[]> {
     const instance = await this.acquireForTool(ctx);
@@ -262,7 +410,10 @@ export class CanvasBridge {
     } else {
       for await (const entry of this.iterateMeta(ctx)) entries.push(entry);
     }
-    const tables = new Set((await instance.describe()).map((table) => table.name));
+    const onCanvas = await instance
+      .describe(tableName ? { tableName } : {})
+      .catch(rethrowWithoutPaths);
+    const tables = new Set(onCanvas.map((table) => table.name));
     const live: DataframeMeta[] = [];
     for (const { key, meta } of entries) {
       if (tables.has(meta.tableName)) live.push(meta);
@@ -272,29 +423,31 @@ export class CanvasBridge {
   }
 
   /**
-   * One read-only SELECT over the shared canvas, system catalogs denied. A
-   * referenced `df_` name with no provenance fails `missing_table` before the
-   * gate; `register_as` stores the result as a new dataframe with a fresh TTL
-   * and provenance inherited from the dataframes it read.
+   * One read-only SELECT over the shared canvas, system catalogs denied. The
+   * engine decides which tables exist; the `df_` identifiers {@link scanSql}
+   * finds outside comments and string literals serve for provenance and for
+   * naming a missing dataframe when the gate rejects a statement that reads
+   * without naming one itself (see {@link rewrap}). A statement that does not
+   * read keeps the gate's statement-type rejection (a write target is an unused
+   * name by design). `register_as` stores the result as a new dataframe with a
+   * fresh TTL and provenance inherited from the recorded dataframes the SQL
+   * names, evicting the oldest others as {@link admitTable} does; a result past
+   * {@link STAGING_ROW_BUDGET} rows is dropped and fails `register_as_too_large`.
    */
   async query(
     ctx: Context,
     sql: string,
     options: BridgeQueryOptions,
-  ): Promise<{ meta?: DataframeMeta; result: QueryResult }> {
+  ): Promise<{ evicted: string[]; meta?: DataframeMeta; result: QueryResult }> {
     const instance = await this.acquireForTool(ctx);
     await this.sweepExpired(ctx);
+    const scan = scanSql(sql);
     const parents: DataframeMeta[] = [];
-    for (const name of referencedDataframes(sql)) {
+    const unrecorded: string[] = [];
+    for (const name of scan.dataframes) {
       const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
-      if (!meta) {
-        throw notFound(`Dataframe ${name} does not exist or has expired.`, {
-          reason: 'missing_table',
-          tableName: name,
-          ...ctx.recoveryFor('missing_table'),
-        });
-      }
-      parents.push(meta);
+      if (meta) parents.push(meta);
+      else unrecorded.push(name);
     }
     const { registerAs } = options;
     if (registerAs && (await ctx.state.get(`${META_PREFIX}${registerAs}`)) !== null) {
@@ -303,7 +456,7 @@ export class CanvasBridge {
         {
           reason: 'register_as_clash',
           tableName: registerAs,
-          recovery: { hint: this.registerAsClashHint() },
+          ...this.recoveryFor(ctx, 'register_as_clash'),
         },
       );
     }
@@ -318,42 +471,63 @@ export class CanvasBridge {
         signal: ctx.signal,
       });
     } catch (error) {
-      throw this.rewrap(ctx, error);
+      throw this.rewrap(ctx, error, scan.reads ? unrecorded : undefined);
     }
-    if (!registerAs || !result.tableName) return { result };
+    const { tableName } = result;
+    if (!registerAs || !tableName) return { result, evicted: [] };
+    if (result.rowCount > STAGING_ROW_BUDGET) {
+      await instance.drop(tableName).catch(rethrowWithoutPaths);
+      throw validationError(
+        `register_as would store ${result.rowCount.toLocaleString('en-US')} rows, past the ${STAGING_ROW_BUDGET.toLocaleString('en-US')}-row staging budget; nothing was stored.`,
+        {
+          reason: 'register_as_too_large',
+          rowCount: result.rowCount,
+          rowBudget: STAGING_ROW_BUDGET,
+          ...ctx.recoveryFor('register_as_too_large'),
+        },
+      );
+    }
 
-    const tables = await instance.describe();
+    const [table] = await instance.describe({ tableName }).catch(rethrowWithoutPaths);
     const columnSchema =
-      tables.find((table) => table.name === result.tableName)?.columns ??
+      table?.columns ??
       result.columns.map((name): ColumnSchema => ({ name, type: 'VARCHAR', nullable: true }));
     const datasets = new Map<string, DataframeDataset>();
     for (const parent of parents) {
       for (const dataset of parent.datasets) datasets.set(dataset.datasetId, dataset);
     }
-    const meta = await this.recordTable(
-      ctx,
-      { tableName: result.tableName, rowCount: result.rowCount, columnSchema },
-      {
-        sourceTool: options.sourceTool,
-        queryParams: { sql, derived_from: parents.map((parent) => parent.tableName) },
-        datasets: [...datasets.values()],
-        attribution: ATTRIBUTION,
-      },
-    );
-    return { result, meta };
+    try {
+      const { evicted, meta } = await this.admitTable(
+        ctx,
+        instance,
+        { tableName, rowCount: result.rowCount, columnSchema },
+        {
+          sourceTool: options.sourceTool,
+          queryParams: { sql, derived_from: parents.map((parent) => parent.tableName) },
+          datasets: [...datasets.values()],
+          attribution: ATTRIBUTION,
+        },
+      );
+      return { result, meta, evicted };
+    } catch (error) {
+      // A table left without provenance would sit outside the budget.
+      await instance.drop(tableName).catch(() => false);
+      throw withoutPaths(error);
+    }
   }
 
   /**
    * Idempotent drop of the table, then its provenance; true when either existed.
-   * A failed table drop propagates with the provenance still recorded, so the
-   * dataframe stays listed rather than reported dropped while its table remains.
+   * A failed table drop propagates, its paths redacted, with the provenance still
+   * recorded, so the dataframe stays listed rather than reported dropped while its
+   * table remains.
    */
   async drop(ctx: Context, tableName: string): Promise<boolean> {
     const instance = await this.acquireForTool(ctx);
     await this.sweepExpired(ctx);
     const key = `${META_PREFIX}${tableName}`;
     const hadMeta = (await ctx.state.get(key)) !== null;
-    const dropped = await instance.drop(tableName);
+    const dropped = await instance.drop(tableName).catch(rethrowWithoutPaths);
     await ctx.state.delete(key);
     return dropped || hadMeta;
   }
@@ -368,7 +542,7 @@ export class CanvasBridge {
       await instance?.drop(meta.tableName).catch((error: unknown) => {
         ctx.log.warning('Expired dataframe drop failed', {
           tableName: meta.tableName,
-          error: error instanceof Error ? error.message : String(error),
+          error: logText(error),
         });
       });
       await ctx.state.delete(key);
@@ -381,21 +555,70 @@ export class CanvasBridge {
       : 'Choose another df_XXXXX_XXXXX name or omit register_as.';
   }
 
-  /** Rebuilds a declared gate or engine rejection with the calling tool's recovery. */
-  private rewrap(ctx: Context, error: unknown): unknown {
-    if (!(error instanceof McpError)) return error;
+  /**
+   * The calling tool's recovery for `reason`, resolved for this deployment where
+   * the contract's static text would mislead: the drop-aware clash hint, and a
+   * `missing_table` hint that points at no listing when listing is off.
+   */
+  private recoveryFor(ctx: Context, reason: string) {
+    if (reason === 'register_as_clash') return { recovery: { hint: this.registerAsClashHint() } };
+    if (reason === 'missing_table' && !this.options.listingEnabled) {
+      return { recovery: { hint: UNLISTED_MISSING_TABLE_HINT } };
+    }
+    return ctx.recoveryFor(reason);
+  }
+
+  /** `missing_table` naming dataframe `tableName`, in the minted form. */
+  private missingTable(ctx: Context, tableName: string, cause: unknown): McpError {
+    return notFound(
+      `Dataframe ${tableName} does not exist or has expired.`,
+      { reason: 'missing_table', tableName, ...this.recoveryFor(ctx, 'missing_table') },
+      { cause },
+    );
+  }
+
+  /**
+   * Rebuilds a declared gate or engine rejection with the calling tool's
+   * recovery. The gate tells a missing table or a bind error apart only for a
+   * statement opening with SELECT, WITH, or FROM, and rejects any other read
+   * that fails to prepare (one opening with a comment, `(`, VALUES, PIVOT,
+   * SUMMARIZE, …) as `non_select_statement`. Such a read is reported as
+   * `missing_table` for the first of `unrecorded`, the `df_` names it reads that
+   * have no provenance, and otherwise as `invalid_sql`. `unrecorded` is
+   * `undefined` for a statement that does not read. Any other rejection leaves
+   * with the paths in its message redacted: an engine I/O failure names a spill
+   * file under `CANVAS_TEMP_PATH`.
+   */
+  private rewrap(ctx: Context, error: unknown, unrecorded: readonly string[] | undefined): unknown {
+    if (!(error instanceof McpError)) return withoutPaths(error);
     if (error.code === JsonRpcErrorCode.ConfigurationError) return canvasUnavailable(ctx, error);
-    const data = (error.data ?? {}) as Record<string, unknown>;
+    const data: Record<string, unknown> = error.data ?? {};
+    const unpreparedRead =
+      unrecorded !== undefined &&
+      data.reason === 'non_select_statement' &&
+      data.statementType === 'UNKNOWN';
+    const missing =
+      data.reason === 'missing_table' && typeof data.tableName === 'string'
+        ? mintedDataframeName(data.tableName)
+        : unpreparedRead
+          ? unrecorded[0]
+          : undefined;
+    if (missing) return this.missingTable(ctx, missing, error);
+    if (unpreparedRead) {
+      return validationError(
+        'Canvas query failed to prepare.',
+        { reason: 'invalid_sql', ...this.recoveryFor(ctx, 'invalid_sql') },
+        { cause: error },
+      );
+    }
     const reason = data.reason === 'denied_function_in_plan' ? 'denied_function' : data.reason;
-    if (typeof reason !== 'string' || !DECLARED_CANVAS_REASONS.has(reason)) return error;
-    const recovery =
-      reason === 'register_as_clash'
-        ? { recovery: { hint: this.registerAsClashHint() } }
-        : ctx.recoveryFor(reason);
+    if (typeof reason !== 'string' || !DECLARED_CANVAS_REASONS.has(reason)) {
+      return withoutPaths(error);
+    }
     return new McpError(
       error.code,
-      error.message,
-      { ...data, reason, ...recovery },
+      redactPaths(error.message),
+      { ...data, reason, ...this.recoveryFor(ctx, reason) },
       { cause: error },
     );
   }
@@ -441,10 +664,12 @@ class PreviewTap<T> {
 
 /**
  * Routes a producer's rows: inline when they fit `previewChars`; staged in full
- * when they do not and a canvas is available; refused as `too_large` past
- * `maxRows`. With no canvas, or when staging fails, reading stops at the preview.
- * A failure of the source itself (the upstream stream) propagates; a canvas
- * failure only degrades. The source is always closed before this returns.
+ * when they do not and a canvas is available, evicting the tenant's oldest
+ * dataframes as {@link CanvasBridge.admitTable} does; refused as `too_large` past
+ * `maxRows`. With no canvas, or when staging fails, reading stops at the
+ * preview. A failure of the source
+ * itself (the upstream stream) propagates; a canvas failure only degrades. The
+ * source is always closed before this returns.
  */
 export async function routeRows<T extends Record<string, unknown>>(
   bridge: CanvasBridge | undefined,
@@ -486,7 +711,7 @@ export async function routeRows<T extends Record<string, unknown>>(
     } catch (error) {
       if (ctx.signal.aborted) throw error;
       ctx.log.warning('Dataframe canvas unavailable; returning the inline preview only', {
-        error: error instanceof Error ? error.message : String(error),
+        error: logText(error),
       });
       return await previewOnly('canvas_failed');
     }
@@ -502,12 +727,12 @@ export async function routeRows<T extends Record<string, unknown>>(
         tableName,
         ttlMs: bridge.tableTtlMs,
         signal: ctx.signal,
-        ...(options.maxRows === undefined ? {} : { caps: { maxRows: options.maxRows } }),
+        caps: { maxRows: options.maxRows ?? STAGING_ROW_BUDGET },
       });
     } catch (error) {
       if (sourceFailed || ctx.signal.aborted) throw error;
       ctx.log.warning('Staging the full result failed; returning the inline preview only', {
-        error: error instanceof Error ? error.message : String(error),
+        error: logText(error),
       });
       return await previewOnly('canvas_failed');
     }
@@ -518,21 +743,27 @@ export async function routeRows<T extends Record<string, unknown>>(
       return { kind: 'too_large' };
     }
     try {
-      const meta = await bridge.recordTable(
+      const { evicted, meta } = await bridge.admitTable(
         ctx,
+        instance,
         { tableName, rowCount: spilled.handle.rowCount, columnSchema: options.schema },
         options.provenance(),
       );
       return {
         kind: 'staged',
         rows: spilled.previewRows,
-        table: { name: meta.tableName, rowCount: meta.rowCount, expiresAt: meta.expiresAt },
+        table: {
+          name: meta.tableName,
+          rowCount: meta.rowCount,
+          expiresAt: meta.expiresAt,
+          evicted,
+        },
       };
     } catch (error) {
       if (ctx.signal.aborted) throw error;
       await instance.drop(tableName).catch(() => false);
       ctx.log.warning('Recording dataframe provenance failed; returning the inline preview only', {
-        error: error instanceof Error ? error.message : String(error),
+        error: logText(error),
       });
       return { kind: 'preview', rows: tap.rows, cause: 'canvas_failed' };
     }
@@ -558,6 +789,7 @@ export function initCanvasBridge(
         options ?? {
           tableTtlMs: getServerConfig().datasetTtlSeconds * 1000,
           dropEnabled: getServerConfig().dataframeDropEnabled,
+          listingEnabled: dataframeListingAllowed(),
         },
       )
     : undefined;

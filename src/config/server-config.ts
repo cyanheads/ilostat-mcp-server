@@ -22,10 +22,10 @@ const ServerConfigSchema = z.object({
     .number()
     .int()
     .min(1_000)
-    .max(2_000_000)
+    .max(1_000_000, 'At most 1,000,000, the staged rows one tenant may hold.')
     .default(500_000)
     .describe(
-      'Ceiling on the rows one query may return or stage (1,000–2,000,000). An unfiltered request estimated above it is refused before any upstream call; a filtered one that streams past it is refused and its partial dataframe dropped.',
+      'Ceiling on the rows one query may return or stage (1,000–1,000,000, the per-tenant staging row budget). An unfiltered request estimated above it is refused before any upstream call; a filtered one that streams past it is refused and its partial dataframe dropped.',
     ),
   previewChars: z.coerce
     .number()

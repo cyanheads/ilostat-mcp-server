@@ -10,12 +10,16 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  AreaGroupEchoSchema,
   BasisCountsSchema,
   DataframeSchema,
   DatasetMetaSchema,
   datasetMeta,
+  renderAreaGroup,
   renderBasisCounts,
+  renderDataframe,
   renderDatasetMeta,
+  stagedDataframe,
 } from '@/mcp-server/tools/observation-output.js';
 import {
   AREA_GROUP_MESSAGE,
@@ -48,14 +52,7 @@ const AppliedFiltersSchema = z
   .object({
     dataset_ids: z.array(z.string()).describe('Datasets requested.'),
     ref_areas: z.array(z.string()).optional().describe('Reference areas given, normalized.'),
-    area_group: z
-      .object({
-        code: z.string().describe('Area group code.'),
-        label: z.string().describe('Area group label.'),
-        member_count: z.number().describe('Member countries it expanded to.'),
-      })
-      .optional()
-      .describe('The area group and how many countries it expanded to.'),
+    area_group: AreaGroupEchoSchema,
     ref_area_count: z
       .number()
       .optional()
@@ -78,11 +75,7 @@ const AppliedFiltersSchema = z
 function renderAppliedFilters(filters: QueryAppliedFilters): string {
   const parts = [`datasets ${filters.dataset_ids.join(', ')}`];
   if (filters.ref_areas) parts.push(`ref_areas ${filters.ref_areas.join(', ')}`);
-  if (filters.area_group) {
-    parts.push(
-      `area_group ${filters.area_group.code} (${inlineText(filters.area_group.label)}, ${filters.area_group.member_count} countries)`,
-    );
-  }
+  if (filters.area_group) parts.push(renderAreaGroup(filters.area_group));
   if (filters.ref_area_count !== undefined) {
     parts.push(`${filters.ref_area_count} ${filters.ref_area_count === 1 ? 'area' : 'areas'} sent`);
   }
@@ -119,13 +112,13 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     sex: blankFreeArray(z.array(sexCodeInput()).max(4).optional()).describe(
       'Sex codes SEX_T, SEX_M, SEX_F, SEX_O; T/M/F/O and total/both/male/female/other are accepted.',
     ),
-    classif1: blankFreeArray(z.array(z.string()).max(100).optional()).describe(
+    classif1: blankFreeArray(z.array(z.string().max(64)).max(100).optional()).describe(
       'Codes of the first breakdown (e.g. AGE_YTHADULT_YGE15); case-insensitive. ilostat_describe_indicator lists the codes a dataset uses.',
     ),
-    classif2: blankFreeArray(z.array(z.string()).max(100).optional()).describe(
+    classif2: blankFreeArray(z.array(z.string().max(64)).max(100).optional()).describe(
       'Codes of the second breakdown, for datasets that have one; case-insensitive. ilostat_describe_indicator lists them.',
     ),
-    sources: blankFreeArray(z.array(z.string()).max(100).optional()).describe(
+    sources: blankFreeArray(z.array(z.string().max(64)).max(100).optional()).describe(
       "Source codes (e.g. BA:453); ilostat_list_reference topic sources with ref_area lists an area's sources. Without source_selection, setting sources switches it to all, since a secondary source matches nothing under best.",
     ),
     time: periodInput().describe(
@@ -390,15 +383,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
         basis_counts: { ...summary.basisCounts },
         complete: outcome.kind !== 'preview',
       },
-      ...(outcome.kind === 'staged'
-        ? {
-            dataframe: {
-              name: outcome.table.name,
-              row_count: outcome.table.rowCount,
-              expires_at: outcome.table.expiresAt,
-            },
-          }
-        : {}),
+      ...(outcome.kind === 'staged' ? { dataframe: stagedDataframe(outcome.table) } : {}),
       attribution: ATTRIBUTION,
     };
   },
@@ -407,20 +392,22 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     const lines: string[] = [];
     for (const meta of result.datasets) lines.push(...renderDatasetMeta(meta, '##'), '');
 
-    const groups = new Map<string, (typeof result.rows)[number][]>();
-    for (const row of result.rows) {
-      const key = [row.dataset_id, row.ref_area, row.sex, row.classif1, row.classif2, row.source]
+    const groups = Map.groupBy(result.rows, (row) =>
+      [row.dataset_id, row.ref_area, row.sex, row.classif1, row.classif2, row.source]
         .filter((part) => part !== undefined)
-        .join(' · ');
-      const group = groups.get(key);
-      if (group) group.push(row);
-      else groups.set(key, [row]);
-    }
-    lines.push(`### Observations (${result.rows.length} of ${result.row_count} rows shown)`);
+        .join(' · '),
+    );
+    lines.push(
+      `### Observations (${result.rows.length} of ${result.row_count} ${result.row_count === 1 ? 'row' : 'rows'} shown)`,
+    );
     for (const [key, rows] of groups) {
       lines.push(`#### ${inlineText(key)}`);
       for (const row of rows) {
-        const statusLabel = row.obs_status ? result.legend.obs_status[row.obs_status] : undefined;
+        // Own keys only: the parsed legend is a plain object, so a code like toString would hit its prototype.
+        const statusLabel =
+          row.obs_status && Object.hasOwn(result.legend.obs_status, row.obs_status)
+            ? result.legend.obs_status[row.obs_status]
+            : undefined;
         const status = row.obs_status
           ? ` [${inlineText(row.obs_status)}${statusLabel ? ` ${inlineText(statusLabel)}` : ''}]`
           : '';
@@ -453,13 +440,9 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     const { summary } = result;
     lines.push(
       '',
-      `**Summary:** ${result.row_count} rows · ${summary.ref_areas} ${summary.ref_areas === 1 ? 'area' : 'areas'}${summary.period_min ? ` · periods ${inlineText(`${summary.period_min}–${summary.period_max}`)}` : ''} · ${renderBasisCounts(summary.basis_counts)} · complete: ${summary.complete}`,
+      `**Summary:** ${result.row_count} ${result.row_count === 1 ? 'row' : 'rows'} · ${summary.ref_areas} ${summary.ref_areas === 1 ? 'area' : 'areas'}${summary.period_min ? ` · periods ${inlineText(`${summary.period_min}–${summary.period_max}`)}` : ''} · ${renderBasisCounts(summary.basis_counts)} · complete: ${summary.complete}`,
     );
-    if (result.dataframe) {
-      lines.push(
-        `**Dataframe:** ${result.dataframe.name} (${result.dataframe.row_count} rows, expires ${result.dataframe.expires_at})`,
-      );
-    }
+    if (result.dataframe) lines.push(renderDataframe(result.dataframe));
     lines.push(result.attribution);
     return [{ type: 'text', text: lines.join('\n') }];
   },

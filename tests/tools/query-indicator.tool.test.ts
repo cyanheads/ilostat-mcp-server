@@ -48,6 +48,7 @@ import {
   structureRoute,
   tocRow,
   tooManyRequests,
+  upstreamParams,
   type WireOptions,
   wireServices,
 } from '../helpers/ilostat-upstream.js';
@@ -141,11 +142,11 @@ function contentText(result: ContractResult): string {
 
 const dataUrls = (wired: ReturnType<typeof wire>) => callUrls(wired.http, isIndicatorData);
 
-/** The one `/data/indicator` request a call sent, as its query parameters. */
+/** The one `/data/indicator` request a call sent, as its query parameters, read as upstream reads them. */
 function sentParams(wired: ReturnType<typeof wire>): Record<string, string> {
   const urls = dataUrls(wired);
   expect(urls).toHaveLength(1);
-  return Object.fromEntries(urls[0]?.searchParams ?? []);
+  return Object.fromEntries(urls[0] ? upstreamParams(urls[0]) : []);
 }
 
 /** The tenant canvas the call staged into. */
@@ -265,6 +266,32 @@ describe('rows', () => {
       type: 'code',
       format: '.csv',
     });
+  });
+
+  it('joins the dataset IDs with a literal + on the wire and returns rows for each, on both surfaces', async () => {
+    const wired = wire({ routes: [UNION_ROUTE] });
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: ['LAP_2GDP_NOC_RT_A', 'UNE_2EAP_SEX_AGE_RT_A'],
+      ref_areas: ['KEN'],
+      sex: ['SEX_T'],
+      time: '2020',
+    });
+    expect(result.isError).toBeFalsy();
+    // upstream reads `id=A%2BB` as the one dataset ID `A+B` and answers 400
+    expect(dataUrls(wired)[0]?.search).toMatch(/[?&]id=LAP_2GDP_NOC_RT_A\+UNE_2EAP_SEX_AGE_RT_A&/);
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.rows.map((row) => [row.dataset_id, row.value])).toEqual([
+      ['LAP_2GDP_NOC_RT_A', 36.723],
+      ['UNE_2EAP_SEX_AGE_RT_A', 5.613],
+    ]);
+    expect(structured.datasets.map((dataset) => dataset.dataset_id)).toEqual([
+      'LAP_2GDP_NOC_RT_A',
+      'UNE_2EAP_SEX_AGE_RT_A',
+    ]);
+    const text = contentText(result);
+    for (const fragment of ['LAP_2GDP_NOC_RT_A', 'UNE_2EAP_SEX_AGE_RT_A', '36.723', '5.613']) {
+      expect(text).toContain(fragment);
+    }
   });
 
   it('splits compound notes into codes, classif note first, and decodes each in the legend', async () => {
@@ -588,7 +615,18 @@ describe('filters', () => {
 });
 
 describe('zero rows', () => {
-  it('composes every fragment that holds, with the zero-row shape', async () => {
+  const COVERAGE = `${UNE} covers 1947–2027; widen time_from/time_to or drop time.`;
+  const BEST_SOURCE =
+    'source_selection best keeps only the preferred source of each area and period, so a secondary source named in sources returns nothing; use source_selection all.';
+  /** USA's 15+ total: every code in the UNE_DEAP structure, with rows in 2023–2025 only. */
+  const USA_TOTAL = {
+    dataset_ids: [UNE],
+    ref_areas: ['USA'],
+    sex: ['SEX_T'],
+    classif1: ['AGE_YTHADULT_YGE15'],
+  };
+
+  it('names only the causes it can check, with the zero-row shape', async () => {
     const wired = wire();
     const { result, enrichment } = await query({
       dataset_ids: [UNE],
@@ -617,12 +655,107 @@ describe('zero rows', () => {
       complete: true,
     });
     expect(enrichment).toMatchObject({ truncated: false, shown: 0 });
+    // SEX_F and AGE_YTHADULT_Y15-24 are in the structure, and 2020–2021 is inside 1947–2027
     expect(enrichment.notice).toBe(
       [
-        `${UNE} may not use SEX_F, AGE_YTHADULT_Y15-24 — ilostat_describe_indicator ${UNE} lists the codes it uses.`,
-        `${UNE} covers 1947–2027; widen time_from/time_to or drop time.`,
-        `Some requested areas have no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
+        `JOR has no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
         'No secondary sources exist for this request; use source_selection best or all.',
+      ].join(' '),
+    );
+  });
+
+  it.each([
+    ['a range before it', { time_from: '1900', time_to: '1905' }],
+    ['a range after it', { time_from: '2030' }],
+    ['an end year before it, with latest_only', { time_to: '1946', latest_only: true }],
+    ['an exact period outside it', { time: '1946' }],
+  ] as const)('names the coverage for %s, and nothing else', async (_, window) => {
+    wire();
+    const { result, enrichment } = await query({ ...USA_TOTAL, ...window });
+    expect(result.row_count).toBe(0);
+    expect(enrichment.notice).toBe(COVERAGE);
+  });
+
+  it('leaves the coverage out when the window touches it, even at one end year', async () => {
+    wire();
+    const { result, enrichment } = await query({
+      ...USA_TOTAL,
+      time_from: '1900',
+      time_to: '1947',
+    });
+    expect(result.row_count).toBe(0);
+    expect(enrichment.notice).toBe('The request matched no observations.');
+  });
+
+  it('names a code the structure does not list, not the codes it does', async () => {
+    wire();
+    const { result, enrichment } = await query({
+      ...USA_TOTAL,
+      classif1: ['EDU_AGGREGATE_TOTAL'],
+      time: '2024',
+    });
+    expect(result.row_count).toBe(0);
+    expect(enrichment.notice).toBe(
+      `${UNE} does not use EDU_AGGREGATE_TOTAL — ilostat_describe_indicator ${UNE} lists the codes it uses.`,
+    );
+  });
+
+  it('names a source under source_selection best, and not under the all it defaults to', async () => {
+    wire();
+    const best = await query({
+      ...USA_TOTAL,
+      time: '2024',
+      sources: ['BA:829'],
+      source_selection: 'best',
+    });
+    expect(best.result.row_count).toBe(0);
+    expect(best.enrichment.notice).toBe(BEST_SOURCE);
+    const all = await query({ ...USA_TOTAL, time: '2024', sources: ['BA:829'] });
+    expect(all.enrichment.applied_filters).toMatchObject({ source_selection: 'all' });
+    expect(all.result.row_count).toBe(0);
+    expect(all.enrichment.notice).toBe('The request matched no observations.');
+  });
+
+  it('names the areas the structure does not cover — up to 10, then a count — and never a covered one', async () => {
+    const fixture = observationCatalogFixture();
+    const jordan = fixture.refAreaToc.find((row) => row.ref_area === 'JOR');
+    const added = 'ABCDEFGHIJKL'.split('').map((letter) => `Q${letter}${letter}`);
+    for (const code of added) {
+      fixture.refAreaToc.push({
+        ...jordan,
+        id: `${code}_A`,
+        ref_area: code,
+        'ref_area.label': code,
+      });
+    }
+    wire({ fixture });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      area_group: 'X36',
+      ref_areas: ['USA'],
+      time: '1990',
+    });
+    expect(result.row_count).toBe(0);
+    expect(enrichment.applied_filters).toMatchObject({ ref_area_count: 14 });
+    expect(enrichment.notice).toBe(
+      `JOR, ${added.slice(0, 9).join(', ')} and 3 more have no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
+    );
+  });
+
+  it('keeps the possible-cause wording for a dataset whose structure is unavailable', async () => {
+    wire();
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE, 'UNE_2EAP_SEX_AGE_RT_A'],
+      ref_areas: ['JOR'],
+      sex: ['SEX_F'],
+    });
+    expect(result.row_count).toBe(0);
+    expect(enrichment.notice).toBe(
+      [
+        "The unit of UNE_2EAP_SEX_AGE_RT_A is unavailable from the ILOSTAT structure service; the dataset label's parenthetical — (%) or (thousands) — gives it.",
+        `JOR has no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
+        'UNE_2EAP_SEX_AGE_RT_A may not use SEX_F — ilostat_describe_indicator UNE_2EAP_SEX_AGE_RT_A lists the codes it uses.',
+        'Some requested areas have no UNE_2EAP_SEX_AGE_RT_A data — ilostat_describe_indicator lists the areas it covers.',
       ].join(' '),
     );
   });
@@ -894,6 +1027,36 @@ describe('errors', () => {
     expect(error.message).toBe(
       'Not ILOSTAT codes — ref_areas: ZZZ; classif1: NOPE; classif2: AGE_YTHADULT_YGE15; sources: XX:1.',
     );
+    expect(dataUrls(wired)).toHaveLength(0);
+  });
+
+  it('unknown_code: names 10 codes per field then counts the rest, every code kept in data.rejected, on both surfaces', async () => {
+    const wired = wire();
+    /** 100 distinct 64-character codes, the most each field accepts. */
+    const codes = (prefix: string) =>
+      Array.from({ length: 100 }, (_, index) => `${prefix}${index}`.padEnd(64, 'X'));
+    const named = (prefix: string) => `${codes(prefix).slice(0, 10).join(', ')} and 90 more`;
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      classif1: codes('C1_'),
+      classif2: codes('C2_'),
+      sources: codes('S_'),
+    });
+    expect(result.isError).toBe(true);
+    const message = `Not ILOSTAT codes — classif1: ${named('C1_')}; classif2: ${named('C2_')}; sources: ${named('S_')}.`;
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        message,
+        data: {
+          reason: 'unknown_code',
+          rejected: { classif1: codes('C1_'), classif2: codes('C2_'), sources: codes('S_') },
+        },
+      },
+    });
+    const text = contentText(result);
+    expect(text).toContain(message);
+    expect(text.length).toBeLessThan(8 * 1024);
     expect(dataUrls(wired)).toHaveLength(0);
   });
 
@@ -1220,6 +1383,21 @@ describe('format()', () => {
     expect(lines.some((line) => line.startsWith('## update'))).toBe(false);
   });
 
+  it('flattens a line terminator in the ToC frequency, verbatim in structuredContent', async () => {
+    const fixture: CatalogFixture = observationCatalogFixture();
+    tocRow(fixture, UNE).freq = 'A\u2028## frequency';
+    wire({ fixture });
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as Output).datasets[0]?.frequency).toBe('A\u2028## frequency');
+    const text = contentText(result);
+    expect(text).not.toMatch(/[\u0085\u2028\u2029]/);
+    expect(text).toContain('Frequency: A ## frequency (A ## frequency) · Database: ');
+  });
+
   it('flattens line breaks in upstream codes, verbatim in structuredContent', async () => {
     const csv = [
       `${CSV_HEADER},"note_source"`,
@@ -1250,6 +1428,56 @@ describe('format()', () => {
       ),
     ).toBe(true);
     expect(lines.filter((line) => /^## [a-z]\|/.test(line))).toEqual([]);
+  });
+
+  it('counts a single row in the singular on content[]', async () => {
+    wire();
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      classif1: ['AGE_YTHADULT_Y15-24'],
+      time: '2024',
+    });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as Output).row_count).toBe(1);
+    const lines = contentText(result).split('\n');
+    expect(lines).toContain('### Observations (1 of 1 row shown)');
+    expect(lines.filter((line) => line.startsWith('**Summary:** 1 row · 1 area ·'))).toHaveLength(
+      1,
+    );
+  });
+
+  it('renders status and note codes named like Object.prototype members as codes, verbatim in structuredContent', async () => {
+    const csv = [
+      `${CSV_HEADER},"note_source"`,
+      '"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2024",5,"__proto__",',
+      '"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2023",4,"constructor","toString"',
+      '',
+    ].join('\n');
+    wire({ routes: [dataRoute(() => csvResponse(csv))] });
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+    });
+    expect(result.isError).toBeFalsy();
+    const output = result.structuredContent as Output;
+    expect(output.rows.map((row) => [row.obs_status, row.notes])).toEqual([
+      ['__proto__', []],
+      ['constructor', ['toString']],
+    ]);
+    // The output schema's record parse drops a __proto__ key, so that code has no label.
+    expect(Object.keys(output.legend.obs_status)).toEqual(['constructor']);
+    expect(Object.keys(output.legend.notes)).toEqual(['toString']);
+    const text = contentText(result);
+    expect(text).not.toMatch(/function|\[object Object\]/);
+    const lines = text.split('\n');
+    expect(lines).toContain('- 2024: 5 [__proto__] · reported');
+    expect(lines).toContain(
+      '- 2023: 4 [constructor Not in the ILOSTAT dictionary] · reported · notes toString',
+    );
+    expect(lines).toContain('- constructor — Not in the ILOSTAT dictionary');
+    expect(lines).toContain('- toString — Not in the ILOSTAT dictionary');
   });
 });
 
@@ -1299,7 +1527,7 @@ describe('contract envelope (runToolContract)', () => {
       ref_areas: ['JOR'],
     });
     expect(result.isError).toBeFalsy();
-    const notice = `Some requested areas have no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`;
+    const notice = `JOR has no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`;
     expect(result.structuredContent).toMatchObject({
       rows: [],
       row_count: 0,
@@ -1314,6 +1542,28 @@ describe('contract envelope (runToolContract)', () => {
       '**Summary:** 0 rows · 0 areas · reported 0 · modelled_estimate 0 · projection 0 · complete: true',
     );
     expect(text).toContain(notice);
+  });
+
+  it('a zero-row page names each checked cause on both surfaces', async () => {
+    wire();
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      ref_areas: ['JOR', 'X02', 'USA'],
+      classif1: ['EDU_AGGREGATE_TOTAL', 'AGE_YTHADULT_YGE15'],
+      sources: ['BA:829'],
+      source_selection: 'best',
+      time_from: '1900',
+      time_to: '1905',
+    });
+    expect(result.isError).toBeFalsy();
+    const notice = [
+      `${UNE} does not use EDU_AGGREGATE_TOTAL — ilostat_describe_indicator ${UNE} lists the codes it uses.`,
+      `${UNE} covers 1947–2027; widen time_from/time_to or drop time.`,
+      `JOR, X02 have no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
+      'source_selection best keeps only the preferred source of each area and period, so a secondary source named in sources returns nothing; use source_selection all.',
+    ].join(' ');
+    expect(result.structuredContent).toMatchObject({ row_count: 0, notice });
+    expect(contentText(result)).toContain(notice);
   });
 
   it('a staged page validates and names the dataframe on both surfaces', async () => {

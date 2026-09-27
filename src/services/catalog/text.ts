@@ -1,7 +1,8 @@
 /**
  * @fileoverview Text handling for the catalog: the search/filter normalization,
- * word-prefix term matching, the indicator-definition HTML stripper, and the
- * upstream timestamp conversion. Pure functions.
+ * word-prefix term matching, the line-break class and inline flattening for
+ * markdown slots, the indicator-definition HTML stripper, and the upstream
+ * timestamp conversion. Pure functions.
  * @module services/catalog/text
  */
 
@@ -32,11 +33,19 @@ export function wordsOf(...texts: (string | undefined)[]): string[] {
 }
 
 /**
+ * One line break: CRLF, or a single CR, LF, NEL (U+0085), LS (U+2028), or PS
+ * (U+2029). Global, so use it only with `replace` and `split`, which ignore
+ * `lastIndex`.
+ */
+export const LINE_BREAK = /\r\n|[\r\n\u0085\u2028\u2029]/g;
+
+/**
  * ILO-published or caller text for an inline markdown slot (heading, label, list
- * item, quoted echo): CR/LF flattened to a space so the text cannot open a new block.
+ * item, table cell, quoted echo): each run of the {@link LINE_BREAK} terminators
+ * flattened to one space, so the text cannot open a new block.
  */
 export function inlineText(text: string): string {
-  return text.replace(/[\r\n]+/g, ' ');
+  return text.replace(/[\r\n\u0085\u2028\u2029]+/g, ' ');
 }
 
 /**

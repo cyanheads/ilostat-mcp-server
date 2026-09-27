@@ -2,7 +2,9 @@
  * @fileoverview `ilostat_dataframe_describe` — the `df_<id>` dataframes staged on
  * this tenant's canvas, with the tool and parameters that produced each, the
  * datasets it holds, coverage, basis counts, attribution, timestamps, row count,
- * and column schema. Expired dataframes are swept before listing.
+ * and column schema. Expired dataframes are swept first. Where every caller
+ * shares one canvas (HTTP with auth `none`), a call without `name` fails
+ * `listing_unavailable`, so a dataframe is described by its exact name only.
  * @module mcp-server/tools/definitions/dataframe-describe
  */
 
@@ -16,12 +18,12 @@ import { inlineText } from '@/services/catalog/text.js';
 export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
   title: 'Describe staged ILOSTAT dataframes',
   description:
-    'List the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by ilostat_dataframe_query register_as, with the tool and parameters that produced each, the datasets it holds (label, unit, last update), coverage, basis counts, attribution, creation and expiry times, row count, and column schema. Read the schema here before writing SQL for ilostat_dataframe_query.',
+    'Describe the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by ilostat_dataframe_query register_as: the tool and parameters that produced each, the datasets it holds (label, unit, last update), coverage, basis counts, attribution, creation and expiry times, row count, and column schema. Pass name for one dataframe. Without it, every staged dataframe is listed, except on a deployment whose callers share one canvas, where listing is off and only the exact name works. Read the schema here before writing SQL for ilostat_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
     name: blankAsUnset(dataframeNameInput('name').optional()).describe(
-      'One dataframe name as the producing tool returned it (df_XXXXX_XXXXX: letters and digits, five in each part; case-insensitive, as in SQL); omit to list every staged dataframe.',
+      'One dataframe name as the producing tool returned it (df_XXXXX_XXXXX: letters and digits, five in each part; case-insensitive, as in SQL). Omit to list every staged dataframe; a deployment whose callers share one canvas refuses the listing and needs the name.',
     ),
   }),
 
@@ -96,13 +98,32 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
         'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.',
       thrownBy: 'service',
     },
+    {
+      reason: 'listing_unavailable',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'name is omitted where every caller shares one canvas (HTTP with auth none).',
+      recovery:
+        'Pass the exact df_XXXXX_XXXXX name that ilostat_query_indicator, ilostat_compare_geographies, or register_as returned; listing every dataframe is off on this shared deployment.',
+      severity: 'notice',
+    },
   ],
 
   async handler(input, ctx) {
-    const entries = await requireCanvasBridge().describe(ctx, input.name);
+    const bridge = requireCanvasBridge();
+    if (!input.name && !bridge.listingEnabled) {
+      throw ctx.fail(
+        'listing_unavailable',
+        'Listing staged dataframes is off: every caller of this deployment shares one canvas.',
+        { ...ctx.recoveryFor('listing_unavailable') },
+      );
+    }
+    const entries = await bridge.describe(ctx, input.name);
     if (input.name && entries.length === 0) {
+      const next = bridge.listingEnabled
+        ? 'call ilostat_dataframe_describe without name to list them'
+        : 'check it against the name the producing tool returned';
       ctx.enrich.notice(
-        `No staged dataframe is named ${inlineText(input.name)}; call ilostat_dataframe_describe without name to list them, or re-run the producing tool.`,
+        `No staged dataframe is named ${inlineText(input.name)}; ${next}, or re-run the producing tool.`,
       );
     }
     return {
@@ -143,12 +164,13 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
     if (result.dataframes.length === 0) {
       return [{ type: 'text', text: 'No staged dataframes.' }];
     }
-    const lines = [`**${result.dataframes.length} staged dataframe(s)**`];
+    const count = result.dataframes.length;
+    const lines = [`**${count} staged ${count === 1 ? 'dataframe' : 'dataframes'}**`];
     for (const frame of result.dataframes) {
       lines.push(
         '',
         `### ${frame.name}`,
-        `- Source: ${frame.source_tool} · ${frame.row_count} rows · created ${frame.created_at} · expires ${frame.expires_at}`,
+        `- Source: ${frame.source_tool} · ${frame.row_count} ${frame.row_count === 1 ? 'row' : 'rows'} · created ${frame.created_at} · expires ${frame.expires_at}`,
         `- Params: ${inlineText(JSON.stringify(frame.query_params))}`,
       );
       for (const dataset of frame.datasets) {

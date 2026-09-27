@@ -6,7 +6,7 @@
  * @module services/catalog/snapshot
  */
 
-import { type Edition, latestCatalogEdition, parseEdition } from '@/services/basis/basis.js';
+import { latestCatalogEdition, parseEdition } from '@/services/basis/basis.js';
 import type {
   DictionaryEntry,
   DictionaryVar,
@@ -61,6 +61,10 @@ const frequencyRank = (frequency: string): number => {
 
 const byCode = <T extends { code: string }>(a: T, b: T): number => a.code.localeCompare(b.code);
 
+/** `entries` keyed by code, in code order. */
+const byCodeMap = <T extends { code: string }>(entries: Iterable<T>): Map<string, T> =>
+  new Map([...entries].sort(byCode).map((entry) => [entry.code, entry]));
+
 function toDataset(row: IndicatorTocRow): Dataset {
   return {
     id: row.id,
@@ -100,15 +104,8 @@ function buildIndicators(
   descriptions: Map<string, string>,
   typeLabels: Map<string, string>,
 ): Indicator[] {
-  const grouped = new Map<string, IndicatorTocRow[]>();
-  for (const row of toc) {
-    const rows = grouped.get(row.indicator);
-    if (rows) rows.push(row);
-    else grouped.set(row.indicator, [row]);
-  }
-
   const indicators: Indicator[] = [];
-  for (const [code, rows] of grouped) {
+  for (const [code, rows] of Map.groupBy(toc, (row) => row.indicator)) {
     const first = rows[0];
     if (!first) continue;
     const datasets = rows
@@ -252,25 +249,21 @@ function buildRefAreas(
     area.frequencies.sort((a, b) => frequencyRank(a) - frequencyRank(b));
   }
 
-  const areaGroups = new Map<string, AreaGroup>();
-  for (const [code, group] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
-    areaGroups.set(code, {
-      code,
-      label: group.label,
-      members: [...group.members].sort(),
-      types: AREA_GROUP_TYPES.filter((type) => group.types.has(type)),
-    });
-  }
-  return { areaGroups, refAreas: new Map([...refAreas].sort(([a], [b]) => a.localeCompare(b))) };
+  const areaGroups = byCodeMap(
+    [...groups].map(
+      ([code, group]): AreaGroup => ({
+        code,
+        label: group.label,
+        members: [...group.members].sort(),
+        types: AREA_GROUP_TYPES.filter((type) => group.types.has(type)),
+      }),
+    ),
+  );
+  return { areaGroups, refAreas: byCodeMap(refAreas.values()) };
 }
 
 function codeLabelMap(entries: DictionaryEntry[]): Map<string, CodeLabel> {
-  return new Map(
-    entries
-      .map((entry) => ({ code: entry.code, label: entry.label }))
-      .sort(byCode)
-      .map((entry) => [entry.code, entry]),
-  );
+  return byCodeMap(entries.map(({ code, label }) => ({ code, label })));
 }
 
 /** Counted vocabulary: dictionary entries plus codes only the ToC names, with the ToC's dataset counts. */
@@ -289,7 +282,7 @@ function countedMap(
     entry.datasetCount += 1;
     counted.set(code, entry);
   }
-  return new Map([...counted.values()].sort(byCode).map((entry) => [entry.code, entry]));
+  return byCodeMap(counted.values());
 }
 
 function buildClassifications(
@@ -315,7 +308,7 @@ function buildClassifications(
       type: classificationTypeOf(entry.code),
     });
   }
-  return new Map([...merged.values()].sort(byCode).map((entry) => [entry.code, entry]));
+  return byCodeMap(merged.values());
 }
 
 /**
@@ -334,37 +327,29 @@ function buildClassificationTypes(
       }
     }
   }
-  return new Map([...types.values()].sort(byCode).map((entry) => [entry.code, entry]));
+  return byCodeMap(types.values());
 }
 
 function buildSources(dictionary: DictionaryEntry[]): Map<string, SourceCode> {
-  return new Map(
-    dictionary
-      .map((entry): SourceCode => {
-        const dash = entry.label.indexOf(' - ');
-        return {
-          code: entry.code,
-          label: entry.label,
-          sourceType: dash === -1 ? entry.label : entry.label.slice(0, dash),
-          ...(entry.refArea ? { refArea: entry.refArea } : {}),
-        };
-      })
-      .sort(byCode)
-      .map((entry) => [entry.code, entry]),
+  return byCodeMap(
+    dictionary.map((entry): SourceCode => {
+      const dash = entry.label.indexOf(' - ');
+      return {
+        code: entry.code,
+        label: entry.label,
+        sourceType: dash === -1 ? entry.label : entry.label.slice(0, dash),
+        ...(entry.refArea ? { refArea: entry.refArea } : {}),
+      };
+    }),
   );
 }
 
 function buildNotes(dictionaries: Record<DictionaryVar, DictionaryEntry[]>): Map<string, NoteCode> {
   const types: NoteType[] = ['note_classif', 'note_indicator', 'note_source'];
-  return new Map(
-    types
-      .flatMap((type) =>
-        dictionaries[type].map(
-          (entry): NoteCode => ({ code: entry.code, label: entry.label, type }),
-        ),
-      )
-      .sort(byCode)
-      .map((entry) => [entry.code, entry]),
+  return byCodeMap(
+    types.flatMap((type) =>
+      dictionaries[type].map((entry): NoteCode => ({ code: entry.code, label: entry.label, type })),
+    ),
   );
 }
 
@@ -380,13 +365,6 @@ export function buildSnapshot(raw: RawCatalog, asOf: string): CatalogSnapshot {
   const indicators = buildIndicators(raw.indicatorToc, descriptions, typeLabels);
   const datasetList = indicators.flatMap((indicator) => indicator.datasets);
 
-  const indicatorsByMeasure = new Map<string, Indicator[]>();
-  for (const indicator of indicators) {
-    const list = indicatorsByMeasure.get(indicator.measure.code);
-    if (list) list.push(indicator);
-    else indicatorsByMeasure.set(indicator.measure.code, [indicator]);
-  }
-
   const frequencies = new Map<string, CountedCode>();
   for (const row of raw.indicatorToc) {
     const entry = frequencies.get(row.freq) ?? {
@@ -399,9 +377,7 @@ export function buildSnapshot(raw: RawCatalog, asOf: string): CatalogSnapshot {
   }
 
   const { areaGroups, refAreas } = buildRefAreas(raw.refAreaToc, dictionaries.ref_area);
-  const catalogEdition: Edition | undefined = latestCatalogEdition(
-    indicators.map((indicator) => indicator.label),
-  );
+  const catalogEdition = latestCatalogEdition(indicators.map((indicator) => indicator.label));
 
   return {
     asOf,
@@ -409,7 +385,7 @@ export function buildSnapshot(raw: RawCatalog, asOf: string): CatalogSnapshot {
     ...(catalogEdition ? { catalogEdition } : {}),
     indicators,
     indicatorsByCode: new Map(indicators.map((indicator) => [indicator.code, indicator])),
-    indicatorsByMeasure,
+    indicatorsByMeasure: Map.groupBy(indicators, (indicator) => indicator.measure.code),
     datasets: new Map(datasetList.map((dataset) => [dataset.id, dataset])),
     refAreas,
     areaGroups,

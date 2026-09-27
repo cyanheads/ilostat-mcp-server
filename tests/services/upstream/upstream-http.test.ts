@@ -2,8 +2,10 @@
  * @fileoverview Tests for the paced, retried HTTP layer both upstream clients share,
  * driven through `RplumberClient` and `SdmxClient` over fetch fakes: the throttling
  * mapping (HTTP 429, Cloudflare challenge pages, pacer sheds → `upstream_busy`), the
- * cooldown the in-task busy check trips, retry of transient failures only, the
- * header and body-stall timers, caller cancellation, and disposal.
+ * cooldown the in-task busy check trips, retry of transient failures only, each
+ * request's body cap (`upstream_too_large`, never retried), error bodies cut off
+ * at 64 KiB with the status still deciding the error, the header, body-stall, and
+ * total-body timers, caller cancellation, and disposal.
  * @module tests/services/upstream/upstream-http.test
  */
 
@@ -24,11 +26,13 @@ import {
   clientOptions,
   FAST_PACING,
   hangingFetch,
+  isIndicatorData,
   isProbeRequest,
   isRplumber,
   isStructureRequest,
   probeResponse,
   rplumberBody,
+  streamedCsv,
   structureDocument,
   structureResponse,
   tooManyRequests,
@@ -78,6 +82,12 @@ const COOLDOWN_PACING: PacingOptions = {
   cooldown: { baseMs: 60_000, maxMs: 600_000 },
 };
 const RETRY_TWICE = { maxRetries: 2, baseDelayMs: 0, deadlineMs: 5_000 };
+const INDICATOR_URL =
+  'https://rplumber.ilo.org/data/indicator?id=UNE_DEAP_SEX_AGE_RT_A&format=.csv';
+/** The row ceiling handed to `streamIndicatorData` where the body cap is not under test. */
+const MAX_ROWS = 500_000;
+const KIB = 1024;
+const MIB = 1024 * KIB;
 
 async function rejection(promise: Promise<unknown>): Promise<McpError> {
   return (await promise.then(
@@ -86,6 +96,43 @@ async function rejection(promise: Promise<unknown>): Promise<McpError> {
     },
     (error: unknown) => error,
   )) as McpError;
+}
+
+/**
+ * A pull-based body of `total` bytes of `filler`, `chunk` bytes per read:
+ * nothing is produced until the reader asks, so `pulled` shows how many bytes
+ * the reader took before it stopped.
+ */
+function sizedBody(total: number, { chunk = MIB, filler = ' ', status = 200 } = {}) {
+  const state = { pulled: 0 };
+  const block = new TextEncoder().encode(filler.repeat(chunk));
+  return {
+    get pulled() {
+      return state.pulled;
+    },
+    response(): Response {
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (sent >= total) {
+              controller.close();
+              return;
+            }
+            const next = block.slice(0, Math.min(chunk, total - sent));
+            sent += next.byteLength;
+            state.pulled += next.byteLength;
+            controller.enqueue(next);
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(body, {
+        status,
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    },
+  };
 }
 
 describe('throttling → upstream_busy', () => {
@@ -360,12 +407,152 @@ describe('retry', () => {
   });
 });
 
+describe('body caps → upstream_too_large', () => {
+  const REF_AREA_URL =
+    'https://rplumber.ilo.org/data/ref_area?id=KEN_A&indicator=UNE_DEAP_SEX_AGE_RT&format=.json';
+  const tooLarge = (cap: string) => ({
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    message: expect.stringContaining(`sent more than ${cap} `),
+    data: { reason: 'upstream_too_large', retryable: false },
+  });
+
+  /** Both clients over one fetch fake that answers every request with `respond`. */
+  function clients(respond: FetchMockRoute['respond']) {
+    const http = createFetchMock([{ match: () => true, respond }]);
+    const options = clientOptions(http.fetch, { retry: RETRY_TWICE });
+    const both = { rplumber: new RplumberClient(options), sdmx: new SdmxClient(options) };
+    disposables.push(both.rplumber, both.sdmx);
+    return { http, ...both };
+  }
+
+  type Clients = ReturnType<typeof clients>;
+
+  it.each([
+    {
+      label: 'a dictionary',
+      cap: 32 * MIB,
+      capText: '32 MiB',
+      call: (c: Clients) => c.rplumber.getDictionary('sex', scope()),
+    },
+    {
+      label: 'a table of contents',
+      cap: 32 * MIB,
+      capText: '32 MiB',
+      call: (c: Clients) => c.rplumber.getIndicatorToc(scope()),
+    },
+    {
+      label: 'reference-area data',
+      cap: 16 * MIB,
+      capText: '16 MiB',
+      call: (c: Clients) => c.rplumber.getRefAreaData(REF_AREA_URL, scope()),
+    },
+    {
+      label: 'a dataflow structure',
+      cap: 16 * MIB,
+      capText: '16 MiB',
+      call: (c: Clients) => c.sdmx.getDataflowStructure('UNE_DEAP_SEX_AGE_RT', scope()),
+    },
+    {
+      label: 'a unit probe',
+      cap: MIB,
+      capText: '1 MiB',
+      call: (c: Clients) => c.sdmx.probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'USA....', scope()),
+    },
+  ])(
+    'stops reading $label one chunk past its $capText cap, and never retries it',
+    async ({ cap, capText, call }) => {
+      const body = sizedBody(cap + MIB);
+      const upstream = clients(() => body.response());
+      await expect(call(upstream)).rejects.toMatchObject(tooLarge(capText));
+      expect(body.pulled).toBeLessThanOrEqual(cap + MIB);
+      expect(upstream.http.calls).toHaveLength(1);
+    },
+  );
+
+  it('reads a body of exactly its cap', async () => {
+    const upstream = clients(() => new Response(`[${' '.repeat(16 * MIB - 2)}]`, { status: 200 }));
+    await expect(upstream.rplumber.getRefAreaData(REF_AREA_URL, scope())).resolves.toEqual([]);
+  });
+
+  it('stops a data stream past 1 KiB for each row the caller may read', async () => {
+    const note = 'n'.repeat(2 * KIB);
+    const rowBytes = `KEN,999,${note}\n`.length;
+    const csv = streamedCsv(
+      'ref_area,obs_value,note_source',
+      1_000,
+      (index) => `KEN,${index},${note}`,
+    );
+    const { client } = rplumber([
+      { match: (request) => isIndicatorData(request), respond: () => csv.response() },
+    ]);
+    const rows = await client.streamIndicatorData(
+      INDICATOR_URL,
+      scope(),
+      new AbortController().signal,
+      1_000,
+    );
+    const error = await rejection(
+      (async () => {
+        for await (const _row of rows);
+      })(),
+    );
+    expect(error).toMatchObject(tooLarge('1000 KiB'));
+    expect(csv.cancelled).toBe(true);
+    expect(csv.pulled * rowBytes).toBeLessThanOrEqual(1_000 * KIB + 100 * rowBytes);
+  });
+});
+
+describe('error bodies: the first 64 KiB is read, and the status still decides the error', () => {
+  function indicatorStream(respond: FetchMockRoute['respond']) {
+    const { http, client } = rplumber([{ match: (request) => isIndicatorData(request), respond }], {
+      retry: RETRY_TWICE,
+    });
+    const call = () =>
+      rejection(
+        client.streamIndicatorData(INDICATOR_URL, scope(), new AbortController().signal, MAX_ROWS),
+      );
+    return { http, call };
+  }
+
+  it('maps an oversized 400 by its status, after reading at most one chunk past 64 KiB', async () => {
+    const body = sizedBody(64 * KIB + MIB, { chunk: 16 * KIB, filler: 'x', status: 400 });
+    const { http, call } = indicatorStream(() => body.response());
+    const error = await call();
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.message).toMatch(/^ILOSTAT API \(rplumber\.ilo\.org\) returned HTTP 400\./);
+    expect(error.data?.reason).toBeUndefined();
+    expect(body.pulled).toBeLessThanOrEqual(80 * KIB);
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('retries a 503 however large its body', async () => {
+    const body = sizedBody(64 * KIB + MIB, { chunk: 16 * KIB, filler: 'x', status: 503 });
+    const { http, call } = indicatorStream(() => body.response());
+    const error = await call();
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toMatch(/^ILOSTAT API \(rplumber\.ilo\.org\) returned HTTP 503\./);
+    expect(http.calls).toHaveLength(3);
+    expect(body.pulled).toBeLessThanOrEqual(3 * 80 * KIB);
+  });
+
+  it('interprets the first 64 KiB, so a retired-dataset message with a long tail still maps', async () => {
+    const message = '{"error":"deprecated or invalid dataset id=FOO_BAR_A"}';
+    const { call } = indicatorStream(
+      () => new Response(`${message}${' '.repeat(MIB)}`, { status: 400 }),
+    );
+    expect(await call()).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'dataset_retired', datasetId: 'FOO_BAR_A' },
+    });
+  });
+});
+
 describe('timers', () => {
   it('fails Timeout when no response headers arrive within headersMs, and retries it', async () => {
     const upstream = hangingFetch();
     const client = new RplumberClient(
       clientOptions(upstream.fetch, {
-        timeouts: { headersMs: 20, stallMs: 1_000 },
+        timeouts: { headersMs: 20, stallMs: 1_000, bodyMs: 5_000 },
         retry: { maxRetries: 1, baseDelayMs: 0, deadlineMs: 5_000 },
       }),
     );
@@ -376,6 +563,48 @@ describe('timers', () => {
       /^ILOSTAT API \(rplumber\.ilo\.org\) sent no response within 0\.02 s\./,
     );
     expect(upstream.urls).toHaveLength(2);
+  });
+
+  it('fails Timeout when a steadily dripping stream outlasts bodyMs, however short each gap', async () => {
+    const encoder = new TextEncoder();
+    let served = 0;
+    const drip = () =>
+      new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            start(controller) {
+              controller.enqueue(encoder.encode('ref_area,obs_value\n'));
+            },
+            async pull(controller) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              if (++served > 100) controller.close();
+              else controller.enqueue(encoder.encode(`KEN,${served}\n`));
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 200 },
+      );
+    const { client } = rplumber([{ match: (request) => isIndicatorData(request), respond: drip }], {
+      timeouts: { headersMs: 1_000, stallMs: 1_000, bodyMs: 100 },
+    });
+    const rows = await client.streamIndicatorData(
+      INDICATOR_URL,
+      scope(),
+      new AbortController().signal,
+      MAX_ROWS,
+    );
+    const read: unknown[] = [];
+    const error = await rejection(
+      (async () => {
+        for await (const row of rows) read.push(row);
+      })(),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.message).toMatch(
+      /^ILOSTAT API \(rplumber\.ilo\.org\) took longer than 0\.1 s to send the response\./,
+    );
+    expect(read.length).toBeLessThan(50);
   });
 
   it('fails Timeout when the body stalls mid-response for stallMs', async () => {
@@ -393,7 +622,7 @@ describe('timers', () => {
             ),
         ),
       ],
-      { timeouts: { headersMs: 1_000, stallMs: 20 } },
+      { timeouts: { headersMs: 1_000, stallMs: 20, bodyMs: 5_000 } },
     );
     const error = await rejection(client.getDictionary('sex', scope()));
     expect(error.code).toBe(JsonRpcErrorCode.Timeout);

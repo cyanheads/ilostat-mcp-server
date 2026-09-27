@@ -4,26 +4,18 @@
  * `register_as`. The framework SQL gate enforces a
  * single SELECT, a read-only plan, and no file-reading functions; system catalogs
  * are denied, so the shared canvas cannot be enumerated from SQL. Gate rejections
- * carry this tool's recovery.
+ * carry this tool's recovery. A `register_as` result is held to the tenant's
+ * staging budget, and the dataframes it evicts are named in the output.
  * @module mcp-server/tools/definitions/dataframe-query
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset, dataframeNameInput } from '@/mcp-server/tools/tool-helpers.js';
-import { requireCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blankAsUnset, dataframeNameInput, tableCell } from '@/mcp-server/tools/tool-helpers.js';
+import { evictionNotice, requireCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
-/**
- * One markdown table cell: backslashes first (a backslash before punctuation is
- * an escape in inline markdown), then pipes; `\r\n`, `\r`, and `\n` each become
- * `<br>` so a value cannot end the row.
- */
-function escapeTableCell(text: string): string {
-  return text
-    .replace(/\\/g, '\\\\')
-    .replace(/\|/g, '\\|')
-    .replace(/\r\n|\r|\n/g, '<br>');
-}
+/** One result cell or column name, each line break kept as `<br>`. */
+const resultCell = (text: string) => tableCell(text, '<br>');
 
 export const dataframeQueryTool = tool('ilostat_dataframe_query', {
   title: 'Query staged ILOSTAT dataframes',
@@ -44,7 +36,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
         'One SELECT over df_<id> tables (DuckDB SQL: joins, aggregates, window functions, CTEs), at most 20,000 characters. BIGINT results such as COUNT or SUM of integers serialize as strings; CAST to DOUBLE for inline arithmetic.',
       ),
     register_as: blankAsUnset(dataframeNameInput('register_as').optional()).describe(
-      'Store the result as a new dataframe under this name (df_XXXXX_XXXXX: letters and digits, five in each part; stored uppercased after df_) with a fresh TTL, to chain analyses.',
+      'Store the result as a new dataframe under this name (df_XXXXX_XXXXX: letters and digits, five in each part; stored uppercased after df_) with a fresh TTL, to chain analyses. A result over 1,000,000 rows is refused, and storing one can evict the oldest dataframes, which evicted names.',
     ),
     preview: z
       .number()
@@ -88,6 +80,12 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       .optional()
       .describe('The new dataframe name, when register_as stored the result.'),
     expires_at: z.string().optional().describe('ISO 8601 expiry of the new dataframe.'),
+    evicted: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Dataframes dropped, oldest first, to keep this tenant within 1,000,000 staged rows and 100 dataframes; present only when storing the result evicted any.',
+      ),
   }),
 
   enrichment: {
@@ -115,8 +113,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       reason: 'system_catalog_access',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL references a system catalog.',
-      recovery:
-        'Query only df_<id> tables; ilostat_dataframe_describe lists the staged dataframes.',
+      recovery: 'Query only df_<id> tables, by the names the producing tools returned.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -156,20 +153,29 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       thrownBy: 'service',
     },
     {
+      reason: 'register_as_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The register_as result holds more than 1,000,000 rows.',
+      recovery:
+        'Filter or aggregate the SELECT so it stores at most 1,000,000 rows, or omit register_as and read the rows inline under row_limit.',
+      severity: 'notice',
+      thrownBy: 'service',
+    },
+    {
       reason: 'non_select_statement',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL is not a SELECT.',
       recovery:
-        'Send only a SELECT statement against df_<id> tables; ilostat_dataframe_describe lists them.',
+        'Send only a SELECT statement against df_<id> tables, by the names the producing tools returned.',
       severity: 'notice',
       thrownBy: 'service',
     },
     {
       reason: 'multi_statement',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL holds more than one statement.',
+      when: 'The SQL holds more than one statement, or a PIVOT with no IN list, which DuckDB expands into several.',
       recovery:
-        'Send exactly one SELECT statement per call and split multi-statement SQL into separate calls.',
+        'Send exactly one SELECT statement per call and split multi-statement SQL into separate calls; give a PIVOT its values as ON <column> IN (...).',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -178,7 +184,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL calls a file-reading or external table function.',
       recovery:
-        'Remove the file-reading function and query only the df_<id> tables ilostat_dataframe_describe lists.',
+        'Remove the file-reading function and query only df_<id> tables, by the names the producing tools returned.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -197,7 +203,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
     const bridge = requireCanvasBridge();
     const preview =
       input.preview === undefined ? undefined : Math.min(input.preview, input.row_limit);
-    const { result, meta } = await bridge.query(ctx, input.sql, {
+    const { result, meta, evicted } = await bridge.query(ctx, input.sql, {
       rowLimit: input.row_limit,
       sourceTool: 'ilostat_dataframe_query',
       ...(preview === undefined ? {} : { preview }),
@@ -217,15 +223,17 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       ctx.enrich.truncated({
         shown,
         cap,
-        guidance: `Showing ${shown} rows. The query matched more than row_limit (${input.row_limit}), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or ${lever}.`,
+        guidance: `Showing ${shown} ${shown === 1 ? 'row' : 'rows'}. The query matched more than row_limit (${input.row_limit}), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or ${lever}.`,
       });
     } else if (result.rowCount > shown) {
+      const one = result.rowCount === 1;
+      const page = `Showing ${shown} of ${result.rowCount} ${one ? 'row' : 'rows'}.`;
       ctx.enrich.truncated({
         shown,
         cap,
         guidance: meta
-          ? `Showing ${shown} of ${result.rowCount} rows. All ${result.rowCount} are stored as ${meta.tableName}; query that dataframe with ilostat_dataframe_query, or ${lever} to see more inline.`
-          : `Showing ${shown} of ${result.rowCount} rows. Use register_as to keep the full result, or ${lever}.`,
+          ? `${page} ${one ? 'The row is' : `All ${result.rowCount} are`} stored as ${meta.tableName}; query that dataframe with ilostat_dataframe_query, or ${lever} to see more inline.`
+          : `${page} Use register_as to keep the full result, or ${lever}.`,
       });
     }
     ctx.log.info('Dataframe query ran', {
@@ -240,6 +248,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       row_count_capped: result.truncated === true,
       rows: result.rows,
       ...(meta ? { registered_as: meta.tableName, expires_at: meta.expiresAt } : {}),
+      ...(evicted.length > 0 ? { evicted } : {}),
     };
   },
 
@@ -250,27 +259,28 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
         `Registered as ${result.registered_as} (expires ${result.expires_at ?? 'unknown'}).`,
       );
     }
-    const shownNote =
-      result.rows.length < result.row_count ? `, showing ${result.rows.length}` : '';
+    if (result.evicted) lines.push(evictionNotice(result.evicted));
+    const partial = result.rows.length < result.row_count;
+    const count = `**${result.row_count} ${result.row_count === 1 ? 'row' : 'rows'}**`;
     const header = result.row_count_capped
-      ? `**${result.row_count} rows** — capped at row_limit${shownNote}; more rows matched`
-      : `**${result.row_count} ${result.row_count === 1 ? 'row' : 'rows'}**${shownNote ? ` (showing ${result.rows.length} of ${result.row_count})` : ''}`;
+      ? `${count} — capped at row_limit${partial ? `, showing ${result.rows.length}` : ''}; more rows matched`
+      : `${count}${partial ? ` (showing ${result.rows.length} of ${result.row_count})` : ''}`;
     lines.push(header, '');
     if (result.rows.length === 0) {
       const empty = result.row_count === 0 ? '_No rows._' : '_No rows shown inline._';
-      lines.push(`${empty} Columns: ${result.columns.map(escapeTableCell).join(', ')}`);
+      lines.push(`${empty} Columns: ${result.columns.map(resultCell).join(', ')}`);
       return [{ type: 'text', text: lines.join('\n') }];
     }
     lines.push(
-      `| ${result.columns.map(escapeTableCell).join(' | ')} |`,
+      `| ${result.columns.map(resultCell).join(' | ')} |`,
       `| ${result.columns.map(() => '---').join(' | ')} |`,
     );
     for (const row of result.rows) {
       const cells = result.columns.map((column) => {
         const value = row[column];
-        if (value === null || value === undefined) return '';
-        if (typeof value === 'string') return escapeTableCell(value);
-        if (typeof value === 'object') return escapeTableCell(JSON.stringify(value));
+        if (value == null) return '';
+        if (typeof value === 'string') return resultCell(value);
+        if (typeof value === 'object') return resultCell(JSON.stringify(value));
         return String(value);
       });
       lines.push(`| ${cells.join(' | ')} |`);

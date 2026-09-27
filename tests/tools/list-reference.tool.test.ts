@@ -63,6 +63,10 @@ function contentText(result: ContractResult): string {
 const nextCursorOf = (result: ContractResult) =>
   (result.structuredContent as { next_cursor?: string } | undefined)?.next_cursor;
 
+/** The notice a cursor starting past the last of `total` entries carries. */
+const pastEndNotice = (total: number) =>
+  `The cursor starts past the last result (${total} in all); a next_cursor continues only the query that returned it. Omit cursor to start from the first page.`;
+
 const codes = (result: Output) => result.entries.map((entry) => entry.code);
 
 describe('topics', () => {
@@ -404,16 +408,49 @@ describe('paging', () => {
     expect(seen).toEqual(all);
   });
 
-  it('returns an empty page, with the total, for an offset past the end', async () => {
+  it.each([9, 40])(
+    'returns an empty page with the total and says so for offset %i, past the last entry',
+    async (offset) => {
+      wireServices();
+      const { result, enrichment } = await list({
+        topic: 'ref_areas',
+        limit: 4,
+        cursor: encodeCursor({ offset, limit: 4 }),
+      });
+      expect(result.entries).toEqual([]);
+      expect(result.total).toBe(9);
+      expect(result.next_cursor).toBeUndefined();
+      expect(enrichment).toEqual({
+        truncated: false,
+        shown: 0,
+        cap: 4,
+        notice: pastEndNotice(9),
+      });
+    },
+  );
+
+  it('adds no past-the-end notice to a last page that starts on the last entry', async () => {
     wireServices();
     const { result, enrichment } = await list({
       topic: 'ref_areas',
+      limit: 4,
+      cursor: encodeCursor({ offset: 8, limit: 4 }),
+    });
+    expect(codes(result)).toEqual(['X36']);
+    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 4 });
+  });
+
+  it('gives a cursor on a filter that matches nothing the zero-hit notice alone', async () => {
+    wireServices();
+    const { result, enrichment } = await list({
+      topic: 'ref_areas',
+      filter: 'atlantis',
       cursor: encodeCursor({ offset: 40, limit: 4 }),
     });
-    expect(result.entries).toEqual([]);
-    expect(result.total).toBe(9);
-    expect(result.next_cursor).toBeUndefined();
-    expect(enrichment).toMatchObject({ truncated: false, shown: 0 });
+    expect(result.total).toBe(0);
+    expect(enrichment.notice).toBe(
+      'No ref_areas entry matched "atlantis". Every filter term must appear in the code or label; try one distinctive word, or omit filter to page the full list.',
+    );
   });
 
   it('rejects a cursor it did not issue as invalid_cursor, with this tool’s recovery', async () => {
@@ -577,10 +614,11 @@ describe('format()', () => {
     expect(areas).toContain('- **ANT** — Netherlands Antilles · country');
     expect(areas).not.toContain('?–?');
 
-    const groups = render((await list({ topic: 'area_groups', codes: ['X36'] })).result);
+    const groups = render((await list({ topic: 'area_groups', codes: ['X36', 'X01'] })).result);
     expect(groups).toContain(
-      '- **X36** — Arab States · group region, subregion_broad, subregion_detailed · 1 members',
+      '- **X36** — Arab States · group region, subregion_broad, subregion_detailed · 1 member\n',
     );
+    expect(groups).toMatch(/- \*\*X01\*\* — World · group world · \d+ members\n/);
     const classifications = render(
       (await list({ topic: 'classifications', codes: ['DSB_STATUS_TOTAL'] })).result,
     );
@@ -595,6 +633,20 @@ describe('format()', () => {
     expect(notes).toContain(
       '- **I20:4077** — Employment definition: Excluding own-use production workers · note_indicator',
     );
+  });
+
+  it('counts a single dataset in the singular on content[]', async () => {
+    wireServices();
+    const result = await runToolContract(listReferenceTool, {
+      topic: 'databases',
+      codes: ['ILOSDG'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as Output).entries[0]?.dataset_count).toBe(1);
+    const lines = contentText(result).split('\n');
+    expect(lines.filter((line) => line.startsWith('- **ILOSDG** —'))).toEqual([
+      expect.stringMatching(/ · 1 dataset$/),
+    ]);
   });
 
   it('renders not_found and next_cursor', async () => {
@@ -617,6 +669,29 @@ describe('format()', () => {
       '- **R1:2383** — Repository: Eurostat ## injected heading · note_source',
     );
     expect(text.split('\n').some((line) => line.startsWith('## injected'))).toBe(false);
+  });
+
+  it('flattens every line terminator in upstream codes on content[]; structuredContent keeps them verbatim', async () => {
+    const fixture = loadCatalogFixture();
+    const ken = fixture.refAreaToc.find((row) => row.ref_area === 'KEN');
+    if (!ken) throw new Error('No fixture ref-area ToC row for KEN');
+    ken.freq = 'A\n## injected frequency';
+    ken.wb_income_group = 'X03\u2028## injected income';
+    ken.ilo_region = 'X06\u0085## injected region';
+    ken.ilo_subregion_broad = 'X13\u2029## injected broad';
+    ken.ilo_subregion_detailed = 'X18\r\n## injected detailed';
+    wireServices({ fixture });
+    const result = await runToolContract(listReferenceTool, { topic: 'ref_areas', codes: ['KEN'] });
+    expect(result.isError).toBeFalsy();
+    const [entry] = (result.structuredContent as Output).entries;
+    expect(entry?.frequencies).toContain('A\n## injected frequency');
+    expect(entry?.income_group).toMatch(/^X03\u2028## injected income$/i);
+    expect(entry?.ilo_region).toMatch(/^X06\u0085## injected region$/i);
+    expect(entry?.ilo_subregion_broad).toMatch(/^X13\u2029## injected broad$/i);
+    expect(entry?.ilo_subregion_detailed).toMatch(/^X18\r\n## injected detailed$/i);
+    const text = contentText(result);
+    expect(text).not.toMatch(/[\u0085\u2028\u2029]/);
+    expect(text.split(/\r\n|[\r\n]/).filter((line) => /^## injected/i.test(line))).toEqual([]);
   });
 });
 
@@ -653,7 +728,7 @@ describe('contract envelope (runToolContract)', () => {
       entries: [{ code: 'X36', member_count: 1, members: [{ code: 'JOR', label: 'Jordan' }] }],
     });
     expect(contentText(result)).toContain(
-      '- **X36** — Arab States · group region, subregion_broad, subregion_detailed · 1 members\n  - members: JOR Jordan',
+      '- **X36** — Arab States · group region, subregion_broad, subregion_detailed · 1 member\n  - members: JOR Jordan',
     );
   });
 
@@ -686,6 +761,28 @@ describe('contract envelope (runToolContract)', () => {
     });
     expect(last.isError).toBeFalsy();
     expect(last.structuredContent).toMatchObject({ truncated: false, shown: 1, cap: 8, total: 9 });
+  });
+
+  it('a cursor past the last entry: empty page, total kept, notice on both surfaces', async () => {
+    wireServices();
+    const result = await runToolContract(listReferenceTool, {
+      topic: 'ref_areas',
+      limit: 4,
+      cursor: encodeCursor({ offset: 40, limit: 4 }),
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      entries: [],
+      total: 9,
+      truncated: false,
+      shown: 0,
+      cap: 4,
+      notice: pastEndNotice(9),
+    });
+    expect(result.structuredContent).not.toHaveProperty('next_cursor');
+    const text = contentText(result);
+    expect(text).toContain('## ref_areas — 9 entries');
+    expect(text).toContain(`> ${pastEndNotice(9)}`);
   });
 
   it('a paged listing under a filter with no searchable word carries both notices on both surfaces', async () => {

@@ -4,22 +4,41 @@
  * record ends. One incremental reader serves both whole bodies and streamed
  * ones — a quote, an escaped quote, or a CRLF split across two chunks parses the
  * same as when it arrives whole. Rows come back keyed by the header row, so
- * readers stay header-driven rather than positional.
+ * readers stay header-driven rather than positional. A field is held as slices
+ * of the chunks it arrived in and joined once when it ends, so it costs about
+ * its own length in memory, and a field past 65,536 characters or a record past
+ * 262,144 fails as a serialization error: a stray quote that swallows the rest
+ * of a large download stops at the cap instead of exhausting the heap.
  * @module services/csv/parse-csv
  */
 
+import { serializationError } from '@cyanheads/mcp-ts-core/errors';
+
+/** Longest field read; ILOSTAT's longest live field is under 100 characters. */
+const MAX_FIELD_CHARS = 65_536;
+/** Longest record read, counting one separator per field. */
+const MAX_RECORD_CHARS = 262_144;
+
 /** Incremental CSV tokenizer: feed text chunks in order, then call {@link CsvRecordReader.end}. */
-export class CsvRecordReader {
-  private field = '';
+class CsvRecordReader {
+  /** The current field's text so far, as slices of the chunks it arrived in. */
+  private readonly parts: string[] = [];
+  private fieldLength = 0;
   /** A `"` inside a quoted field whose meaning (close, or first of `""`) depends on the next character. */
   private quotePending = false;
   private quoted = false;
   private record: string[] = [];
+  /** Characters in the current record's completed fields, plus one separator for each. */
+  private recordLength = 0;
   /** The previous character ended a record on `\r`; a `\n` right after it belongs to that CRLF. */
   private skipLineFeed = false;
   private started = false;
 
-  /** Consumes one chunk and returns the records it completed. */
+  /**
+   * Consumes one chunk and returns the records it completed. Field text is never
+   * copied character by character: `start` marks where the chunk's pending field
+   * text begins, and each quote, separator, or line break takes the text before it.
+   */
   push(chunk: string): string[][] {
     let text = chunk;
     if (!this.started && text.length > 0) {
@@ -27,39 +46,48 @@ export class CsvRecordReader {
       if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
     }
     const completed: string[][] = [];
+    let start = 0;
     for (let i = 0; i < text.length; i++) {
       const char = text[i];
       if (this.skipLineFeed) {
         this.skipLineFeed = false;
-        if (char === '\n') continue;
+        if (char === '\n') {
+          start = i + 1;
+          continue;
+        }
       }
       if (this.quotePending) {
         this.quotePending = false;
-        if (char === '"') {
-          this.field += '"';
-          continue;
-        }
+        // The second quote of `""` is field text: it opens the next slice.
+        if (char === '"') continue;
         this.quoted = false;
       } else if (this.quoted) {
-        if (char === '"') this.quotePending = true;
-        else this.field += char;
+        if (char === '"') {
+          this.take(text, start, i);
+          start = i + 1;
+          this.quotePending = true;
+        }
         continue;
       }
       if (char === '"') {
+        this.take(text, start, i);
+        start = i + 1;
         this.quoted = true;
       } else if (char === ',') {
-        this.record.push(this.field);
-        this.field = '';
+        this.take(text, start, i);
+        start = i + 1;
+        this.endField();
       } else if (char === '\n' || char === '\r') {
-        this.record.push(this.field);
+        this.take(text, start, i);
+        start = i + 1;
+        this.endField();
         completed.push(this.record);
         this.record = [];
-        this.field = '';
+        this.recordLength = 0;
         this.skipLineFeed = char === '\r';
-      } else {
-        this.field += char;
       }
     }
+    this.take(text, start, text.length);
     return completed;
   }
 
@@ -67,12 +95,37 @@ export class CsvRecordReader {
   end(): string[][] {
     this.quotePending = false;
     this.quoted = false;
-    if (this.field === '' && this.record.length === 0) return [];
-    this.record.push(this.field);
+    if (this.fieldLength === 0 && this.record.length === 0) return [];
+    this.endField();
     const last = this.record;
     this.record = [];
-    this.field = '';
+    this.recordLength = 0;
     return [last];
+  }
+
+  /** Adds `text[start, end)` to the current field, failing once the field passes its cap. */
+  private take(text: string, start: number, end: number): void {
+    if (end === start) return;
+    this.fieldLength += end - start;
+    if (this.fieldLength > MAX_FIELD_CHARS) {
+      throw serializationError(
+        `ILOSTAT sent a CSV field longer than ${MAX_FIELD_CHARS.toLocaleString('en-US')} characters.`,
+      );
+    }
+    this.parts.push(text.slice(start, end));
+  }
+
+  /** Ends the current field, failing once its record passes the record cap. */
+  private endField(): void {
+    this.recordLength += this.fieldLength + 1;
+    if (this.recordLength > MAX_RECORD_CHARS) {
+      throw serializationError(
+        `ILOSTAT sent a CSV record longer than ${MAX_RECORD_CHARS.toLocaleString('en-US')} characters.`,
+      );
+    }
+    this.record.push(this.parts.join(''));
+    this.parts.length = 0;
+    this.fieldLength = 0;
   }
 }
 

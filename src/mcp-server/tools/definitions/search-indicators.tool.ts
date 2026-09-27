@@ -8,13 +8,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset } from '@/mcp-server/tools/tool-helpers.js';
+import { blankAsUnset, FREQUENCY_NAMES } from '@/mcp-server/tools/tool-helpers.js';
 import { cursorOffset } from '@/services/catalog/paging.js';
 import { searchIndicators } from '@/services/catalog/search.js';
 import { inlineText } from '@/services/catalog/text.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
-
-const FREQUENCY_NAMES: Record<string, string> = { A: 'annual', Q: 'quarterly', M: 'monthly' };
 
 const CodeLabelSchema = (what: string) =>
   z
@@ -58,19 +56,19 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
-    query: blankAsUnset(z.string().optional()).describe(
+    query: blankAsUnset(z.string().max(500).optional()).describe(
       'Plain-language terms, e.g. "youth unemployment" or "informal employment rate". Case, accents, and punctuation are ignored, labor matches labour, and a trailing plural s is tolerated. Omit to browse by filters (results then order by indicator code).',
     ),
     frequency: blankAsUnset(z.enum(['A', 'Q', 'M']).optional()).describe(
       "Keep only datasets of this frequency: A annual, Q quarterly, M monthly. Narrows each hit's datasets; an indicator with none left drops out.",
     ),
-    database: blankAsUnset(z.string().optional()).describe(
+    database: blankAsUnset(z.string().max(32).optional()).describe(
       'Source database code, e.g. LFS or ILOEST (the ILO modelled estimates); case-insensitive. ilostat_list_reference topic databases lists them.',
     ),
-    subject: blankAsUnset(z.string().optional()).describe(
-      'Subject code, e.g. UNE (unemployment); case-insensitive. ilostat_list_reference topic subjects lists them.',
+    subject: blankAsUnset(z.string().max(32).optional()).describe(
+      'Subject code, e.g. LUU (unemployment and labour underutilization); case-insensitive. ilostat_list_reference topic subjects lists them.',
     ),
-    breakdown: blankAsUnset(z.string().optional()).describe(
+    breakdown: blankAsUnset(z.string().max(32).optional()).describe(
       'Classification type the indicator is broken down by, e.g. AGE, ECO, GEO, SEX; case-insensitive. ilostat_list_reference topic classification_types lists them.',
     ),
     aggregates_only: z
@@ -80,7 +78,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
         'Keep only datasets carrying World, regional, or income-group rows, dropping indicators with none.',
       ),
     limit: z.number().int().min(1).max(50).default(10).describe('Hits per page (1–50).'),
-    cursor: blankAsUnset(z.string().optional()).describe(
+    cursor: blankAsUnset(z.string().max(256).optional()).describe(
       "Opaque continuation token: the previous page's next_cursor, passed unchanged.",
     ),
   }),
@@ -157,7 +155,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
       .string()
       .optional()
       .describe(
-        'Why the query was browsed by filters alone, how to widen a search that matched nothing, and how to reach the remaining pages — whichever apply, joined.',
+        'Why the query was browsed by filters alone, how to widen a search that matched nothing, that the cursor starts past the last match, and how to reach the remaining pages — whichever apply, joined.',
       ),
   },
 
@@ -273,18 +271,18 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
         hit.breakdowns.length > 0 ? hit.breakdowns.map(inlineText).join(', ') : 'none';
       lines.push(
         '',
-        `### ${hit.indicator} — ${inlineText(hit.label)}`,
+        `### ${inlineText(hit.indicator)} — ${inlineText(hit.label)}`,
         [
-          `Database: ${inlineText(hit.database.label)} (${hit.database.code})`,
-          `Subject: ${inlineText(hit.subject.label)} (${hit.subject.code})`,
-          `Breakdowns: ${breakdowns}${hit.classification ? ` (${hit.classification})` : ''}`,
+          `Database: ${inlineText(hit.database.label)} (${inlineText(hit.database.code)})`,
+          `Subject: ${inlineText(hit.subject.label)} (${inlineText(hit.subject.code)})`,
+          `Breakdowns: ${breakdowns}${hit.classification ? ` (${inlineText(hit.classification)})` : ''}`,
           `Has aggregates: ${hit.has_aggregates}`,
           ...(hit.match_scope ? [`Matched on: ${hit.match_scope}`] : []),
         ].join(' · '),
       );
       for (const dataset of hit.datasets) {
         lines.push(
-          `- ${dataset.dataset_id} · ${FREQUENCY_NAMES[dataset.frequency] ?? dataset.frequency} · ${dataset.data_start}–${dataset.data_end} · ${dataset.n_ref_area} ${dataset.n_ref_area === 1 ? 'area' : 'areas'} · ${dataset.n_records.toLocaleString('en-US')} records · updated ${inlineText(dataset.last_update)} · has aggregates: ${dataset.has_aggregates}`,
+          `- ${inlineText(dataset.dataset_id)} · ${inlineText(FREQUENCY_NAMES.get(dataset.frequency) ?? dataset.frequency)} · ${dataset.data_start}–${dataset.data_end} · ${dataset.n_ref_area} ${dataset.n_ref_area === 1 ? 'area' : 'areas'} · ${dataset.n_records.toLocaleString('en-US')} records · updated ${inlineText(dataset.last_update)} · has aggregates: ${dataset.has_aggregates}`,
         );
       }
     }
@@ -293,7 +291,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
         ? facets
             .map(
               (facet) =>
-                `${facet.code}${facet.label ? ` (${inlineText(facet.label)})` : ''}: ${facet.count}`,
+                `${inlineText(facet.code)}${facet.label ? ` (${inlineText(facet.label)})` : ''}: ${facet.count}`,
             )
             .join(', ')
         : 'none';

@@ -35,6 +35,7 @@ import {
   retiredDatasetResponse,
   rplumberBody,
   streamedCsv,
+  upstreamParams,
 } from '../../helpers/ilostat-upstream.js';
 import { guardNetwork } from '../../helpers/network-guard.js';
 
@@ -66,6 +67,8 @@ const USA_ROW =
   '"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2024",4.022,,,,"R1:3513_T2:85"';
 const RETRY_TWICE = { maxRetries: 2, baseDelayMs: 0, deadlineMs: 5_000 };
 const UNE = ['UNE_DEAP_SEX_AGE_RT_A'];
+/** The row ceiling handed to `streamIndicatorData`; the body cap it sets is under test elsewhere. */
+const MAX_ROWS = 500_000;
 
 const clients: RplumberClient[] = [];
 
@@ -103,7 +106,9 @@ async function streamRows(
   params: Partial<IndicatorDataParams> = {},
 ): Promise<RawObservation[]> {
   const url = client.indicatorDataUrl({ datasetIds: UNE, ...params });
-  return drain(await client.streamIndicatorData(url, scope(), new AbortController().signal));
+  return drain(
+    await client.streamIndicatorData(url, scope(), new AbortController().signal, MAX_ROWS),
+  );
 }
 
 async function rejection(promise: Promise<unknown>): Promise<McpError> {
@@ -186,7 +191,7 @@ describe('/data/indicator request', () => {
       }),
     );
     expect(url.origin + url.pathname).toBe(`${RPLUMBER_ORIGIN}/data/indicator`);
-    expect([...url.searchParams]).toEqual([
+    expect([...upstreamParams(url)]).toEqual([
       ['id', 'UNE_DEAP_SEX_AGE_RT_A+UNE_2EAP_SEX_AGE_RT_A'],
       ['ref_area', 'USA+KEN'],
       ['sex', 'SEX_T+SEX_F'],
@@ -204,6 +209,30 @@ describe('/data/indicator request', () => {
     for (const [name] of url.searchParams) {
       expect(ALLOWLIST['/data/indicator']).toContain(name);
     }
+  });
+
+  it('joins every list with a literal + and percent-encodes each element', () => {
+    const client = rplumber(createFetchMock([]).fetch);
+    const url = client.indicatorDataUrl({
+      datasetIds: ['UNE_DEAP_SEX_AGE_RT_A', 'UNE_DEAP_SEX_AGE_RT_Q', 'UNE_2EAP_SEX_AGE_RT_A'],
+      refAreas: ['CAN', 'USA'],
+      sex: ['SEX_M', 'SEX_F'],
+      classif1: ['AGE_YTHADULT_YGE15', 'AGE_YTHADULT_Y15-24'],
+      classif2: ['GEO_COV_NAT', 'GEO_COV_URB'],
+      sources: ['BA:453', 'BX:3465'],
+      time: ['2024', '2014'],
+    });
+    // upstream reads `id=A%2BB` as the single dataset ID `A+B` (HTTP 400); a literal + joins
+    expect(new URL(url).search).toBe(
+      '?id=UNE_DEAP_SEX_AGE_RT_A+UNE_DEAP_SEX_AGE_RT_Q+UNE_2EAP_SEX_AGE_RT_A' +
+        '&ref_area=CAN+USA&sex=SEX_M+SEX_F&classif1=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24' +
+        '&classif2=GEO_COV_NAT+GEO_COV_URB&source=BA%3A453+BX%3A3465&time=2024+2014' +
+        '&type=code&format=.csv',
+    );
+    // a + or space inside an element is escaped, so it can never read as a separator
+    expect(new URL(client.indicatorDataUrl({ datasetIds: ['A+B', 'C D'] })).search).toBe(
+      '?id=A%2BB+C%20D&type=code&format=.csv',
+    );
   });
 
   it('leaves out every unset, empty, or blank filter instead of sending it blank', () => {
@@ -230,7 +259,9 @@ describe('/data/indicator request', () => {
   it('requests exactly the URL built, asking for CSV with the identifying headers', async () => {
     const { http, client } = routed([indicatorDataRoute(fixtureText(INDICATOR_CSV.uneDeap))]);
     const url = client.indicatorDataUrl({ datasetIds: UNE, refAreas: ['USA'], timeFrom: 2025 });
-    await drain(await client.streamIndicatorData(url, scope(), new AbortController().signal));
+    await drain(
+      await client.streamIndicatorData(url, scope(), new AbortController().signal, MAX_ROWS),
+    );
     const [call] = http.calls;
     expect(call?.request.url).toBe(url);
     expect(call?.request.method).toBe('GET');
@@ -251,15 +282,12 @@ describe('/data/ref_area request', () => {
       }),
     );
     expect(url.origin + url.pathname).toBe(`${RPLUMBER_ORIGIN}/data/ref_area`);
-    expect([...url.searchParams]).toEqual([
-      ['id', 'KEN_A'],
-      ['indicator', 'EAP_2WAP_SEX_AGE_RT+UNE_2EAP_SEX_AGE_RT+LAP_2GDP_NOC_RT'],
-      ['timeto', '2024'],
-      ['latestyear', 'TRUE'],
-      ['format', '.json'],
-    ]);
+    // the indicator codes are joined by a literal +, the separator upstream splits on
+    expect(url.search).toBe(
+      '?id=KEN_A&indicator=EAP_2WAP_SEX_AGE_RT+UNE_2EAP_SEX_AGE_RT+LAP_2GDP_NOC_RT&timeto=2024&latestyear=TRUE&format=.json',
+    );
     for (const [name] of url.searchParams) expect(ALLOWLIST['/data/ref_area']).toContain(name);
-    for (const code of url.searchParams.get('indicator')?.split('+') ?? []) {
+    for (const code of upstreamParams(url).get('indicator')?.split('+') ?? []) {
       expect(code).not.toMatch(/_[AQM]$/);
     }
   });
@@ -459,6 +487,7 @@ describe('/data/indicator failures', () => {
         url,
         scope({ recoveryFor: (reason) => ({ recovery: { hint: `recover from ${reason}` } }) }),
         new AbortController().signal,
+        MAX_ROWS,
       ),
     );
     expect(error).toBeInstanceOf(McpError);
@@ -485,6 +514,7 @@ describe('/data/indicator failures', () => {
           client.indicatorDataUrl({ datasetIds: UNE }),
           scope(),
           new AbortController().signal,
+          MAX_ROWS,
         ),
       );
       expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
@@ -527,10 +557,15 @@ describe('/data/indicator failures', () => {
             ),
         },
       ],
-      { retry: RETRY_TWICE, timeouts: { headersMs: 1_000, stallMs: 20 } },
+      { retry: RETRY_TWICE, timeouts: { headersMs: 1_000, stallMs: 20, bodyMs: 5_000 } },
     );
     const url = client.indicatorDataUrl({ datasetIds: UNE });
-    const rows = await client.streamIndicatorData(url, scope(), new AbortController().signal);
+    const rows = await client.streamIndicatorData(
+      url,
+      scope(),
+      new AbortController().signal,
+      MAX_ROWS,
+    );
     const iterator = rows[Symbol.asyncIterator]();
     expect((await iterator.next()).value).toMatchObject({ refArea: 'USA', value: 4.022 });
     const error = await rejection(iterator.next());
@@ -590,6 +625,7 @@ describe('/data/indicator failures', () => {
       client.indicatorDataUrl({ datasetIds: UNE }),
       scope(),
       controller.signal,
+      MAX_ROWS,
     );
     const iterator = rows[Symbol.asyncIterator]();
     expect((await iterator.next()).value).toMatchObject({ refArea: 'USA' });
@@ -611,6 +647,7 @@ describe('/data/indicator failures', () => {
       client.indicatorDataUrl({ datasetIds: UNE }),
       scope(),
       new AbortController().signal,
+      MAX_ROWS,
     );
     let read = 0;
     for await (const _row of rows) {
@@ -633,6 +670,7 @@ describe('the open stream', () => {
       client.indicatorDataUrl({ datasetIds: UNE }),
       scope(),
       new AbortController().signal,
+      MAX_ROWS,
     );
     const body = upstream.responses[0]?.body;
     if (!body) throw new Error('expected a response body');
@@ -654,7 +692,7 @@ describe('the open stream', () => {
   it('leaves the signal handed to fetch unaborted past the header timer and retry deadline', async () => {
     const upstream = recordingFetch(RECORDED);
     const client = rplumber(upstream.fetch, {
-      timeouts: { headersMs: 20, stallMs: 1_000 },
+      timeouts: { headersMs: 20, stallMs: 1_000, bodyMs: 5_000 },
       retry: { maxRetries: 0, baseDelayMs: 0, deadlineMs: 30 },
     });
     const controller = new AbortController();
@@ -662,6 +700,7 @@ describe('the open stream', () => {
       client.indicatorDataUrl({ datasetIds: UNE }),
       scope(),
       controller.signal,
+      MAX_ROWS,
     );
     const [signal] = upstream.signals;
     if (!signal) throw new Error('expected fetch to have been called');

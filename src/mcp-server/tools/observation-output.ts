@@ -2,19 +2,21 @@
  * @fileoverview Output schemas and renderers shared by the observation tools
  * (`ilostat_query_indicator`, `ilostat_compare_geographies`): the per-dataset
  * meta block — label, frequency, database, last update, aggregates, the
- * projection cutoff, and the unit — plus basis counts and the staged-dataframe
- * handle.
+ * projection cutoff, and the unit — plus basis counts, the staged-dataframe
+ * handle with the dataframes its staging evicted, and the area-group echo of the
+ * applied filters.
  * @module mcp-server/tools/observation-output
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { FREQUENCY_NAMES } from '@/mcp-server/tools/tool-helpers.js';
 import { BASES } from '@/services/basis/basis.js';
+import { evictionNotice, type StagedTable } from '@/services/canvas-bridge/canvas-bridge.js';
 import { inlineText } from '@/services/catalog/text.js';
 import type { ResolvedDataset } from '@/services/observations/observation-rows.js';
+import type { AreaGroupEcho } from '@/services/observations/observation-service.js';
 
-const FREQUENCY_NAMES: Record<string, string> = { A: 'annual', Q: 'quarterly', M: 'monthly' };
-
-export const UnitSchema = z
+const UnitSchema = z
   .object({
     measure: z.string().describe('Unit code (PT percent, PS persons, LC local currency, …).'),
     measure_label: z.string().optional().describe('Unit label.'),
@@ -55,7 +57,7 @@ export const DatasetMetaSchema = z
   })
   .describe('One requested dataset and how its values are classed.');
 
-export type DatasetMeta = z.infer<typeof DatasetMetaSchema>;
+type DatasetMeta = z.infer<typeof DatasetMetaSchema>;
 
 export const BasisCountsSchema = z
   .object({
@@ -72,8 +74,36 @@ export const DataframeSchema = z
       .describe('Staged dataframe name (df_XXXXX_XXXXX) for ilostat_dataframe_query SQL.'),
     row_count: z.number().describe('Rows staged.'),
     expires_at: z.string().describe('ISO 8601 expiry of the staged dataframe.'),
+    evicted: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Dataframes dropped, oldest first, to keep this tenant within 1,000,000 staged rows and 100 dataframes; present only when staging this one evicted any.',
+      ),
   })
   .describe('The staged dataframe holding the full result; present only when staged.');
+
+type Dataframe = z.infer<typeof DataframeSchema>;
+
+/** The applied-filters `area_group` field: optional, since it echoes an optional input. */
+export const AreaGroupEchoSchema = z
+  .object({
+    code: z.string().describe('Area group code.'),
+    label: z.string().describe('Area group label.'),
+    member_count: z.number().describe('Member countries it expanded to.'),
+  })
+  .optional()
+  .describe('The area group and how many countries it expanded to.');
+
+/** The `dataframe` output field for a staged table. */
+export function stagedDataframe(table: StagedTable): Dataframe {
+  return {
+    name: table.name,
+    row_count: table.rowCount,
+    expires_at: table.expiresAt,
+    ...(table.evicted.length > 0 ? { evicted: table.evicted } : {}),
+  };
+}
 
 export function datasetMeta({ dataset, cutoff, unit }: ResolvedDataset): DatasetMeta {
   return {
@@ -108,7 +138,7 @@ export function renderDatasetMeta(meta: DatasetMeta, heading: string): string[] 
     : 'not resolved';
   return [
     `${heading} ${meta.dataset_id} — ${inlineText(meta.label)}`,
-    `Frequency: ${FREQUENCY_NAMES[meta.frequency] ?? meta.frequency} (${meta.frequency}) · Database: ${inlineText(`${meta.database.label} (${meta.database.code})`)} · Updated ${inlineText(meta.last_update)} · Has aggregates: ${meta.has_aggregates}`,
+    `Frequency: ${inlineText(FREQUENCY_NAMES.get(meta.frequency) ?? meta.frequency)} (${inlineText(meta.frequency)}) · Database: ${inlineText(`${meta.database.label} (${meta.database.code})`)} · Updated ${inlineText(meta.last_update)} · Has aggregates: ${meta.has_aggregates}`,
     `Unit: ${inlineText(unit)}`,
     `Basis rule: ILO modelled rows through ${meta.projection_after_year} are modelled_estimate, later ones projection (rule ${meta.projection_rule}${meta.edition ? `, edition ${meta.edition}` : ''}); every other source is reported.`,
   ];
@@ -116,4 +146,15 @@ export function renderDatasetMeta(meta: DatasetMeta, heading: string): string[] 
 
 export function renderBasisCounts(counts: z.infer<typeof BasisCountsSchema>): string {
   return BASES.map((basis) => `${basis} ${counts[basis]}`).join(' · ');
+}
+
+/** The staged dataframe as one markdown line, then the eviction sentence when it evicted any. */
+export function renderDataframe(dataframe: Dataframe): string {
+  const line = `**Dataframe:** ${dataframe.name} (${dataframe.row_count} rows, expires ${dataframe.expires_at})`;
+  return dataframe.evicted ? `${line}\n${evictionNotice(dataframe.evicted)}` : line;
+}
+
+/** The applied-filters fragment for an expanded area group. */
+export function renderAreaGroup(group: AreaGroupEcho): string {
+  return `area_group ${group.code} (${inlineText(group.label)}, ${group.member_count} countries)`;
 }

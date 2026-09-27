@@ -9,7 +9,8 @@
  * Classification group headers — codes that are another code's `parent` — are
  * dropped, while parentless leaves (deciles) stay. The default slice takes, per
  * dimension ID, the first code the dataflow's `DEFAULT` annotation lists that is
- * a total; that annotation is keyed by dimension ID, not dimension order. Pure.
+ * a total; that annotation is keyed by dimension ID, not dimension order. Covered
+ * areas keep only plain SDMX codes, since each may become a probe-key segment. Pure.
  * @module services/structure/sdmx-structure
  */
 
@@ -72,12 +73,11 @@ const StructureDocumentSchema = z.object({
 });
 
 type SdmxCode = z.infer<typeof CodeSchema>;
+type SdmxComponent = z.infer<typeof ComponentSchema>;
 
 export interface BreakdownCode {
   code: string;
   isTotal: boolean;
-  /** SDMX code name (`15+`), used when the rplumber dictionary lacks the code. */
-  name: string;
 }
 
 export interface BreakdownDimension {
@@ -102,7 +102,7 @@ export interface IndicatorStructure {
   keyDimensions: string[];
   /** `LAST_UPDATE` annotation, ISO 8601 without zone. */
   lastUpdate?: string;
-  /** Reference areas with data, from the content constraint. */
+  /** Reference areas with data, from the content constraint; only codes matching `[A-Z0-9_]+`. */
   refAreas: string[];
   /** Sex codes in use; absent when the dataflow has no `SEX` dimension. */
   sexCodes?: string[];
@@ -122,6 +122,9 @@ export interface UnitInfo {
 }
 
 const NON_BREAKDOWN_DIMENSIONS = new Set(['REF_AREA', 'FREQ', 'MEASURE', 'SEX']);
+
+/** An area code a probe key may carry; anything else is left out of `refAreas`. */
+const AREA_CODE = /^[A-Z0-9_]+$/;
 
 function annotation(annotations: z.infer<typeof AnnotationSchema>[] | undefined, type: string) {
   return annotations?.find((entry) => entry.type === type)?.title;
@@ -174,16 +177,15 @@ export function parseStructure(document: unknown): IndicatorStructure {
     }
   }
 
-  const dimensions = [...dsd.dataStructureComponents.dimensionList.dimensions].sort(
+  const dimensions = dsd.dataStructureComponents.dimensionList.dimensions.toSorted(
     (a, b) => (a.position ?? 0) - (b.position ?? 0),
   );
-  const codesOf = (dimension: (typeof dimensions)[number]): SdmxCode[] =>
-    codelists.get(codelistId(dimension.localRepresentation?.enumeration) ?? '') ?? [];
+  /** The codelist a dimension or attribute enumerates; empty when it names none. */
+  const codesOf = (component: SdmxComponent | undefined): SdmxCode[] =>
+    codelists.get(codelistId(component?.localRepresentation?.enumeration) ?? '') ?? [];
 
   /** Codes in use for a dimension, group headers dropped, in constraint (else codelist) order. */
-  const usedCodes = (
-    dimension: (typeof dimensions)[number],
-  ): { byId: Map<string, SdmxCode>; ids: string[] } => {
+  const usedCodes = (dimension: SdmxComponent): { byId: Map<string, SdmxCode>; ids: string[] } => {
     const codes = codesOf(dimension);
     const byId = new Map(codes.map((code) => [code.id, code]));
     const headers = new Set(codes.flatMap((code) => (code.parent ? [code.parent] : [])));
@@ -213,26 +215,20 @@ export function parseStructure(document: unknown): IndicatorStructure {
     const slot = breakdowns.length === 0 ? 'classif1' : 'classif2';
     breakdowns.push({
       id: dimension.id,
-      codes: ids.map((id) => ({
-        code: id,
-        name: byId.get(id)?.name ?? id,
-        isTotal: isTotalCode(byId.get(id)),
-      })),
+      codes: ids.map((id) => ({ code: id, isTotal: isTotalCode(byId.get(id)) })),
     });
     const total = defaultTotal(dimension.id, ids, byId);
     if (total) defaultSlice[slot] = total;
   }
 
-  const refAreaDimension = dimensions.find((dimension) => dimension.id === 'REF_AREA');
-  const refAreas =
+  const refAreas = (
     constraint.get('REF_AREA') ??
-    (refAreaDimension ? codesOf(refAreaDimension).map((code) => code.id) : []);
+    codesOf(dimensions.find((dimension) => dimension.id === 'REF_AREA')).map((code) => code.id)
+  ).filter((area) => AREA_CODE.test(area));
 
   const attributes = dsd.dataStructureComponents.attributeList?.attributes ?? [];
   const attributeCodes = (id: string): Map<string, string> => {
-    const attribute = attributes.find((entry) => entry.id === id);
-    const codes =
-      codelists.get(codelistId(attribute?.localRepresentation?.enumeration) ?? '') ?? [];
+    const codes = codesOf(attributes.find((entry) => entry.id === id));
     return new Map(codes.map((code) => [code.id, code.name ?? code.id]));
   };
 

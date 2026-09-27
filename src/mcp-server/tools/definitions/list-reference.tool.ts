@@ -14,7 +14,6 @@ import {
   blankFreeArray,
   REF_AREA_MESSAGE,
 } from '@/mcp-server/tools/tool-helpers.js';
-import { normalizeAreaCode } from '@/services/catalog/codes.js';
 import { cursorOffset } from '@/services/catalog/paging.js';
 import { listReference, REFERENCE_TOPICS } from '@/services/catalog/reference.js';
 import { inlineText } from '@/services/catalog/text.js';
@@ -118,20 +117,20 @@ export const listReferenceTool = tool('ilostat_list_reference', {
       .describe(
         'Vocabulary to list: ref_areas, area_groups (the X codes area_group accepts), databases, subjects, sexes, classifications (classif1/classif2 codes), classification_types, sources, obs_status, notes, or frequencies.',
       ),
-    filter: blankAsUnset(z.string().optional()).describe(
+    filter: blankAsUnset(z.string().max(200).optional()).describe(
       'Text filter: every word must match a word or word prefix of the code or label (case, accents, and punctuation ignored; labor matches labour). Omit to list the whole topic.',
     ),
-    codes: blankFreeArray(z.array(z.string()).max(100).optional()).describe(
+    codes: blankFreeArray(z.array(z.string().max(64)).max(100).optional()).describe(
       'Exact codes to look up (up to 100; case-insensitive, and ILO_GEO_ forms accepted for ref_areas and area_groups). Codes the topic lacks are listed in not_found. With topic area_groups, each group found also lists its member countries.',
     ),
     ref_area: blankAsUnset(areaCodeInput(REF_AREA_MESSAGE).optional()).describe(
       'Topic sources only: list the sources of this reference area (ISO3 or X code; case-insensitive, ILO_GEO_ forms accepted).',
     ),
-    classification_type: blankAsUnset(z.string().optional()).describe(
+    classification_type: blankAsUnset(z.string().max(32).optional()).describe(
       'Topic classifications only: keep codes of this classification type, the code prefix (AGE, ECO, EDU, …).',
     ),
     limit: z.number().int().min(1).max(500).default(50).describe('Entries per page (1–500).'),
-    cursor: blankAsUnset(z.string().optional()).describe(
+    cursor: blankAsUnset(z.string().max(256).optional()).describe(
       "Opaque continuation token: the previous page's next_cursor, passed unchanged.",
     ),
   }),
@@ -165,7 +164,7 @@ export const listReferenceTool = tool('ilostat_list_reference', {
       .string()
       .optional()
       .describe(
-        'Why a filter with no searchable word was not applied, why nothing matched, and how to reach the remaining pages — whichever apply, joined.',
+        'Why a filter with no searchable word was not applied, why nothing matched, that the cursor starts past the last entry, and how to reach the remaining pages — whichever apply, joined.',
       ),
   },
 
@@ -226,9 +225,8 @@ export const listReferenceTool = tool('ilostat_list_reference', {
 
     const offset = cursorOffset(input.cursor, ctx);
     const snapshot = await getIlostatServices().catalog.ready(ctx);
-    const refArea = input.ref_area ? normalizeAreaCode(input.ref_area) : undefined;
-    if (refArea && !snapshot.refAreas.has(refArea)) {
-      throw ctx.fail('unknown_code', `${inlineText(refArea)} is not an ILOSTAT reference area.`, {
+    if (input.ref_area && !snapshot.refAreas.has(input.ref_area)) {
+      throw ctx.fail('unknown_code', `${input.ref_area} is not an ILOSTAT reference area.`, {
         field: 'ref_area',
         ...ctx.recoveryFor('unknown_code'),
       });
@@ -240,7 +238,7 @@ export const listReferenceTool = tool('ilostat_list_reference', {
       offset,
       ...(input.filter ? { filter: input.filter } : {}),
       ...(input.codes?.length ? { codes: input.codes } : {}),
-      ...(refArea ? { refArea } : {}),
+      ...(input.ref_area ? { refArea: input.ref_area } : {}),
       ...(input.classification_type
         ? { classificationType: input.classification_type.toUpperCase() }
         : {}),
@@ -292,34 +290,44 @@ export const listReferenceTool = tool('ilostat_list_reference', {
 function renderEntry(entry: z.infer<typeof EntrySchema>): string {
   const details: string[] = [];
   if (entry.kind) details.push(entry.kind);
-  if (entry.frequencies?.length) details.push(`frequencies ${entry.frequencies.join('/')}`);
+  if (entry.frequencies?.length) {
+    details.push(`frequencies ${entry.frequencies.map(inlineText).join('/')}`);
+  }
   if (entry.data_start !== undefined || entry.data_end !== undefined) {
     details.push(`${entry.data_start ?? '?'}–${entry.data_end ?? '?'}`);
   }
-  if (entry.dataset_count !== undefined) details.push(`${entry.dataset_count} datasets`);
+  if (entry.dataset_count !== undefined) {
+    details.push(`${entry.dataset_count} ${entry.dataset_count === 1 ? 'dataset' : 'datasets'}`);
+  }
   if (entry.income_group) {
     details.push(
-      `income ${entry.income_group} ${inlineText(entry.income_group_label ?? '')}`.trim(),
+      inlineText(`income ${entry.income_group} ${entry.income_group_label ?? ''}`).trim(),
     );
   }
   if (entry.ilo_region) {
-    details.push(`region ${entry.ilo_region} ${inlineText(entry.ilo_region_label ?? '')}`.trim());
+    details.push(inlineText(`region ${entry.ilo_region} ${entry.ilo_region_label ?? ''}`).trim());
   }
   if (entry.ilo_subregion_broad) {
     details.push(
-      `subregion ${entry.ilo_subregion_broad} ${inlineText(entry.ilo_subregion_broad_label ?? '')}`.trim(),
+      inlineText(
+        `subregion ${entry.ilo_subregion_broad} ${entry.ilo_subregion_broad_label ?? ''}`,
+      ).trim(),
     );
   }
   if (entry.ilo_subregion_detailed) {
     details.push(
-      `detailed subregion ${entry.ilo_subregion_detailed} ${inlineText(entry.ilo_subregion_detailed_label ?? '')}`.trim(),
+      inlineText(
+        `detailed subregion ${entry.ilo_subregion_detailed} ${entry.ilo_subregion_detailed_label ?? ''}`,
+      ).trim(),
     );
   }
   if (entry.group_types?.length) details.push(`group ${entry.group_types.join(', ')}`);
-  if (entry.member_count !== undefined) details.push(`${entry.member_count} members`);
+  if (entry.member_count !== undefined) {
+    details.push(`${entry.member_count} ${entry.member_count === 1 ? 'member' : 'members'}`);
+  }
   if (entry.slot) details.push(`slot ${entry.slot}`);
-  if (entry.classification_type) details.push(`type ${entry.classification_type}`);
-  if (entry.ref_area) details.push(`area ${entry.ref_area}`);
+  if (entry.classification_type) details.push(`type ${inlineText(entry.classification_type)}`);
+  if (entry.ref_area) details.push(`area ${inlineText(entry.ref_area)}`);
   if (entry.source_type) details.push(`source type ${inlineText(entry.source_type)}`);
   if (entry.note_type) details.push(entry.note_type);
   const suffix = details.length > 0 ? ` · ${details.join(' · ')}` : '';

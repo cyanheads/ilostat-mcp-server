@@ -6,19 +6,26 @@
  * that are gone (a canvas re-minted after a restart, a table dropped off a live
  * canvas), the `DATAFRAME_NAME_PATTERN` schema rejections, `canvas_unavailable`
  * from an engine that cannot load (a call with no canvas wired is a server bug,
- * since the tool is unlisted with the canvas off) and its severity, CR/LF in ILO text, update
- * times, periods, and caller column names, and both consumption paths
- * (`structuredContent` and `content[]`).
+ * since the tool is unlisted with the canvas off) and its severity, a canvas
+ * failure naming a path (a temp root it cannot create, a table lookup the engine
+ * cannot finish) redacted to `[path]` with its code and cause kept, the
+ * `listing_unavailable` refusal where every caller shares one canvas (HTTP with
+ * auth `none`) while exact-name describe, query, and drop keep working, CR/LF in
+ * ILO text, update times, periods, and caller column names, and both
+ * consumption paths (`structuredContent` and `content[]`).
  * @module tests/tools/dataframe-describe.tool.test
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasInstance, type DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { ErrorHandler } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compareGeographiesTool } from '@/mcp-server/tools/definitions/compare-geographies.tool.js';
 import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
+import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { disposeIlostatServices } from '@/services/ilostat-services.js';
 import {
@@ -44,6 +51,8 @@ const TENANT = 'default';
 const canvases: DataCanvas[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  resetConfig();
   disposeIlostatServices();
   for (const canvas of canvases.splice(0)) {
     await canvas.shutdown(createMockContext({ tenantId: TENANT }));
@@ -63,6 +72,12 @@ const CANVAS_UNAVAILABLE_MESSAGE =
   'Dataframes are unavailable in this deployment: the DataCanvas DuckDB engine could not be loaded.';
 const NO_CANVAS_MESSAGE =
   'A dataframe tool ran with no DataCanvas wired; with the canvas off these tools are registered disabled.';
+const LISTING_UNAVAILABLE_MESSAGE =
+  'Listing staged dataframes is off: every caller of this deployment shares one canvas.';
+const LISTING_UNAVAILABLE_RECOVERY =
+  'Pass the exact df_XXXXX_XXXXX name that ilostat_query_indicator, ilostat_compare_geographies, or register_as returned; listing every dataframe is off on this shared deployment.';
+/** The framework config of a deployment whose callers all resolve to tenant `default`. */
+const SHARED_CANVAS_ENV = { MCP_TRANSPORT_TYPE: 'http', MCP_AUTH_MODE: 'none' };
 const UNE_DATASET = {
   dataset_id: UNE,
   label: 'Unemployment rate by sex and age (%)',
@@ -131,10 +146,13 @@ async function describeFrames(name: string | undefined, ctx: Context = newContex
   return { result, enrichment: getEnrichment(ctx) };
 }
 
-async function failure(ctx: Context = newContext()): Promise<McpError> {
+async function failure(
+  ctx: Context = newContext(),
+  args: { name?: string } = {},
+): Promise<McpError> {
   try {
     await dataframeDescribeTool.handler(
-      dataframeDescribeTool.input.parse({}),
+      dataframeDescribeTool.input.parse(args),
       ctx as Parameters<typeof dataframeDescribeTool.handler>[1],
     );
   } catch (error) {
@@ -177,6 +195,7 @@ describe('listing', () => {
 
     const { result } = await describeFrames(undefined, ctx);
     expect(result.dataframes.map((frame) => frame.name)).toEqual([comparison, observations.name]);
+    expect(render(result).split('\n')[0]).toBe('**2 staged dataframes**');
 
     const [compared, queried] = result.dataframes;
     expect(queried).toEqual({
@@ -372,17 +391,115 @@ describe('name', () => {
   });
 });
 
-describe('canvas_unavailable', () => {
-  it('is the only declared reason, logged at error', () => {
+describe('listing where every caller shares one canvas (HTTP, auth none)', () => {
+  /** A dataframe staged on a canvas wired under the framework config `env`, and its tenant's context. */
+  async function stagedUnder(env: Record<string, string>) {
+    resetConfig(env);
+    wireCanvas();
+    const staging = newContext();
+    const { name } = await stageObservations(staging);
+    return { name, staging };
+  }
+
+  it.each([
+    ['omitted', {}],
+    ['blank', { name: '  ' }],
+  ])(
+    'refuses a listing with name %s as listing_unavailable, with its recovery',
+    async (_label, args) => {
+      const { staging } = await stagedUnder(SHARED_CANVAS_ENV);
+      const error = await failure(sharingState(newContext(), staging), args);
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        message: LISTING_UNAVAILABLE_MESSAGE,
+        data: { reason: 'listing_unavailable', recovery: { hint: LISTING_UNAVAILABLE_RECOVERY } },
+      });
+    },
+  );
+
+  it('carries the refusal on both surfaces', async () => {
+    resetConfig(SHARED_CANVAS_ENV);
+    wireCanvas();
+    const result = await runToolContract(dataframeDescribeTool, {});
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Forbidden,
+        message: LISTING_UNAVAILABLE_MESSAGE,
+        data: { reason: 'listing_unavailable', recovery: { hint: LISTING_UNAVAILABLE_RECOVERY } },
+      },
+    });
+    const text = contentText(result);
+    expect(text).toContain(LISTING_UNAVAILABLE_MESSAGE);
+    expect(text).toContain(`Recovery: ${LISTING_UNAVAILABLE_RECOVERY}`);
+  });
+
+  it('still describes, queries, and drops a dataframe by its exact name', async () => {
+    const { name, staging } = await stagedUnder(SHARED_CANVAS_ENV);
+    const { result } = await describeFrames(
+      name.toLowerCase(),
+      sharingState(newContext(), staging),
+    );
+    expect(result.dataframes.map((frame) => frame.name)).toEqual([name]);
+    expect(render(result)).toContain(`### ${name}`);
+
+    const queried = await dataframeQueryTool.handler(
+      dataframeQueryTool.input.parse({ sql: `SELECT COUNT(*) AS n FROM ${name}` }),
+      sharingState(
+        createMockContext({ tenantId: TENANT, errors: dataframeQueryTool.errors }),
+        staging,
+      ) as Parameters<typeof dataframeQueryTool.handler>[1],
+    );
+    expect(queried.rows).toEqual([{ n: '52' }]);
+
+    const dropped = await dataframeDropTool.handler(
+      dataframeDropTool.input.parse({ name }),
+      sharingState(
+        createMockContext({ tenantId: TENANT, errors: dataframeDropTool.errors }),
+        staging,
+      ) as Parameters<typeof dataframeDropTool.handler>[1],
+    );
+    expect(dropped).toEqual({ name, dropped: true });
+  });
+
+  it('answers a name miss without pointing at a listing, on both surfaces', async () => {
+    resetConfig(SHARED_CANVAS_ENV);
+    wireCanvas();
+    const result = await runToolContract(dataframeDescribeTool, { name: 'df_NOPE0_NOPE0' });
+    expect(result.isError).toBeFalsy();
+    const notice =
+      'No staged dataframe is named df_NOPE0_NOPE0; check it against the name the producing tool returned, or re-run the producing tool.';
+    expect(result.structuredContent).toEqual({ dataframes: [], notice });
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it.each([
+    ['stdio with auth none', { MCP_TRANSPORT_TYPE: 'stdio', MCP_AUTH_MODE: 'none' }],
+    [
+      'HTTP with auth jwt',
+      { MCP_TRANSPORT_TYPE: 'http', MCP_AUTH_MODE: 'jwt', MCP_AUTH_SECRET_KEY: 'k'.repeat(32) },
+    ],
+  ])('still lists without name on %s, where a tenant is one caller', async (_label, env) => {
+    const { name, staging } = await stagedUnder(env);
+    const { result } = await describeFrames(undefined, sharingState(newContext(), staging));
+    expect(result.dataframes.map((frame) => frame.name)).toEqual([name]);
+  });
+});
+
+describe('declared reasons', () => {
+  it('logs canvas_unavailable at error and listing_unavailable, a caller input, at notice', () => {
     const severities = Object.fromEntries(
       (dataframeDescribeTool.errors ?? []).map((entry: { reason: string; severity?: string }) => [
         entry.reason,
         entry.severity ?? 'error',
       ]),
     );
-    expect(severities).toEqual({ canvas_unavailable: 'error' });
+    expect(severities).toEqual({ canvas_unavailable: 'error', listing_unavailable: 'notice' });
   });
+});
 
+describe('canvas_unavailable', () => {
   it('is not what a call without a wired canvas gets: the tool is unlisted then, so reaching it is a server bug', async () => {
     wireDataframes();
     const error = await failure();
@@ -411,6 +528,50 @@ describe('canvas_unavailable', () => {
   });
 });
 
+describe('a canvas failure that names a path', () => {
+  const MKDIR_FAILURE = new Error("EACCES: permission denied, mkdir '/srv/canvas-tmp'");
+  const SPILL_FAILURE = new Error(
+    'IO Error: Cannot open file "/srv/canvas-tmp/duckdb_temp_storage_DEFAULT-0.tmp": Permission denied',
+  );
+
+  it.each([
+    [
+      'a temp root the canvas cannot create',
+      MKDIR_FAILURE,
+      "EACCES: permission denied, mkdir '[path]'",
+      () => {
+        const canvas = faultyCanvas({ at: 'acquire', error: MKDIR_FAILURE });
+        canvases.push(canvas);
+        wireDataframes({ canvas });
+      },
+    ],
+    [
+      'a table lookup the engine cannot finish',
+      SPILL_FAILURE,
+      'IO Error: Cannot open file "[path]": Permission denied',
+      () => {
+        wireCanvas();
+        vi.spyOn(CanvasInstance.prototype, 'describe').mockRejectedValue(SPILL_FAILURE);
+      },
+    ],
+  ] satisfies [string, Error, string, () => void][])(
+    'keeps the path of %s off both surfaces, with code and cause kept',
+    async (_label, engineError, redacted, arrange) => {
+      arrange();
+      const { code } = ErrorHandler.classifyOnly(engineError);
+      const error = await failure();
+      expect(error).toMatchObject({ code, message: redacted });
+      expect(error.cause).toBe(engineError);
+
+      const result = await runToolContract(dataframeDescribeTool, {});
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: { code, message: redacted } });
+      expect(contentText(result)).toContain(redacted);
+      expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
+    },
+  );
+});
+
 describe('format()', () => {
   it('renders every field of a staged dataframe', async () => {
     wireCanvas();
@@ -419,7 +580,7 @@ describe('format()', () => {
     const { result } = await describeFrames(undefined, ctx);
     const text = render(result);
     for (const fragment of [
-      '**1 staged dataframe(s)**',
+      '**1 staged dataframe**',
       `### ${name}`,
       `- Source: ilostat_query_indicator · 52 rows · created ${FIXED_NOW.toISOString()} · expires 2026-09-27T12:00:00.000Z`,
       '- Params: {"dataset_ids":["UNE_DEAP_SEX_AGE_RT_A"],"ref_areas":["USA","X01","KEN"],"ref_area_count":3,"latest_only":false,"source_selection":"best","best_source":"yes"}',
@@ -501,6 +662,28 @@ describe('format()', () => {
     ).toEqual([`### ${derived}`, `### ${name}`].sort());
   });
 
+  it('flattens a Unicode line terminator in register_as SQL on the Params line; query_params keeps it verbatim', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const derived = 'df_UNI00_BREAK';
+    const sql = `SELECT ref_area FROM ${name} --\u2028## Injected heading`;
+    const queryCtx = sharingState(
+      createMockContext({ tenantId: TENANT, errors: dataframeQueryTool.errors }),
+      ctx,
+    );
+    await dataframeQueryTool.handler(
+      dataframeQueryTool.input.parse({ sql, register_as: derived }),
+      queryCtx as Parameters<typeof dataframeQueryTool.handler>[1],
+    );
+    const { result } = await describeFrames(derived, ctx);
+    expect(result.dataframes[0]?.query_params).toMatchObject({ sql });
+    const text = render(result);
+    expect(text).not.toMatch(/[\u0085\u2028\u2029]/);
+    const params = text.split('\n').find((line) => line.startsWith('- Params: '));
+    expect(params).toContain('-- ## Injected heading');
+  });
+
   it('says 1 area for a dataframe covering one reference area', async () => {
     wireCanvas();
     const ctx = newContext();
@@ -508,6 +691,29 @@ describe('format()', () => {
     const { result } = await describeFrames(undefined, ctx);
     expect(result.dataframes[0]?.coverage).toMatchObject({ ref_areas: 1 });
     expect(render(result)).toContain('- Coverage: 1 area · 2023–2025');
+  });
+
+  it('counts a single-row dataframe in the singular', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const derived = 'df_ONE00_ROW00';
+    const queryCtx = sharingState(
+      createMockContext({ tenantId: TENANT, errors: dataframeQueryTool.errors }),
+      ctx,
+    );
+    await dataframeQueryTool.handler(
+      dataframeQueryTool.input.parse({
+        sql: `SELECT ref_area FROM ${name} LIMIT 1`,
+        register_as: derived,
+      }),
+      queryCtx as Parameters<typeof dataframeQueryTool.handler>[1],
+    );
+    const { result } = await describeFrames(derived, ctx);
+    expect(result.dataframes[0]?.row_count).toBe(1);
+    expect(render(result)).toContain(
+      `- Source: ilostat_dataframe_query · 1 row · created ${FIXED_NOW.toISOString()}`,
+    );
   });
 });
 

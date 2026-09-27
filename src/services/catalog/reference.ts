@@ -6,7 +6,7 @@
  * @module services/catalog/reference
  */
 
-import { normalizeAreaCode } from './codes.js';
+import { normalizeAreaCode, normalizeCode } from './codes.js';
 import { pageOf } from './paging.js';
 import { inlineText, matchesAllTerms, wordsOf } from './text.js';
 import type { AreaGroupType, CatalogSnapshot } from './types.js';
@@ -129,19 +129,9 @@ function entriesFor(
           : {}),
       }));
     case 'databases':
-      return [...snapshot.databases.values()].map((entry) => ({
-        code: entry.code,
-        label: entry.label,
-        dataset_count: entry.datasetCount,
-      }));
     case 'subjects':
-      return [...snapshot.subjects.values()].map((entry) => ({
-        code: entry.code,
-        label: entry.label,
-        dataset_count: entry.datasetCount,
-      }));
     case 'frequencies':
-      return [...snapshot.frequencies.values()].map((entry) => ({
+      return [...snapshot[topic].values()].map((entry) => ({
         code: entry.code,
         label: entry.label,
         dataset_count: entry.datasetCount,
@@ -180,7 +170,8 @@ const AREA_TOPICS: ReadonlySet<ReferenceTopic> = new Set(['ref_areas', 'area_gro
 /**
  * Scopes, looks up, filters, and pages one topic. The zero-hit notice names the
  * step that removed the last entries; an exact lookup that finds nothing sets
- * none, since `notFound` already lists the misses.
+ * none, since `notFound` already lists the misses. A cursor past the last entry
+ * adds the paging notice.
  */
 export function listReference(snapshot: CatalogSnapshot, params: ReferenceParams): ReferenceResult {
   let entries = entriesFor(snapshot, params.topic, Boolean(params.codes?.length));
@@ -205,8 +196,8 @@ export function listReference(snapshot: CatalogSnapshot, params: ReferenceParams
     );
   }
   if (params.codes?.length) {
-    const wanted = params.codes.map((code) =>
-      AREA_TOPICS.has(params.topic) ? normalizeAreaCode(code) : code.trim().toUpperCase(),
+    const wanted = params.codes.map(
+      AREA_TOPICS.has(params.topic) ? normalizeAreaCode : normalizeCode,
     );
     const present = new Set(entries.map((entry) => entry.code.toUpperCase()));
     notFound = wanted.filter((code) => !present.has(code));
@@ -221,13 +212,14 @@ export function listReference(snapshot: CatalogSnapshot, params: ReferenceParams
     );
   }
 
+  const page = pageOf(entries, params.offset, params.limit);
   const notices = [
     params.filter && terms.length === 0
       ? 'filter held no searchable word (letters or digits), so it was not applied.'
       : undefined,
     emptiedBy,
+    page.notice,
   ].filter((notice) => notice !== undefined);
-  const page = pageOf(entries, params.offset, params.limit);
 
   return {
     entries: page.items,

@@ -13,12 +13,18 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { CanvasInstance, type ColumnSchema, type DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  databaseError,
+  JsonRpcErrorCode,
+  McpError,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import {
   createMockContext,
   type MockContextLogger,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
+import { ErrorHandler } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compareGeographiesTool } from '@/mcp-server/tools/definitions/compare-geographies.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
@@ -38,6 +44,7 @@ import {
   FIXED_NOW,
   faultyCanvas,
   memoryCanvas,
+  sharingState,
   wireDataframes,
 } from '../../helpers/ilostat-upstream.js';
 import { guardNetwork } from '../../helpers/network-guard.js';
@@ -117,7 +124,7 @@ function clock() {
 }
 
 function newBridge(canvas: DataCanvas, now: () => Date = () => FIXED_NOW, dropEnabled = false) {
-  return new CanvasBridge(canvas, { tableTtlMs: TTL_MS, dropEnabled, now });
+  return new CanvasBridge(canvas, { tableTtlMs: TTL_MS, dropEnabled, listingEnabled: true, now });
 }
 
 function newContext() {
@@ -232,7 +239,12 @@ describe('routeRows with a canvas', () => {
     if (outcome.kind !== 'staged') throw new Error(`expected staged, got ${outcome.kind}`);
     const expiresAt = new Date(FIXED_NOW.getTime() + TTL_MS).toISOString();
     expect(outcome.rows).toEqual([0, 1, 2, 3].map(rowAt));
-    expect(outcome.table).toEqual({ name: outcome.table.name, rowCount: 5, expiresAt });
+    expect(outcome.table).toEqual({
+      name: outcome.table.name,
+      rowCount: 5,
+      expiresAt,
+      evicted: [],
+    });
     expect(outcome.table.name).toMatch(TABLE_NAME);
     // provenance is read once, after the whole source was consumed
     expect(pulledAtProvenance).toEqual([5]);
@@ -367,6 +379,38 @@ describe('routeRows when the canvas fails', () => {
     ]);
     expect(await tableNames(bridge, ctx)).toEqual([]);
   });
+
+  it.each([
+    [
+      'a spill file DuckDB cannot open',
+      {
+        at: 'registerTable',
+        afterRows: 3,
+        error: new Error(
+          'IO Error: Cannot open file "/srv/canvas-tmp/duckdb_temp_storage_DEFAULT-0.tmp": Permission denied',
+        ),
+      },
+      'IO Error: Cannot open file "[path]": Permission denied',
+    ],
+    [
+      'a temp root that cannot be created',
+      { at: 'acquire', error: new Error("EACCES: permission denied, mkdir '/srv/canvas-tmp'") },
+      "EACCES: permission denied, mkdir '[path]'",
+    ],
+  ] satisfies [string, CanvasFault, string][])(
+    'keeps the path of %s out of the client-visible warning',
+    async (_label, fault, redacted) => {
+      const ctx = newContext();
+      await route(newBridge(tracked(faultyCanvas(fault))), ctx, rowSource(500).rows, {
+        previewChars: 5 * ROW_CHARS - 1,
+      });
+      const logged = (ctx.log as MockContextLogger).calls.filter(
+        (call) => call.level === 'warning',
+      );
+      expect(logged.map((call) => call.data)).toEqual([{ error: redacted }]);
+      expect(JSON.stringify(logged)).not.toContain('/srv/canvas-tmp');
+    },
+  );
 });
 
 describe('register_as provenance (derived dataframes)', () => {
@@ -469,6 +513,102 @@ describe('register_as provenance (derived dataframes)', () => {
   });
 });
 
+describe('df_ names in comments, strings, and aliases', () => {
+  const MISSING = 'df_NOSUC_HTBL1';
+
+  /** Stages a parent holding {@link UNE_DATASET}, then stores `sqlFor(parent)` with register_as. */
+  async function derive(sqlFor: (parent: string) => string) {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const ctx = newContext();
+    const parent = await stage(bridge, ctx, 5);
+    const { meta } = await bridge.query(ctx, sqlFor(parent), {
+      rowLimit: 10,
+      registerAs: 'df_DERIV_ED001',
+      sourceTool: 'ilostat_dataframe_query',
+    });
+    return { parent, meta };
+  }
+
+  it.each([
+    ['an apostrophe in a line comment', (p: string) => `-- it's\nSELECT * FROM ${p} -- isn't`],
+    [
+      'an apostrophe in a block comment',
+      (p: string) => `/* it's */ SELECT * FROM ${p} /* isn't */`,
+    ],
+    [
+      'an apostrophe in a nested block comment',
+      (p: string) => `/* a /* it's */ b */ SELECT * FROM ${p} WHERE 'a' = 'a'`,
+    ],
+    [
+      'a backslash-escaped quote in an E-string',
+      (p: string) => `SELECT k, E'it\\'s' AS s FROM ${p} WHERE 'a' = 'a'`,
+    ],
+    [
+      'an apostrophe in a dollar-quoted string',
+      (p: string) => `SELECT k, $$it's$$ AS s FROM ${p} WHERE 'a' = 'a'`,
+    ],
+  ])(
+    'reads the dataframe past %s, so the stored table inherits its datasets',
+    async (_label, sqlFor) => {
+      const { parent, meta } = await derive(sqlFor);
+      expect(meta).toMatchObject({
+        queryParams: { derived_from: [parent] },
+        datasets: [UNE_DATASET],
+      });
+    },
+  );
+
+  it.each([
+    ['a line comment', (p: string) => `SELECT 42 AS answer -- ${p}`],
+    ['a block comment', (p: string) => `SELECT 42 AS answer /* ${p} */`],
+    ['a dollar-quoted string', (p: string) => `SELECT $$${p}$$ AS s`],
+    ['an E-string after an escaped quote', (p: string) => `SELECT E'\\'${p}' AS s`],
+  ])('never takes a name that appears only in %s as a parent', async (_label, sqlFor) => {
+    const { meta } = await derive(sqlFor);
+    expect(meta).toMatchObject({ queryParams: { derived_from: [] }, datasets: [] });
+  });
+
+  it.each([
+    ['a line comment', `SELECT 42 AS answer -- ${MISSING}`],
+    ['a dollar-quoted string', `SELECT $$${MISSING}$$ AS s`],
+    ['a tagged dollar-quoted string', `SELECT $t$${MISSING}$t$ AS s`],
+    ['a double-quoted alias', `SELECT 1 AS "${MISSING}"`],
+    ['a bare alias', `SELECT 1 AS ${MISSING}`],
+    ['a CTE name', `WITH ${MISSING} AS (SELECT 1 AS one) SELECT one FROM ${MISSING}`],
+  ])('runs valid SQL that names an unstaged df_ only in %s', async (_label, sql) => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const { result } = await bridge.query(newContext(), sql, { rowLimit: 10, sourceTool: 'test' });
+    expect(result.rowCount).toBe(1);
+  });
+
+  it.each([
+    ['in a plain SELECT', `SELECT * FROM ${MISSING}`],
+    ['after a comment holding apostrophes', `-- it's\nSELECT * FROM ${MISSING} -- '`],
+    [
+      'after a comment, double-quoted and in another case',
+      '/* x */ SELECT * FROM "DF_nosuc_htbl1"',
+    ],
+    ['inside parentheses', `(SELECT * FROM ${MISSING})`],
+  ])('fails missing_table for an unstaged dataframe read %s', async (_label, sql) => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const error = await bridge
+      .query(newContext(), sql, { rowLimit: 10, sourceTool: 'test' })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: `Dataframe ${MISSING} does not exist or has expired.`,
+      data: {
+        reason: 'missing_table',
+        tableName: MISSING,
+        recovery: {
+          hint: 'Call ilostat_dataframe_describe to list the staged dataframes, or re-run the producing tool to stage the data again.',
+        },
+      },
+    });
+  });
+});
+
 describe('the tenant canvas and the expiry sweep', () => {
   it('keeps one canvas per tenant in ctx.state and re-mints it once the stored one is gone', async () => {
     const canvas = tracked(memoryCanvas());
@@ -483,6 +623,21 @@ describe('the tenant canvas and the expiry sweep', () => {
     const second = await bridge.acquire(ctx);
     expect(second.canvasId).not.toBe(first.canvasId);
     expect(await ctx.state.get('canvas-id')).toBe(second.canvasId);
+  });
+
+  it('mints one canvas for two concurrent first calls on a tenant, and keeps both calls’ dataframes', async () => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const first = newContext();
+    const second = sharingState(newContext(), first);
+    const [a, b] = await Promise.all([bridge.acquire(first), bridge.acquire(second)]);
+    expect(b.canvasId).toBe(a.canvasId);
+    expect(await first.state.get('canvas-id')).toBe(a.canvasId);
+
+    const fresh = newContext();
+    const other = sharingState(newContext(), fresh);
+    const names = await Promise.all([stage(bridge, fresh, 5), stage(bridge, other, 5)]);
+    expect((await tableNames(bridge, fresh)).sort()).toEqual([...names].sort());
+    expect((await metaKeys(fresh)).sort()).toEqual(names.map((name) => `df-meta/${name}`).sort());
   });
 
   it('sweeps a dataframe exactly at its expiry, dropping the table and its provenance', async () => {
@@ -525,7 +680,7 @@ describe('engine rejections are rebuilt with the calling tool’s contract', () 
       data: {
         reason: 'denied_function',
         recovery: {
-          hint: 'Remove the file-reading function and query only the df_<id> tables ilostat_dataframe_describe lists.',
+          hint: 'Remove the file-reading function and query only df_<id> tables, by the names the producing tools returned.',
         },
       },
     });
@@ -557,6 +712,43 @@ describe('engine rejections are rebuilt with the calling tool’s contract', () 
     ['a plain error', new Error('socket hang up')],
   ])('passes %s through untouched', async (_label, engineError) => {
     expect(await queryFailure(engineError)).toBe(engineError);
+  });
+
+  const SPILL_FAILURE =
+    'IO Error: Cannot open file "/srv/canvas-tmp/duckdb_temp_storage_DEFAULT-0.tmp": Permission denied';
+  const UNCLASSIFIED_SPILL_FAILURE = new Error(SPILL_FAILURE);
+  it.each([
+    ['an engine I/O failure', databaseError(SPILL_FAILURE), JsonRpcErrorCode.DatabaseError],
+    [
+      'an engine failure the framework left unclassified',
+      UNCLASSIFIED_SPILL_FAILURE,
+      ErrorHandler.classifyOnly(UNCLASSIFIED_SPILL_FAILURE).code,
+    ],
+    [
+      'a spill failure the engine classed read-only',
+      validationError(`Canvas SQL rejected: ${SPILL_FAILURE}`, {
+        reason: 'sql_read_only',
+        recovery: { hint: 'Send a read-only SELECT.' },
+      }),
+      JsonRpcErrorCode.ValidationError,
+    ],
+    [
+      'a declared reason',
+      validationError(`Canvas query failed: ${SPILL_FAILURE}`, {
+        reason: 'sql_execution_error',
+        recovery: { hint: 'framework hint' },
+      }),
+      JsonRpcErrorCode.ValidationError,
+    ],
+  ])('keeps the spill path of %s out of the message', async (_label, engineError, code) => {
+    const error = (await queryFailure(engineError)) as McpError;
+    expect(error).toBeInstanceOf(McpError);
+    expect(error.code).toBe(code);
+    expect(error.message).toContain('IO Error: Cannot open file "[path]": Permission denied');
+    expect(JSON.stringify({ message: error.message, data: error.data })).not.toContain(
+      '/srv/canvas-tmp',
+    );
+    expect(error.cause).toBe(engineError);
   });
 });
 

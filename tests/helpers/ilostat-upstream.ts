@@ -3,7 +3,9 @@
  * rplumber tables of contents and dictionaries, the `/data/indicator` CSV and
  * `/data/ref_area` JSON bodies, and the SDMX structure documents and unit probes
  * under `tests/fixtures/`, served through the framework's strict fetch fake; an
- * emulator that filters a recorded CSV by the request's parameters; a pull-based
+ * emulator that filters a recorded CSV by the request's parameters, read as
+ * upstream reads them (a literal `+` joins a list; `%2B` inside `id` names one
+ * invalid dataset); a pull-based
  * CSV body that records how much of it was read; an in-memory DuckDB canvas and
  * one that fails at a chosen engine step; the fast pacing/retry/timer options;
  * the service wiring handler tests share, and the staging the dataframe tools
@@ -62,7 +64,7 @@ export const FAST_PACING: PacingOptions = {
   maxWaitMs: 1_000,
 };
 export const NO_RETRY: RetryPolicy = { maxRetries: 0, baseDelayMs: 0, deadlineMs: 5_000 };
-export const FAST_TIMEOUTS: TimeoutOptions = { headersMs: 1_000, stallMs: 1_000 };
+export const FAST_TIMEOUTS: TimeoutOptions = { headersMs: 1_000, stallMs: 1_000, bodyMs: 5_000 };
 
 /** The tool recovery `catalog_unavailable` carries (docs/design.md, Shared conventions). */
 export const CATALOG_UNAVAILABLE_RECOVERY =
@@ -198,6 +200,13 @@ export function retiredDatasetResponse(): Response {
   return new Response(body, { status: 400, headers: { 'content-type': 'application/json' } });
 }
 
+/** The recorded `400` body, naming `id` as the dataset ID upstream could not serve. */
+function invalidDatasetResponse(id: string): Response {
+  const recorded = JSON.parse(fixtureText('rplumber/retired-dataset.json')) as RawRow;
+  const body = JSON.stringify({ ...recorded, error: `deprecated or invalid dataset id=${id}` });
+  return new Response(body, { status: 400, headers: { 'content-type': 'application/json' } });
+}
+
 /** The recorded Cloudflare challenge page: `cf-mitigated: challenge`, HTML body, HTTP 403. */
 export function challengePage(): Response {
   return new Response('<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>', {
@@ -268,6 +277,28 @@ export function isRefAreaData(request: Request): boolean {
   return isRplumber(request, '/data/ref_area');
 }
 
+/**
+ * A request's query parameters as rplumber reads them: a literal `+` is the list
+ * separator, never a space as `URLSearchParams` would decode it. A `%2B` decodes
+ * to the same `+` here; only `id` tells the two apart ({@link indicatorDataRoute}).
+ */
+export function upstreamParams(url: URL): URLSearchParams {
+  return new URLSearchParams(url.search.replaceAll('+', '%2B'));
+}
+
+/**
+ * The `id` elements as rplumber splits them: on a literal `+` only. Verified live:
+ * `id=A+B` returns both datasets, while `id=A%2BB` is read as the single ID `A+B`
+ * and answered `400 deprecated or invalid dataset id=A+B`.
+ */
+function requestedIds(url: URL): string[] {
+  const raw = url.search
+    .slice(1)
+    .split('&')
+    .find((pair) => pair.startsWith('id='));
+  return raw ? raw.slice(3).split('+').map(decodeURIComponent) : [];
+}
+
 /** Code-list parameters the emulator applies, each to the CSV column of the same name. */
 const CODE_FILTERS = ['ref_area', 'sex', 'classif1', 'classif2', 'source'] as const;
 
@@ -278,16 +309,17 @@ const csvCells = (line: string): string[] =>
 /**
  * Emulates `/data/indicator` over a recorded CSV body: keeps the rows the request
  * selects by `id` (its indicator codes), `ref_area`, `sex`, `classif1`, `classif2`,
- * `source`, `time` (`+`-joined periods), `timefrom`, and `timeto` (years). A code
- * filter applies only to rows whose cell for it is non-empty — upstream's rule: a
- * dataset without the breakdown passes through unfiltered. `latestyear`,
- * `best_source`, `type`, and `format` are not emulated; serve a fixture recorded
- * with them instead. Kept lines are returned byte for byte, header (and BOM) first.
+ * `source`, `time` (`+`-joined periods), `timefrom`, and `timeto` (years), every
+ * list read as {@link upstreamParams} reads it. A code filter applies only to rows
+ * whose cell for it is non-empty — upstream's rule: a dataset without the breakdown
+ * passes through unfiltered. `latestyear`, `best_source`, `type`, and `format` are
+ * not emulated; serve a fixture recorded with them instead. Kept lines are returned
+ * byte for byte, header (and BOM) first.
  */
 export function filterIndicatorCsv(csv: string, url: URL): string {
   const [header = '', ...lines] = csv.split('\n').filter((line) => line !== '');
   const columns = csvCells(header.replace(/^﻿/, ''));
-  const params = url.searchParams;
+  const params = upstreamParams(url);
   const listed = (name: string): Set<string> | undefined => {
     const value = params.get(name);
     return value ? new Set(value.split('+')) : undefined;
@@ -317,12 +349,22 @@ export function filterIndicatorCsv(csv: string, url: URL): string {
   return `${[header, ...kept].join('\n')}\n`;
 }
 
-/** `/data/indicator` route answering each request with `csv` filtered by {@link filterIndicatorCsv}. */
+/**
+ * `/data/indicator` route answering each request with `csv` filtered by
+ * {@link filterIndicatorCsv} — or, as upstream does, with the invalid-dataset `400`
+ * when an `id` element holds a `+` that arrived percent-encoded.
+ */
 export function indicatorDataRoute(csv: string): FetchMockRoute {
   return {
     method: 'GET',
     match: (request) => isIndicatorData(request),
-    respond: (request) => csvResponse(filterIndicatorCsv(csv, new URL(request.url))),
+    respond: (request) => {
+      const url = new URL(request.url);
+      const joinedAsOne = requestedIds(url).find((id) => id.includes('+'));
+      return joinedAsOne
+        ? invalidDatasetResponse(joinedAsOne)
+        : csvResponse(filterIndicatorCsv(csv, url));
+    },
   };
 }
 

@@ -2,7 +2,8 @@
  * @fileoverview Tests for the observation test infrastructure in
  * `ilostat-upstream.ts`: the catalog extras load into a snapshot, the
  * `/data/indicator` emulator filters a recorded CSV by exactly the URL the client
- * builds (a code filter skipping rows without that cell, as upstream does), the
+ * builds (a code filter skipping rows without that cell, and `id` split on a
+ * literal `+` only, a `%2B`-joined one answered `400`, as upstream does), the
  * pull-based CSV body counts what was read and sees a cancel, and the in-memory
  * DuckDB canvas stages and queries rows without touching the network.
  * @module tests/helpers/ilostat-upstream.test
@@ -19,9 +20,11 @@ import {
   filterIndicatorCsv,
   fixtureText,
   INDICATOR_CSV,
+  indicatorDataRoute,
   loadCatalogFixture,
   memoryCanvas,
   observationCatalogFixture,
+  RPLUMBER_ORIGIN,
   refAreaRows,
   streamedCsv,
 } from './ilostat-upstream.js';
@@ -123,6 +126,32 @@ describe('filterIndicatorCsv', () => {
     const body = filterIndicatorCsv(fixtureText(INDICATOR_CSV.uneDeap), url);
     expect(body.startsWith('﻿"ref_area"')).toBe(true);
     expect(body.trimEnd().split('\n')).toHaveLength(1);
+  });
+});
+
+describe('indicatorDataRoute', () => {
+  const { fetch } = createFetchMock([
+    indicatorDataRoute(fixtureText(INDICATOR_CSV.multiDatasetUnion)),
+  ]);
+  const ask = (search: string) => fetch(`${RPLUMBER_ORIGIN}/data/indicator${search}`);
+
+  it('splits id on a literal + only, answering a %2B-joined id with the invalid-dataset 400, as upstream does', async () => {
+    const both = await ask('?id=LAP_2GDP_NOC_RT_A+UNE_2EAP_SEX_AGE_RT_A&ref_area=KEN&sex=SEX_T');
+    expect(both.status).toBe(200);
+    expect((await both.text()).trimEnd().split('\n')).toHaveLength(3);
+
+    const joined = await ask('?id=LAP_2GDP_NOC_RT_A%2BUNE_2EAP_SEX_AGE_RT_A&ref_area=KEN');
+    expect(joined.status).toBe(400);
+    expect(await joined.json()).toMatchObject({
+      error: 'deprecated or invalid dataset id=LAP_2GDP_NOC_RT_A+UNE_2EAP_SEX_AGE_RT_A',
+    });
+  });
+
+  it('splits every other list on a literal + or a %2B alike', async () => {
+    for (const sex of ['SEX_T+SEX_F', 'SEX_T%2BSEX_F']) {
+      const body = await (await ask(`?id=UNE_2EAP_SEX_AGE_RT_A&sex=${sex}`)).text();
+      expect(body.trimEnd().split('\n'), sex).toHaveLength(3);
+    }
   });
 });
 

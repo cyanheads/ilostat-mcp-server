@@ -9,7 +9,11 @@
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { config } from '@cyanheads/mcp-ts-core/config';
 import { getServerConfig } from '@/config/server-config.js';
-import { type CanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  type CanvasBridge,
+  dataframeListingAllowed,
+  initCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { CatalogService } from '@/services/catalog/catalog-service.js';
 import { ObservationService } from '@/services/observations/observation-service.js';
 import { ResponseCache } from '@/services/observations/response-cache.js';
@@ -67,6 +71,7 @@ export function initIlostatServices(options: InitIlostatServicesOptions = {}): I
   const bridge = initCanvasBridge(options.canvas, {
     tableTtlMs: serverConfig.datasetTtlSeconds * 1000,
     dropEnabled: serverConfig.dataframeDropEnabled,
+    listingEnabled: dataframeListingAllowed(),
     now,
   });
   services = {

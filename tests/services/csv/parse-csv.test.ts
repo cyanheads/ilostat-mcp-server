@@ -3,10 +3,13 @@
  * streamed `/data/indicator` bodies parse with: a leading BOM, quoted fields with
  * doubled quotes and embedded line breaks, CRLF or LF record ends, empty cells, and
  * header-driven rows — and, streamed, the same rows wherever the chunks split a
- * BOM, a quote, a doubled quote, or a CRLF.
+ * BOM, a quote, a doubled quote, or a CRLF. A field past 65,536 characters or a
+ * record past 262,144 fails as a serialization error, and a long field costs about
+ * its own length in heap.
  * @module tests/services/csv/parse-csv.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import { parseCsvObjects, parseCsvRecords, parseCsvStream } from '@/services/csv/parse-csv.js';
 import { fixtureText, INDICATOR_CSV } from '../../helpers/ilostat-upstream.js';
@@ -143,5 +146,56 @@ describe('parseCsvStream', () => {
     expect(await streamed([headerOnly.slice(0, 10), headerOnly.slice(10)])).toEqual([]);
     expect(await streamed(['ref_area,time'])).toEqual([]);
     expect(await streamed([])).toEqual([]);
+  });
+});
+
+/** `text` in 64 KiB chunks, as a network body arrives. */
+const chunked = (text: string): string[] => text.match(/[\s\S]{1,65536}/g) ?? [];
+
+/** A flat copy of `text`, so slicing it in a measured region allocates nothing new. */
+const flat = (text: string): string => new TextDecoder().decode(new TextEncoder().encode(text));
+
+describe('field and record length caps', () => {
+  const MIB = 1024 * 1024;
+  const FIELD_ERROR = {
+    code: JsonRpcErrorCode.SerializationError,
+    message: 'ILOSTAT sent a CSV field longer than 65,536 characters.',
+  };
+
+  it.each([
+    ['an unquoted field', `ref_area,obs_value\n${'a'.repeat(MIB)}\n`],
+    ['a quoted field', `ref_area,obs_value\n"${'a'.repeat(MIB)}"\n`],
+    ['a field an unclosed quote opens', `ref_area,obs_value\n"${'a'.repeat(MIB)}`],
+  ])('rejects %s past 65,536 characters', async (_label, body) => {
+    await expect(streamed(chunked(body))).rejects.toMatchObject(FIELD_ERROR);
+    expect(() => parseCsvObjects(body)).toThrow(FIELD_ERROR.message);
+  });
+
+  it('reads a field of exactly 65,536 characters', async () => {
+    const field = 'b'.repeat(65_536);
+    expect(await streamed(chunked(`a,b\n1,"${field}"\n`))).toEqual([{ a: '1', b: field }]);
+  });
+
+  it('rejects a record past 262,144 characters, however its fields divide it', async () => {
+    const record = Array.from({ length: 5 }, () => 'c'.repeat(60_000)).join(',');
+    await expect(streamed(chunked(`a,b,c,d,e\n${record}\n`))).rejects.toMatchObject({
+      code: JsonRpcErrorCode.SerializationError,
+      message: 'ILOSTAT sent a CSV record longer than 262,144 characters.',
+    });
+    const commas = ','.repeat(300_000);
+    await expect(streamed(chunked(`a\n${commas}\n`))).rejects.toMatchObject({
+      message: 'ILOSTAT sent a CSV record longer than 262,144 characters.',
+    });
+  });
+
+  it('holds each long field as one string, not one heap node per character', async () => {
+    const field = 'd'.repeat(60_000);
+    const chunks = chunked(flat(`ref_area,note\n${`KEN,${field}\n`.repeat(100)}`));
+    const before = process.memoryUsage().heapUsed;
+    const rows = await streamed(chunks);
+    const grown = process.memoryUsage().heapUsed - before;
+    expect(rows).toHaveLength(100);
+    expect(rows.every((row) => row.note === field)).toBe(true);
+    expect(grown).toBeLessThan(3 * 100 * field.length);
   });
 });

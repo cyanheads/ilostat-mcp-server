@@ -15,11 +15,16 @@ export const dataframeDropTool = tool('ilostat_dataframe_drop', {
   title: 'Drop a staged ILOSTAT dataframe',
   description:
     'Drop a staged df_<id> dataframe by name before its TTL expires: once an analysis with it is finished, to free the table, or to reuse its name as an ilostat_dataframe_query register_as target. Idempotent: dropped is false when nothing matched.',
-  annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
 
   input: z.object({
     name: dataframeNameInput('name').describe(
-      'Dataframe name to drop (df_XXXXX_XXXXX: letters and digits, five in each part; case-insensitive, as in SQL), as ilostat_dataframe_describe lists it.',
+      'Dataframe name to drop (df_XXXXX_XXXXX: letters and digits, five in each part; case-insensitive, as in SQL), as the producing tool returned it.',
     ),
   }),
 

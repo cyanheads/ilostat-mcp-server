@@ -65,6 +65,10 @@ function contentText(result: ContractResult): string {
 const nextCursorOf = (result: ContractResult) =>
   (result.structuredContent as { next_cursor?: string } | undefined)?.next_cursor;
 
+/** The notice a cursor starting past the last of `total` matches carries. */
+const pastEndNotice = (total: number) =>
+  `The cursor starts past the last result (${total} in all); a next_cursor continues only the query that returned it. Omit cursor to start from the first page.`;
+
 const indicators = (result: Output) => result.hits.map((hit) => hit.indicator);
 const scopes = (result: Output) => result.hits.map((hit) => hit.match_scope);
 
@@ -246,6 +250,26 @@ describe('filters', () => {
     wireServices();
     expect(indicators((await search(filters)).result)).toEqual(expected);
   });
+
+  it.each(['subject', 'database'] as const)(
+    'every code the %s description gives as an example is one the catalog carries',
+    async (field) => {
+      wireServices();
+      const description = searchIndicatorsTool.input.shape[field].description ?? '';
+      const examples =
+        /e\.g\. ([^;]+);/
+          .exec(description)?.[1]
+          ?.replace(/\([^)]*\)/g, '')
+          .match(/\b[A-Z0-9]{2,}\b/g) ?? [];
+      expect(examples.length).toBeGreaterThan(0);
+      for (const code of examples) {
+        const { result } = await search(
+          field === 'subject' ? { subject: code } : { database: code },
+        );
+        expect(result.total).toBeGreaterThan(0);
+      }
+    },
+  );
 });
 
 describe('facets', () => {
@@ -376,16 +400,48 @@ describe('paging', () => {
     expect(seen).toEqual(LABOUR_RANKING);
   });
 
-  it('returns an empty page, with the total, for an offset past the end', async () => {
+  it.each([8, 30])(
+    'returns an empty page with the total and says so for offset %i, past the last match',
+    async (offset) => {
+      wireServices();
+      const { result, enrichment } = await search({
+        query: 'labour',
+        limit: 3,
+        cursor: encodeCursor({ offset, limit: 3 }),
+      });
+      expect(result.hits).toEqual([]);
+      expect(result.total).toBe(8);
+      expect(result.next_cursor).toBeUndefined();
+      expect(enrichment).toEqual({
+        truncated: false,
+        shown: 0,
+        cap: 3,
+        notice: pastEndNotice(8),
+      });
+    },
+  );
+
+  it('adds no past-the-end notice to a last page that starts on the last match', async () => {
     wireServices();
     const { result, enrichment } = await search({
       query: 'labour',
-      cursor: encodeCursor({ offset: 30, limit: 3 }),
+      limit: 3,
+      cursor: encodeCursor({ offset: 7, limit: 3 }),
     });
-    expect(result.hits).toEqual([]);
-    expect(result.total).toBe(8);
-    expect(result.next_cursor).toBeUndefined();
-    expect(enrichment).toMatchObject({ truncated: false, shown: 0 });
+    expect(indicators(result)).toEqual(['EMP_TEMP_SEX_INS_DSB_NB']);
+    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 3 });
+  });
+
+  it('gives a cursor on a search that matches nothing the zero-hit notice alone', async () => {
+    wireServices();
+    const { result, enrichment } = await search({
+      query: 'astronaut',
+      cursor: encodeCursor({ offset: 30, limit: 10 }),
+    });
+    expect(result.total).toBe(0);
+    expect(enrichment.notice).toBe(
+      'No indicator matched every term. Use fewer or broader terms (for example "youth unemployment"), or browse subjects with ilostat_list_reference topic subjects and search by subject.',
+    );
   });
 
   it('rejects a cursor it did not issue as invalid_cursor, with this tool’s recovery', async () => {
@@ -597,6 +653,57 @@ describe('format()', () => {
     expect(datasetLine).toContain(' · updated 24/09/2026 ## update · ');
     expect(lines.some((line) => line.startsWith('## update'))).toBe(false);
   });
+
+  it('flattens every line terminator in upstream codes on content[]; structuredContent keeps them verbatim', async () => {
+    const fixture = loadCatalogFixture();
+    const row = tocRow(fixture, 'SDG_0552_NOC_RT_A');
+    row.indicator = 'SDG_0552_NOC_RT\u2028## injected indicator';
+    row.id = 'SDG_0552_NOC_RT_A\n## injected id';
+    row.database = 'ILOSDG\u2029## injected database';
+    row.subject = 'SDG\u0085## injected subject';
+    row.classification = 'NOC\r\n## injected classification';
+    row.freq = 'A\n## injected frequency';
+    row['indicator.label'] = 'Women in management';
+    wireServices({ fixture });
+    const result = await runToolContract(searchIndicatorsTool, { query: 'women management' });
+    expect(result.isError).toBeFalsy();
+    const output = result.structuredContent as Output;
+    expect(output.hits[0]).toMatchObject({
+      indicator: 'SDG_0552_NOC_RT\u2028## injected indicator',
+      database: { code: 'ILOSDG\u2029## injected database' },
+      subject: { code: 'SDG\u0085## injected subject' },
+      classification: 'NOC\r\n## injected classification',
+      datasets: [
+        { dataset_id: 'SDG_0552_NOC_RT_A\n## injected id', frequency: 'A\n## injected frequency' },
+      ],
+    });
+    const text = contentText(result);
+    expect(text).not.toMatch(/[\u0085\u2028\u2029]/);
+    const lines = text.split(/\r\n|[\r\n]/);
+    expect(
+      lines.some((line) => line.startsWith('### SDG_0552_NOC_RT ## injected indicator — ')),
+    ).toBe(true);
+    expect(lines.filter((line) => line.startsWith('## injected'))).toEqual([]);
+  });
+
+  it.each(['constructor', '__proto__'])(
+    'renders a ToC frequency %s as the code, never a prototype member',
+    async (frequency) => {
+      const fixture = loadCatalogFixture();
+      tocRow(fixture, 'SDG_0552_NOC_RT_A').freq = frequency;
+      wireServices({ fixture });
+      const result = await runToolContract(searchIndicatorsTool, { query: 'managerial' });
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as Output).hits[0]?.datasets[0]).toMatchObject({
+        dataset_id: 'SDG_0552_NOC_RT_A',
+        frequency,
+      });
+      const text = contentText(result);
+      expect(text).not.toMatch(/function|\[object Object\]/);
+      expect(text).toContain(`- SDG_0552_NOC_RT_A · ${frequency} · `);
+      expect(text).toContain(`- Frequencies: ${frequency}: 1`);
+    },
+  );
 });
 
 describe('contract envelope (runToolContract)', () => {
@@ -649,6 +756,28 @@ describe('contract envelope (runToolContract)', () => {
     });
     expect(last.isError).toBeFalsy();
     expect(last.structuredContent).toMatchObject({ truncated: false, shown: 3, cap: 5, total: 8 });
+  });
+
+  it('a cursor past the last match: empty page, total kept, notice on both surfaces', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, {
+      query: 'labour',
+      limit: 3,
+      cursor: encodeCursor({ offset: 30, limit: 3 }),
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      hits: [],
+      total: 8,
+      truncated: false,
+      shown: 0,
+      cap: 3,
+      notice: pastEndNotice(8),
+    });
+    expect(result.structuredContent).not.toHaveProperty('next_cursor');
+    const text = contentText(result);
+    expect(text).toContain('**8 matching indicators**');
+    expect(text).toContain(`> ${pastEndNotice(8)}`);
   });
 
   it('a paged browse on a query with no searchable word carries both notices on both surfaces', async () => {

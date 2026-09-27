@@ -11,7 +11,7 @@
 import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import type { Basis } from '@/services/basis/basis.js';
 import type { BasisCounts } from '@/services/canvas-bridge/canvas-bridge.js';
-import { periodYearsBefore } from '@/services/catalog/codes.js';
+import { periodYear, periodYearsBefore } from '@/services/catalog/codes.js';
 import type { RawObservation } from '@/services/rplumber/types.js';
 import { emptyBasisCounts, type ObservationRow } from './observation-rows.js';
 
@@ -26,7 +26,12 @@ export interface Candidate {
 }
 
 export type CompareMode =
-  | { includeProjections: boolean; kind: 'latest' }
+  | {
+      /** Earliest year a latest value may fall in: current year − lookback_years, never widened by change_years. */
+      fromYear: number;
+      includeProjections: boolean;
+      kind: 'latest';
+    }
   | { kind: 'period'; period: string };
 
 export interface Change {
@@ -74,6 +79,7 @@ function choose(candidates: readonly Candidate[], mode: CompareMode): Candidate 
   let latest: Candidate | undefined;
   for (const candidate of candidates) {
     if (candidate.basis === 'projection' && !mode.includeProjections) continue;
+    if (periodYear(candidate.raw.period) < mode.fromYear) continue;
     if (!latest || candidate.raw.period > latest.raw.period) latest = candidate;
   }
   return latest;
@@ -125,7 +131,7 @@ export function compareAreas(input: CompareInput): Comparison {
     });
   }
 
-  const byValue = [...entries].sort(ORDER.value_desc);
+  const byValue = entries.toSorted(ORDER.value_desc);
   byValue.forEach((entry, index) => {
     const previous = byValue[index - 1];
     entry.rank = previous && previous.row.value === entry.row.value ? previous.rank : index + 1;

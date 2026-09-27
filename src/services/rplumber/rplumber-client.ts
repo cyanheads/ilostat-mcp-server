@@ -37,7 +37,7 @@ const SERVICE = 'ILOSTAT API (rplumber.ilo.org)';
  * About one request a second: a hard 60-per-minute window, two in flight, a 500 ms
  * start gap, and a 60 s cooldown doubling to 10 min after a 429 or challenge.
  */
-export const RPLUMBER_PACING: PacingOptions = {
+const RPLUMBER_PACING: PacingOptions = {
   limits: [{ requests: 60, perMs: 60_000 }],
   maxConcurrent: 2,
   minStartGapMs: 500,
@@ -69,12 +69,28 @@ const ENDPOINT_PARAMS = {
 } as const satisfies Record<string, readonly string[]>;
 
 type Endpoint = keyof typeof ENDPOINT_PARAMS;
+/** A scalar, or a list sent `+`-joined. */
+type ParamValue = string | readonly string[] | undefined;
 type ParamsFor<E extends Endpoint> = Partial<
-  Record<(typeof ENDPOINT_PARAMS)[E][number], string | undefined>
+  Record<(typeof ENDPOINT_PARAMS)[E][number], ParamValue>
 >;
 
 const JSON_ACCEPT = 'application/json';
 const CSV_ACCEPT = 'text/csv';
+
+const MIB = 1024 * 1024;
+
+/**
+ * Body caps, set well above the live sizes: the tables of contents and dictionaries
+ * run to 1.4 MiB at most (the indicator dictionary), and `/data/ref_area` to 3.2 MiB
+ * for the full history of the profile's headline indicators. A catalog body past
+ * its cap takes every catalog tool down until a release, so that cap is the
+ * loosest. A `/data/indicator` row is 93–96 bytes live; the stream's cap is ten
+ * times that for each row the caller may read.
+ */
+const METADATA_MAX_BYTES = 32 * MIB;
+const REF_AREA_DATA_MAX_BYTES = 16 * MIB;
+const INDICATOR_ROW_BYTES = 1024;
 
 /** Upstream `best_source` values: preferred source only, every source flagged, secondary only. */
 export type BestSource = 'yes' | 'all' | 'no';
@@ -107,18 +123,21 @@ export interface RefAreaDataParams {
   timeTo?: number;
 }
 
-/** Builds the request URL from allowlisted parameters; blank values are left off, never sent as `param=`. */
+/**
+ * Builds the request URL from allowlisted parameters; blank values are left off,
+ * never sent as `param=`. A list is sent with each element percent-encoded and a
+ * literal `+` between them: upstream reads `id=A%2BB` as the one dataset ID `A+B`
+ * (HTTP 400), so the separator must never be encoded.
+ */
 function buildUrl<E extends Endpoint>(endpoint: E, params: ParamsFor<E>): string {
   const url = new URL(endpoint, BASE_URL);
-  for (const [key, value] of Object.entries(params) as [string, string | undefined][]) {
-    if (value?.trim()) url.searchParams.set(key, value);
-  }
+  url.search = (Object.entries(params) as [string, ParamValue][])
+    .flatMap(([key, value]) => {
+      const values = (typeof value === 'string' ? [value] : (value ?? [])).filter((v) => v.trim());
+      return values.length ? [`${key}=${values.map(encodeURIComponent).join('+')}`] : [];
+    })
+    .join('&');
   return url.toString();
-}
-
-/** `+`-joins a list, or `undefined` when there is nothing to send. */
-function joined(values: readonly string[] | undefined): string | undefined {
-  return values?.length ? values.join('+') : undefined;
 }
 
 function parseJsonBody(body: string, operation: string): unknown {
@@ -153,8 +172,8 @@ function noteCodes(...cells: (string | null | undefined)[]): string[] {
 
 /** A number from an upstream cell, or `undefined` for a blank or non-numeric one. */
 function numericValue(cell: string | number | null | undefined): number | undefined {
-  if (cell === null || cell === undefined || cell === '') return;
-  const value = typeof cell === 'number' ? cell : Number(cell);
+  if (cell == null || cell === '') return;
+  const value = Number(cell);
   return Number.isFinite(value) ? value : undefined;
 }
 
@@ -245,6 +264,7 @@ export class RplumberClient {
       (body) => parseRows(IndicatorTocRowSchema, body, operation),
       scope,
       false,
+      METADATA_MAX_BYTES,
     );
   }
 
@@ -257,6 +277,7 @@ export class RplumberClient {
       (body) => parseRows(RefAreaTocRowSchema, body, operation),
       scope,
       false,
+      METADATA_MAX_BYTES,
     );
   }
 
@@ -288,21 +309,22 @@ export class RplumberClient {
         }),
       scope,
       false,
+      METADATA_MAX_BYTES,
     );
   }
 
   /** The canonical `/data/indicator` URL for `params` — also the response-cache key. */
   indicatorDataUrl(params: IndicatorDataParams): string {
     return buildUrl('/data/indicator', {
-      id: joined(params.datasetIds),
-      ref_area: joined(params.refAreas),
-      sex: joined(params.sex),
-      classif1: joined(params.classif1),
-      classif2: joined(params.classif2),
-      source: joined(params.sources),
-      time: joined(params.time),
-      timefrom: params.timeFrom === undefined ? undefined : String(params.timeFrom),
-      timeto: params.timeTo === undefined ? undefined : String(params.timeTo),
+      id: params.datasetIds,
+      ref_area: params.refAreas,
+      sex: params.sex,
+      classif1: params.classif1,
+      classif2: params.classif2,
+      source: params.sources,
+      time: params.time,
+      timefrom: params.timeFrom?.toString(),
+      timeto: params.timeTo?.toString(),
       latestyear: params.latestOnly ? 'TRUE' : undefined,
       best_source: params.bestSource,
       type: 'code',
@@ -313,12 +335,15 @@ export class RplumberClient {
   /**
    * Streams `/data/indicator` observations from a URL built by
    * {@link indicatorDataUrl}. Abort `signal` once reading stops early; a 400 for a
-   * withdrawn dataset ID fails as `dataset_retired`.
+   * withdrawn dataset ID fails as `dataset_retired`. The body is capped at
+   * {@link INDICATOR_ROW_BYTES} for each of the `maxRows` rows the caller may read,
+   * past which the stream fails `upstream_too_large`.
    */
   async streamIndicatorData(
     url: string,
     scope: UpstreamScope,
     signal: AbortSignal,
+    maxRows: number,
   ): Promise<AsyncGenerator<RawObservation>> {
     const chunks = await this.http.openStream(
       {
@@ -327,6 +352,7 @@ export class RplumberClient {
         accept: CSV_ACCEPT,
         acceptStatuses: [200],
         bounded: true,
+        maxBytes: maxRows * INDICATOR_ROW_BYTES,
         rejectStatus: (status, body) => (status === 400 ? retiredDataset(body, scope) : undefined),
       },
       scope,
@@ -341,8 +367,8 @@ export class RplumberClient {
   refAreaDataUrl(params: RefAreaDataParams): string {
     return buildUrl('/data/ref_area', {
       id: `${params.area}_A`,
-      indicator: joined(params.indicators),
-      timeto: params.timeTo === undefined ? undefined : String(params.timeTo),
+      indicator: params.indicators,
+      timeto: params.timeTo?.toString(),
       latestyear: params.latestOnly ? 'TRUE' : undefined,
       format: '.json',
     });
@@ -357,6 +383,7 @@ export class RplumberClient {
       (body) => parseRows(RefAreaDataRowSchema, body, operation).map(fromRefAreaRow),
       scope,
       true,
+      REF_AREA_DATA_MAX_BYTES,
     );
   }
 
@@ -366,6 +393,7 @@ export class RplumberClient {
     parse: (body: string) => T,
     scope: UpstreamScope,
     bounded: boolean,
+    maxBytes: number,
   ): Promise<T> {
     return this.http.request(
       {
@@ -374,6 +402,7 @@ export class RplumberClient {
         accept: JSON_ACCEPT,
         acceptStatuses: [200],
         bounded,
+        maxBytes,
         interpret: ({ body }) => parse(body),
       },
       scope,

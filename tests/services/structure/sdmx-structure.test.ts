@@ -4,7 +4,8 @@
  * from the content constraint with classification group headers dropped and
  * parentless leaves kept, the partial-codelist fallback for a dimension the
  * constraint omits, the default slice read by dimension ID from the `DEFAULT`
- * annotation, covered areas, the probe key, and unit decoding.
+ * annotation, covered areas (an area value that is not an SDMX code dropped from
+ * both the constraint and the codelist fallback), the probe key, and unit decoding.
  * @module tests/services/structure/sdmx-structure.test
  */
 
@@ -76,12 +77,8 @@ describe('parseStructure: sex and one breakdown (UNE_DEAP_SEX_AGE_RT)', () => {
     expect(codes).not.toContain('AGE_AGGREGATE');
   });
 
-  it('marks totals from the IS_TOTAL annotation and keeps each SDMX code name', () => {
-    expect(structure.classif1?.codes[0]).toEqual({
-      code: 'AGE_YTHADULT_YGE15',
-      name: '15+',
-      isTotal: true,
-    });
+  it('marks totals from the IS_TOTAL annotation', () => {
+    expect(structure.classif1?.codes[0]).toEqual({ code: 'AGE_YTHADULT_YGE15', isTotal: true });
     expect(
       structure.classif1?.codes.filter((code) => code.isTotal).map((code) => code.code),
     ).toEqual(['AGE_YTHADULT_YGE15', 'AGE_AGGREGATE_YGE15']);
@@ -204,6 +201,28 @@ describe('parseStructure: sparse documents', () => {
   it('throws on a document without a dataflow or data structure', () => {
     expect(() => parseStructure({ data: { dataflows: [], dataStructures: [] } })).toThrow();
     expect(() => parseStructure('Could not find requested structures')).toThrow();
+  });
+});
+
+describe('parseStructure: area codes that are not SDMX codes', () => {
+  const UNSAFE = ['../../../../availableconstraint?x=1#', 'KEN/..', 'usa', ''];
+
+  it('drops them from the content constraint, so none reaches a probe key', () => {
+    const doc = document('UNE_DEAP_SEX_AGE_RT');
+    const areas = doc.data.contentConstraints?.[0]?.cubeRegions[0]?.keyValues.find(
+      (keyValue) => keyValue.id === 'REF_AREA',
+    );
+    areas?.values.splice(1, 0, ...UNSAFE);
+    expect(parseStructure(doc).refAreas).toEqual(['ABW', 'KEN', 'USA', 'X06', 'X01']);
+  });
+
+  it('drops them from the codelist fallback too', () => {
+    const doc = document('UNE_DEAP_SEX_AGE_RT');
+    delete doc.data.contentConstraints;
+    doc.data.codelists
+      .find((list) => list.id === 'CL_AREA')
+      ?.codes.push(...UNSAFE.map((id) => ({ id })));
+    expect(parseStructure(doc).refAreas).toEqual(['ABW', 'KEN', 'USA', 'X01', 'X06']);
   });
 });
 

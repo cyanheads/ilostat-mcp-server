@@ -3,7 +3,9 @@
  * `limit` on every call; the cursor carries only the offset. Decoding is separate
  * from slicing so a tool rejects a bad cursor before it waits on the catalog: a
  * cursor that does not decode is rewrapped as `invalid_cursor` with the calling
- * tool's own recovery, which names this server's `next_cursor` field.
+ * tool's own recovery, which names this server's `next_cursor` field. A cursor that
+ * decodes but starts past the last item — one reused on a narrower query — gets an
+ * empty page with a notice saying so.
  * @module services/catalog/paging
  */
 
@@ -15,6 +17,8 @@ export interface Page<T> {
   items: T[];
   /** Present while more items remain. */
   nextCursor?: string;
+  /** Present when the offset starts past the last of a non-empty list. */
+  notice?: string;
 }
 
 /** The offset `cursor` carries, 0 without one; throws `invalid_cursor` when it does not decode. */
@@ -31,11 +35,19 @@ export function cursorOffset(cursor: string | undefined, ctx: Context): number {
   }
 }
 
-/** Slices `items` at `offset`, `limit` items long. */
+/**
+ * Slices `items` at `offset`, `limit` items long. An empty list gets no notice here:
+ * the caller's zero-result notice already explains it.
+ */
 export function pageOf<T>(items: T[], offset: number, limit: number): Page<T> {
   const end = offset + limit;
   return {
     items: items.slice(offset, end),
     ...(end < items.length ? { nextCursor: encodeCursor({ offset: end, limit }) } : {}),
+    ...(items.length > 0 && offset >= items.length
+      ? {
+          notice: `The cursor starts past the last result (${items.length} in all); a next_cursor continues only the query that returned it. Omit cursor to start from the first page.`,
+        }
+      : {}),
   };
 }

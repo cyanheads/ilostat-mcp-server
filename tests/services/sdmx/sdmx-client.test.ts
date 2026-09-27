@@ -4,7 +4,10 @@
  * statuses that are results on this host — a 404 (no dataflow, no data for the
  * key) and a 500 carrying an Oracle `ORA-` message read as "nothing here", the
  * Oracle text never relayed — against the ones that are errors (422 is this
- * server's bug; any other 500 is the upstream failing).
+ * server's bug; any other 500 is the upstream failing). Path segments taken from
+ * upstream data (indicator code, dataflow version, series key) are checked against
+ * the SDMX identifier grammar before any URL is built, and a bad one is refused
+ * without a request.
  * @module tests/services/sdmx/sdmx-client.test
  */
 
@@ -168,5 +171,54 @@ describe('SdmxClient.probeSeries', () => {
     await expect(
       client.probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'USA....', scope()),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidRequest });
+  });
+});
+
+describe('SdmxClient path segments', () => {
+  const anyRequest: FetchMockRoute = { match: () => true, respond: () => sdmxText('', 404) };
+
+  it.each([
+    [
+      'a dataflow version with dot segments',
+      'dataflow version',
+      'UNE_DEAP_SEX_AGE_RT',
+      '1.0/../../../structure/codelist/ILO/all',
+      'USA....',
+    ],
+    [
+      'a key area with dot segments and a query',
+      'series key',
+      'UNE_DEAP_SEX_AGE_RT',
+      '1.0',
+      '../../../../availableconstraint?x=1#....',
+    ],
+    ['a key with an encoded slash', 'series key', 'UNE_DEAP_SEX_AGE_RT', '1.0', 'USA%2F....'],
+    ['an indicator carrying a path', 'indicator code', '../../structure/X', '1.0', 'USA....'],
+  ])(
+    'refuses %s on the probe without sending a request',
+    async (_label, segment, indicator, version, key) => {
+      const { http, client } = setup([anyRequest]);
+      await expect(client.probeSeries(indicator, version, key, scope())).rejects.toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+        message: `ILOSTAT sent an SDMX ${segment} this server will not put in a URL; no request was made.`,
+      });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
+  it('refuses an indicator carrying a path on the structure call without sending a request', async () => {
+    const { http, client } = setup([anyRequest]);
+    await expect(
+      client.getDataflowStructure('X/../../../data/ILO,DF_Y', scope()),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.SerializationError });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('sends a key of plain codes and empty positions unchanged', async () => {
+    const { http, client } = setup([anyRequest]);
+    await client.probeSeries('SDG_0552_NOC_RT', '1.0.0', 'X01..', scope());
+    expect(new URL(http.calls[0]?.request.url ?? '').pathname).toBe(
+      '/rest/data/ILO,DF_SDG_0552_NOC_RT,1.0.0/X01..',
+    );
   });
 });

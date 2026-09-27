@@ -9,7 +9,7 @@
  * @module services/catalog/search
  */
 
-import { type Page, pageOf } from './paging.js';
+import { pageOf } from './paging.js';
 import { matchesAllTerms, wordsOf } from './text.js';
 import type { CatalogSnapshot, CodeLabel, Dataset, Indicator } from './types.js';
 
@@ -50,7 +50,7 @@ export interface SearchResult {
   facets: SearchFacets;
   hits: SearchHit[];
   nextCursor?: string;
-  /** Zero-hit guidance, or a note that the query held no searchable word. */
+  /** Zero-hit guidance, a note that the query held no searchable word, or that the cursor starts past the last match. */
   notice?: string;
   total: number;
 }
@@ -97,40 +97,29 @@ function matching(snapshot: CatalogSnapshot, terms: string[], filters: Filters):
   return hits;
 }
 
-function countBy<T>(hits: SearchHit[], keys: (hit: SearchHit) => T[], id: (key: T) => string) {
-  const counts = new Map<string, { key: T; count: number }>();
+/** Hits per key, most first, then by code. */
+function countBy<T extends { code: string }>(
+  hits: SearchHit[],
+  keys: (hit: SearchHit) => T[],
+): (T & { count: number })[] {
+  const counts = new Map<string, T & { count: number }>();
   for (const hit of hits) {
     for (const key of keys(hit)) {
-      const entry = counts.get(id(key)) ?? { key, count: 0 };
+      const entry = counts.get(key.code) ?? { ...key, count: 0 };
       entry.count += 1;
-      counts.set(id(key), entry);
+      counts.set(key.code, entry);
     }
   }
-  return [...counts.values()].sort(
-    (a, b) => b.count - a.count || id(a.key).localeCompare(id(b.key)),
-  );
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
 }
 
 function facetsOf(hits: SearchHit[]): SearchFacets {
   return {
-    databases: countBy(
-      hits,
-      (hit) => [hit.indicator.database],
-      (db) => db.code,
-    ).map(({ key, count }) => ({
-      ...key,
-      count,
-    })),
-    frequencies: countBy(
-      hits,
-      (hit) => [...new Set(hit.datasets.map((dataset) => dataset.frequency))],
-      (frequency) => frequency,
-    ).map(({ key, count }) => ({ code: key, count })),
-    subjects: countBy(
-      hits,
-      (hit) => [hit.indicator.subject],
-      (subject) => subject.code,
-    ).map(({ key, count }) => ({ ...key, count })),
+    databases: countBy(hits, (hit) => [hit.indicator.database]),
+    frequencies: countBy(hits, (hit) =>
+      [...new Set(hit.datasets.map((dataset) => dataset.frequency))].map((code) => ({ code })),
+    ),
+    subjects: countBy(hits, (hit) => [hit.indicator.subject]),
   };
 }
 
@@ -182,7 +171,7 @@ export function searchIndicators(snapshot: CatalogSnapshot, params: SearchParams
   const { query, offset, limit, ...filters } = params;
   const terms = query ? wordsOf(query) : [];
   const hits = matching(snapshot, terms, filters);
-  const page: Page<SearchHit> = pageOf(hits, offset, limit);
+  const page = pageOf(hits, offset, limit);
   const notices: string[] = [];
   if (query && terms.length === 0) {
     notices.push(
@@ -190,6 +179,7 @@ export function searchIndicators(snapshot: CatalogSnapshot, params: SearchParams
     );
   }
   if (hits.length === 0) notices.push(zeroHitNotice(snapshot, terms, filters));
+  if (page.notice) notices.push(page.notice);
   return {
     hits: page.items,
     total: hits.length,

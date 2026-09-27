@@ -27,6 +27,7 @@ import {
 import type { AreaGroup, CatalogSnapshot, Dataset, Indicator } from '@/services/catalog/types.js';
 import type { BestSource, RplumberClient } from '@/services/rplumber/rplumber-client.js';
 import type { RawObservation } from '@/services/rplumber/types.js';
+import type { IndicatorStructure } from '@/services/structure/sdmx-structure.js';
 import type { StructureLookup, StructureService } from '@/services/structure/structure-service.js';
 import {
   type Candidate,
@@ -50,8 +51,10 @@ import {
 import {
   assertAggregatesAvailable,
   type FailingContext,
+  nameCodes,
   resolveAreaGroup,
   resolveDatasets,
+  type ValidCodes,
   validateCodes,
 } from './request-validation.js';
 import { CACHEABLE_ROWS, type ResponseCache } from './response-cache.js';
@@ -63,6 +66,13 @@ const BEST_SOURCE: Record<SourceSelection, BestSource> = {
   all: 'all',
   secondary: 'no',
 };
+
+/** The sex and breakdown filters, in the order checks and notices walk them. */
+const BREAKDOWN_FIELDS = ['sex', 'classif1', 'classif2'] as const;
+type BreakdownField = (typeof BREAKDOWN_FIELDS)[number];
+
+/** The validated sex and breakdown codes of a request. */
+type BreakdownCodes = Pick<ValidCodes, BreakdownField>;
 
 /** `ilostat_query_indicator` inputs after schema validation; codes not yet normalized. */
 export interface QueryRequest {
@@ -154,7 +164,7 @@ export type CompareFailReason =
 export interface CompareSlice {
   classif1?: string;
   classif2?: string;
-  defaulted: ('sex' | 'classif1' | 'classif2')[];
+  defaulted: BreakdownField[];
   sex?: string;
 }
 
@@ -201,6 +211,12 @@ export interface ObservationServiceOptions {
   previewChars: number;
   rplumber: RplumberClient;
   structure: StructureService;
+}
+
+/** A requested dataset resolved for decoding, with the structure lookup it was resolved from. */
+interface LookedUpDataset {
+  lookup: StructureLookup;
+  resolved: ResolvedDataset;
 }
 
 /** An upstream row source and the switch that ends its transfer. */
@@ -323,7 +339,8 @@ export class ObservationService {
     let source: RowSource | undefined;
     try {
       source = await opening;
-      const resolved = await resolving;
+      const lookedUp = await resolving;
+      const resolved = lookedUp.map((entry) => entry.resolved);
       const index = new DatasetIndex(resolved);
       const summary = new ObservationSummary();
       const rows = source.rows;
@@ -364,9 +381,7 @@ export class ObservationService {
 
       const notices = [...notApplicableNotices(datasets, codes), ...unitNotices(resolved)];
       if (summary.rows === 0) {
-        notices.push(
-          ...zeroRowFragments(datasets, codes, request, areas.length > 0, sourceSelection),
-        );
+        notices.push(...zeroRowFragments(lookedUp, codes, request, areas, sourceSelection));
       }
       return {
         appliedFilters,
@@ -424,12 +439,12 @@ export class ObservationService {
     const slice = resolveSlice(dataset, codes, lookup, ctx);
     const areas = [...new Set([...codes.refAreas, ...(group?.members ?? [])])];
 
+    const latestFrom = this.now().getUTCFullYear() - request.lookbackYears;
     const mode: CompareMode = request.period
       ? { kind: 'period', period: request.period }
-      : { kind: 'latest', includeProjections: request.includeProjections };
-    const windowFrom = request.period
-      ? undefined
-      : this.now().getUTCFullYear() - request.lookbackYears - (request.changeYears ?? 0);
+      : { kind: 'latest', includeProjections: request.includeProjections, fromYear: latestFrom };
+    // The request reaches change_years further back for the change base; the latest value stays within fromYear.
+    const windowFrom = request.period ? undefined : latestFrom - (request.changeYears ?? 0);
     const time = request.period
       ? [
           request.period,
@@ -521,7 +536,11 @@ export class ObservationService {
         attribution: ATTRIBUTION,
       }),
     });
-    if (outcome.kind === 'too_large') throw new Error('A comparison has no row ceiling to pass.');
+    if (outcome.kind === 'too_large') {
+      throw new Error(
+        'A comparison has one row per area and never reaches the staging row budget.',
+      );
+    }
 
     return {
       appliedFilters,
@@ -537,18 +556,20 @@ export class ObservationService {
   }
 
   /**
-   * Cutoff and unit per dataset, the unit looked up in parallel; a unit that does
-   * not resolve is left absent. Rejects as `lookupStructure` does.
+   * Cutoff and unit per dataset, with the structure lookup they came from, looked
+   * up in parallel; a unit that does not resolve is left absent. Rejects as
+   * `lookupStructure` does.
    */
   private resolveDatasets(
     snapshot: CatalogSnapshot,
     datasets: readonly Dataset[],
     ctx: Context,
-  ): Promise<ResolvedDataset[]> {
+  ): Promise<LookedUpDataset[]> {
     return Promise.all(
-      datasets.map(async (dataset) =>
-        this.resolve(snapshot, dataset, await this.lookupStructure(snapshot, dataset, ctx)),
-      ),
+      datasets.map(async (dataset) => {
+        const lookup = await this.lookupStructure(snapshot, dataset, ctx);
+        return { lookup, resolved: this.resolve(snapshot, dataset, lookup) };
+      }),
     );
   }
 
@@ -587,7 +608,12 @@ export class ObservationService {
     const cached = this.options.cache.get(url);
     if (cached) return { rows: cached, close: () => undefined };
     const controller = new AbortController();
-    const upstream = await this.options.rplumber.streamIndicatorData(url, ctx, controller.signal);
+    const upstream = await this.options.rplumber.streamIndicatorData(
+      url,
+      ctx,
+      controller.signal,
+      this.options.maxRows,
+    );
     const cache = this.options.cache;
     return {
       rows: (async function* () {
@@ -657,26 +683,17 @@ function checkPeriodFrequency(
   }
 }
 
-/** The validated breakdown codes of a comparison, at most one each. */
-interface SliceCodes {
-  classif1: string[];
-  classif2: string[];
-  sex: string[];
-}
-
 /**
  * A code for a breakdown the dataset lacks fails `invalid_slice`. Needs no SDMX
  * structure, so it runs before the lookup starts.
  */
 function checkSliceBreakdowns(
   dataset: Dataset,
-  codes: SliceCodes,
+  codes: BreakdownCodes,
   ctx: FailingContext<'invalid_slice'>,
 ): void {
   const has = breakdownsOf(dataset.classification);
-  const lacking = (['sex', 'classif1', 'classif2'] as const).filter(
-    (field) => codes[field].length > 0 && !has[field],
-  );
+  const lacking = BREAKDOWN_FIELDS.filter((field) => codes[field].length > 0 && !has[field]);
   if (lacking.length > 0) {
     throw ctx.fail(
       'invalid_slice',
@@ -695,7 +712,7 @@ function checkSliceBreakdowns(
  */
 function resolveSlice(
   dataset: Dataset,
-  codes: SliceCodes,
+  codes: BreakdownCodes,
   lookup: StructureLookup,
   ctx: FailingContext<'invalid_slice' | 'structure_unavailable'>,
 ): CompareSlice {
@@ -743,20 +760,15 @@ function echoGroup(group: AreaGroup): AreaGroupEcho {
   return { code: group.code, label: group.label, member_count: group.members.length };
 }
 
-const FILTER_BREAKDOWN = { sex: 'sex', classif1: 'classif1', classif2: 'classif2' } as const;
-
 /** Discloses each breakdown filter a requested dataset cannot apply — upstream returns its rows unfiltered. */
-function notApplicableNotices(
-  datasets: readonly Dataset[],
-  codes: { classif1: string[]; classif2: string[]; sex: string[] },
-): string[] {
+function notApplicableNotices(datasets: readonly Dataset[], codes: BreakdownCodes): string[] {
   const notices: string[] = [];
-  for (const field of ['sex', 'classif1', 'classif2'] as const) {
+  for (const field of BREAKDOWN_FIELDS) {
     if (codes[field].length === 0) continue;
     for (const dataset of datasets) {
       if (breakdownsOf(dataset.classification)[field]) continue;
       notices.push(
-        `${field} does not apply to ${dataset.id}, which has no ${FILTER_BREAKDOWN[field]} breakdown; its rows are not narrowed by it.`,
+        `${field} does not apply to ${dataset.id}, which has no ${field} breakdown; its rows are not narrowed by it.`,
       );
     }
   }
@@ -773,35 +785,84 @@ function unitNotices(datasets: readonly ResolvedDataset[]): string[] {
     : [];
 }
 
-/** Why a query may have matched nothing, from whichever conditions hold. */
+/** The codes a structure lists for one filter; `undefined` when it has no such dimension. */
+function structureCodes(
+  structure: IndicatorStructure,
+  field: BreakdownField,
+): Set<string> | undefined {
+  const codes =
+    field === 'sex' ? structure.sexCodes : structure[field]?.codes.map((code) => code.code);
+  return codes ? new Set(codes) : undefined;
+}
+
+/** The years a request's period filters span; `undefined` when it sets none. */
+function requestedYears(request: QueryRequest): { from: number; to: number } | undefined {
+  if (request.time) return { from: periodYear(request.time), to: periodYear(request.time) };
+  if (!request.timeFrom && !request.timeTo) return;
+  return {
+    from: request.timeFrom ? Number(request.timeFrom) : Number.NEGATIVE_INFINITY,
+    to: request.timeTo ? Number(request.timeTo) : Number.POSITIVE_INFINITY,
+  };
+}
+
+/**
+ * Why a query matched nothing, naming only causes that can hold: a code or area
+ * the dataset's SDMX structure does not list, a window outside its coverage, a
+ * named source under `best`, and `secondary` with no secondary source. Without a
+ * structure, a code or area filter is named as a possible cause, since it cannot
+ * be checked.
+ */
 function zeroRowFragments(
-  datasets: readonly Dataset[],
-  codes: { classif1: string[]; classif2: string[]; sex: string[] },
+  datasets: readonly LookedUpDataset[],
+  codes: ValidCodes,
   request: QueryRequest,
-  areasSet: boolean,
+  areas: readonly string[],
   sourceSelection: SourceSelection,
 ): string[] {
   const fragments: string[] = [];
-  for (const dataset of datasets) {
+  const years = requestedYears(request);
+  for (const {
+    lookup: { structure },
+    resolved: { dataset },
+  } of datasets) {
     const has = breakdownsOf(dataset.classification);
-    const used = (['sex', 'classif1', 'classif2'] as const)
-      .filter((field) => has[field])
-      .flatMap((field) => codes[field]);
-    if (used.length > 0) {
-      fragments.push(
-        `${dataset.id} may not use ${used.join(', ')} — ilostat_describe_indicator ${dataset.id} lists the codes it uses.`,
-      );
+    const unused: string[] = [];
+    const unchecked: string[] = [];
+    for (const field of BREAKDOWN_FIELDS) {
+      if (!has[field]) continue;
+      const inUse = structure && structureCodes(structure, field);
+      if (inUse) unused.push(...codes[field].filter((code) => !inUse.has(code)));
+      else unchecked.push(...codes[field]);
     }
-    if (request.time || request.timeFrom || request.timeTo) {
+    const listsCodes = `ilostat_describe_indicator ${dataset.id} lists the codes it uses.`;
+    if (unused.length > 0) {
+      fragments.push(`${dataset.id} does not use ${unused.join(', ')} — ${listsCodes}`);
+    }
+    if (unchecked.length > 0) {
+      fragments.push(`${dataset.id} may not use ${unchecked.join(', ')} — ${listsCodes}`);
+    }
+    if (years && (years.to < dataset.dataStart || years.from > dataset.dataEnd)) {
       fragments.push(
         `${dataset.id} covers ${dataset.dataStart}–${dataset.dataEnd}; widen time_from/time_to or drop time.`,
       );
     }
-    if (areasSet) {
-      fragments.push(
-        `Some requested areas have no ${dataset.id} data — ilostat_describe_indicator lists the areas it covers.`,
-      );
+    if (areas.length > 0) {
+      const listsAreas = 'ilostat_describe_indicator lists the areas it covers.';
+      const covered = structure && new Set(structure.refAreas);
+      const uncovered = covered ? areas.filter((area) => !covered.has(area)) : [];
+      if (!covered) {
+        fragments.push(`Some requested areas have no ${dataset.id} data — ${listsAreas}`);
+      } else if (uncovered.length > 0) {
+        fragments.push(
+          `${nameCodes(uncovered)} ${uncovered.length === 1 ? 'has' : 'have'} no ${dataset.id} data — ${listsAreas}`,
+        );
+      }
     }
+  }
+  if (codes.sources.length > 0 && sourceSelection === 'best') {
+    fragments.push(
+      'source_selection best keeps only the preferred source of each area and period, so a secondary source named in sources returns nothing; use source_selection all.',
+    );
   }
   if (sourceSelection === 'secondary') {
     fragments.push(

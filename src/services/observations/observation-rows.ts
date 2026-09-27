@@ -7,7 +7,7 @@
  */
 
 import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
-import { BASES, type Basis, classifyRow, type ProjectionCutoff } from '@/services/basis/basis.js';
+import { type Basis, classifyRow, type ProjectionCutoff } from '@/services/basis/basis.js';
 import type { BasisCounts } from '@/services/canvas-bridge/canvas-bridge.js';
 import { periodFrequency, periodSubperiod, periodYear } from '@/services/catalog/codes.js';
 import type { CatalogSnapshot, Dataset } from '@/services/catalog/types.js';
@@ -217,16 +217,25 @@ export function toInlineRow(row: ObservationRow): InlineRow {
   };
 }
 
+/**
+ * An empty code → label map with no prototype, so an upstream code named like an
+ * `Object.prototype` member (`__proto__`, `constructor`) is stored as an own key
+ * and an absent code reads back undefined.
+ */
+export function codeLabels(): Record<string, string> {
+  return Object.create(null) as Record<string, string>;
+}
+
 /** The legend for a set of staged rows, labels from the snapshot dictionaries. */
 export function legendOf(rows: readonly ObservationRow[], snapshot: CatalogSnapshot): Legend {
   const legend: Legend = {
-    ref_area: {},
-    source: {},
-    sex: {},
-    classif1: {},
-    classif2: {},
-    obs_status: {},
-    notes: {},
+    ref_area: codeLabels(),
+    source: codeLabels(),
+    sex: codeLabels(),
+    classif1: codeLabels(),
+    classif2: codeLabels(),
+    obs_status: codeLabels(),
+    notes: codeLabels(),
   };
   const put = (map: Record<string, string>, code: string | null, label: string | null) => {
     if (code !== null) map[code] = label ?? UNLABELLED;
@@ -246,7 +255,7 @@ export function legendOf(rows: readonly ObservationRow[], snapshot: CatalogSnaps
 }
 
 export function emptyBasisCounts(): BasisCounts {
-  return Object.fromEntries(BASES.map((basis) => [basis, 0])) as BasisCounts;
+  return { reported: 0, modelled_estimate: 0, projection: 0 };
 }
 
 /** Running summary over every row read: row count, distinct areas, period bounds, basis counts. */

@@ -9,9 +9,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { areaCodeInput, REF_AREA_MESSAGE, tableCell } from '@/mcp-server/tools/tool-helpers.js';
+import {
+  areaCodeInput,
+  blankAsUnset,
+  REF_AREA_MESSAGE,
+  tableCell,
+} from '@/mcp-server/tools/tool-helpers.js';
 import { ATTRIBUTION } from '@/services/attribution.js';
-import { normalizeAreaCode, normalizeSexCode } from '@/services/catalog/codes.js';
+import { normalizeSexCode } from '@/services/catalog/codes.js';
 import { inlineText } from '@/services/catalog/text.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 
@@ -23,6 +28,31 @@ const CodeLabelSchema = (what: string) =>
     })
     .describe(`${what} the area belongs to.`);
 
+/**
+ * The notice for keys with no reported value: the model-output sentence names
+ * only the keys a modelled estimate stands in for, and keys with neither value
+ * are said to have none.
+ */
+function reportedMissingNotice(missing: readonly string[], modelled: ReadonlySet<string>): string {
+  const lead = `No reported value exists for ${missing.join(', ')}`;
+  const withModel = missing.filter((key) => modelled.has(key));
+  if (withModel.length === 0) {
+    return `${lead}, and ${missing.length === 1 ? 'it has no' : 'none has an'} ILO modelled estimate either.`;
+  }
+  const withoutModel = missing.filter((key) => !modelled.has(key));
+  const named =
+    withoutModel.length > 0 ? withModel.join(', ') : withModel.length === 1 ? 'it' : 'them';
+  const modelSentence =
+    withModel.length === 1
+      ? `the modelled estimate shown for ${named} is ILO model output, not a national observation.`
+      : `the modelled estimates shown for ${named} are ILO model output, not national observations.`;
+  const tail =
+    withoutModel.length > 0
+      ? ` ${withoutModel.join(', ')} ${withoutModel.length === 1 ? 'has' : 'have'} no modelled estimate either.`
+      : '';
+  return `${lead}; ${modelSentence}${tail}`;
+}
+
 export const getCountryProfileTool = tool('ilostat_get_country_profile', {
   title: 'Get an ILOSTAT labour-market profile',
   description:
@@ -33,19 +63,14 @@ export const getCountryProfileTool = tool('ilostat_get_country_profile', {
     ref_area: areaCodeInput(REF_AREA_MESSAGE).describe(
       'One reference area with annual data: an ISO3 country code (KEN) or an X-coded aggregate (X01 World, X06, X02); ILO_GEO_ forms accepted, case-insensitive. ilostat_list_reference topic ref_areas lists them.',
     ),
-    sex: z
-      .preprocess(
-        (value) =>
-          typeof value === 'string'
-            ? value.trim() === ''
-              ? undefined
-              : normalizeSexCode(value)
-            : value,
+    sex: blankAsUnset(
+      z.preprocess(
+        (value) => (typeof value === 'string' ? normalizeSexCode(value) : value),
         z.enum(['SEX_T', 'SEX_M', 'SEX_F']).default('SEX_T'),
-      )
-      .describe(
-        'SEX_T (default), SEX_M, or SEX_F; T/M/F and total/both/male/female are accepted. Indicators without a sex breakdown (labour income share) are unaffected.',
       ),
+    ).describe(
+      'SEX_T (default), SEX_M, or SEX_F; T/M/F and total/both/male/female are accepted. Indicators without a sex breakdown (labour income share) are unaffected.',
+    ),
   }),
 
   output: z.object({
@@ -126,7 +151,9 @@ export const getCountryProfileTool = tool('ilostat_get_country_profile', {
     notice: z
       .string()
       .optional()
-      .describe('Which indicators have no reported value, and what the modelled value is instead.'),
+      .describe(
+        'Which indicators have no reported value, and which of those have an ILO modelled estimate instead.',
+      ),
   },
 
   errors: [
@@ -161,24 +188,21 @@ export const getCountryProfileTool = tool('ilostat_get_country_profile', {
   async handler(input, ctx) {
     const { catalog, profiles } = getIlostatServices();
     const snapshot = await catalog.ready(ctx);
-    const code = normalizeAreaCode(input.ref_area);
-    const area = snapshot.refAreas.get(code);
+    const area = snapshot.refAreas.get(input.ref_area);
     if (!area?.frequencies.includes('A')) {
       throw ctx.fail(
         'unknown_area',
-        `${inlineText(code)} is not an ILOSTAT reference area with annual data.`,
-        { refArea: code, ...ctx.recoveryFor('unknown_area') },
+        `${input.ref_area} is not an ILOSTAT reference area with annual data.`,
+        { refArea: input.ref_area, ...ctx.recoveryFor('unknown_area') },
       );
     }
 
     const profile = await profiles.profile(snapshot, area, input.sex, ctx);
-    const withoutModel = profile.indicators
-      .filter((entry) => !entry.reported && !entry.modelled)
-      .map((entry) => entry.key);
     if (profile.reportedMissing.length > 0) {
-      ctx.enrich.notice(
-        `No reported value exists for ${profile.reportedMissing.join(', ')}; the modelled estimates shown for them are ILO model output, not national observations.${withoutModel.length > 0 ? ` ${withoutModel.join(', ')} ${withoutModel.length === 1 ? 'has' : 'have'} no modelled estimate either.` : ''}`,
+      const modelled = new Set(
+        profile.indicators.filter((entry) => entry.modelled).map((entry) => entry.key),
       );
+      ctx.enrich.notice(reportedMissingNotice(profile.reportedMissing, modelled));
     }
     ctx.log.info('Built ILOSTAT profile', {
       refArea: area.code,

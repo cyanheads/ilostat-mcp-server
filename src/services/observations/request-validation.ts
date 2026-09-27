@@ -16,12 +16,26 @@ import {
   normalizeSexCode,
 } from '@/services/catalog/codes.js';
 import { inlineText } from '@/services/catalog/text.js';
-import type { AreaGroup, CatalogSnapshot, Dataset } from '@/services/catalog/types.js';
+import type {
+  AreaGroup,
+  CatalogSnapshot,
+  ClassificationCode,
+  Dataset,
+} from '@/services/catalog/types.js';
 
 /** A handler context whose contract declares the reasons `R`; services raise them through its `fail`. */
 export type FailingContext<R extends string> = Context & { fail: TypedFail<R> };
 
 const unique = <T>(values: Iterable<T>): T[] => [...new Set(values)];
+
+/** Codes a message names before it counts the rest. */
+const CODES_NAMED = 10;
+
+/** `A, B, C` — or, past {@link CODES_NAMED}, the first ones and `and N more`. */
+export function nameCodes(codes: readonly string[]): string {
+  const named = codes.slice(0, CODES_NAMED).join(', ');
+  return codes.length > CODES_NAMED ? `${named} and ${codes.length - CODES_NAMED} more` : named;
+}
 
 /**
  * Dataset IDs to catalog datasets, deduplicated. A bare indicator code resolves
@@ -109,6 +123,19 @@ export interface ValidCodes {
   sources: string[];
 }
 
+/**
+ * The dictionary entry of a breakdown code when the `slot` filter accepts it:
+ * listed for that slot or for both. `undefined` when the filter would reject it.
+ */
+export function classificationInSlot(
+  snapshot: CatalogSnapshot,
+  code: string,
+  slot: 'classif1' | 'classif2',
+): ClassificationCode | undefined {
+  const entry = snapshot.classifications.get(code);
+  return entry && (entry.slot === slot || entry.slot === 'both') ? entry : undefined;
+}
+
 const FIELD_TOPICS = {
   ref_areas: 'ref_areas',
   sex: 'sexes',
@@ -120,7 +147,8 @@ const FIELD_TOPICS = {
 /**
  * Normalizes each code filter and checks it against its dictionary: reference
  * areas, sexes, the classif1 or classif2 codes (by the slot the code may fill),
- * and sources. Every rejected code is named in one `unknown_code` failure.
+ * and sources. Every rejected code fails one `unknown_code`: its message names
+ * up to ten per field and counts the rest, and `data.rejected` lists them all.
  */
 export function validateCodes(
   snapshot: CatalogSnapshot,
@@ -134,20 +162,22 @@ export function validateCodes(
     classif2: unique((filters.classif2 ?? []).map(normalizeCode)),
     sources: unique((filters.sources ?? []).map(normalizeCode)),
   };
-  const slotAccepts = (code: string, slot: 'classif1' | 'classif2') => {
-    const entry = snapshot.classifications.get(code);
-    return entry !== undefined && (entry.slot === slot || entry.slot === 'both');
-  };
   const rejected: [keyof typeof FIELD_TOPICS, string[]][] = [
     ['ref_areas', valid.refAreas.filter((code) => !snapshot.refAreas.has(code))],
     ['sex', valid.sex.filter((code) => !snapshot.sexes.has(code))],
-    ['classif1', valid.classif1.filter((code) => !slotAccepts(code, 'classif1'))],
-    ['classif2', valid.classif2.filter((code) => !slotAccepts(code, 'classif2'))],
+    [
+      'classif1',
+      valid.classif1.filter((code) => !classificationInSlot(snapshot, code, 'classif1')),
+    ],
+    [
+      'classif2',
+      valid.classif2.filter((code) => !classificationInSlot(snapshot, code, 'classif2')),
+    ],
     ['sources', valid.sources.filter((code) => !snapshot.sources.has(code))],
   ];
   const failing = rejected.filter(([, codes]) => codes.length > 0);
   if (failing.length > 0) {
-    const detail = failing.map(([field, codes]) => `${field}: ${codes.join(', ')}`).join('; ');
+    const detail = failing.map(([field, codes]) => `${field}: ${nameCodes(codes)}`).join('; ');
     const topics = failing.map(([field]) => `topic ${FIELD_TOPICS[field]} for ${field}`).join(', ');
     throw ctx.fail('unknown_code', `Not ILOSTAT codes — ${inlineText(detail)}.`, {
       rejected: Object.fromEntries(failing),

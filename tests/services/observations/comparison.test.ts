@@ -85,6 +85,7 @@ async function upstreamRows(
       url,
       scope,
       new AbortController().signal,
+      500_000,
     )) {
       rows.push(raw);
     }
@@ -125,7 +126,8 @@ const raw = (
 function compare(overrides: Partial<CompareInput> & Pick<CompareInput, 'areas' | 'candidates'>) {
   return compareAreas({
     decode,
-    mode: { kind: 'latest', includeProjections: false },
+    // FIXED_NOW's 2026 less the default 10-year lookback
+    mode: { kind: 'latest', includeProjections: false, fromYear: 2016 },
     sort: 'value_desc',
     ...overrides,
   });
@@ -173,7 +175,7 @@ describe('latest mode', () => {
     const result = compare({
       areas: ['X01'],
       candidates: candidatesOf(rows),
-      mode: { kind: 'latest', includeProjections: true },
+      mode: { kind: 'latest', includeProjections: true, fromYear: 2016 },
     });
     expect(summary(result)).toEqual([
       { rank: 1, area: 'X01', period: '2027', value: 4.842, basis: 'projection' },
@@ -193,6 +195,31 @@ describe('latest mode', () => {
     expect(result.periods).toEqual([]);
     expect(result.mixedPeriods).toBe(false);
     expect(result.distinctSources).toBe(0);
+  });
+
+  it('never picks a latest value before fromYear, though a row there still serves as the change base', () => {
+    const result = compare({
+      areas: ['USA', 'KEN'],
+      candidates: candidatesOf([
+        raw('USA', '2025Q1', 4),
+        raw('USA', '2024Q4', 5),
+        raw('USA', '2024Q1', 4.5),
+        raw('KEN', '2024Q4', 6),
+      ]),
+      mode: { kind: 'latest', includeProjections: false, fromYear: 2025 },
+      changeYears: 1,
+    });
+    expect(summary(result)).toEqual([
+      {
+        rank: 1,
+        area: 'USA',
+        period: '2025Q1',
+        value: 4,
+        basis: 'reported',
+        change: { fromPeriod: '2024Q1', fromValue: 4.5, delta: -0.5 },
+      },
+    ]);
+    expect(result.missing).toEqual([{ refArea: 'KEN', reason: 'no_value_in_window' }]);
   });
 });
 

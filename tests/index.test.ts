@@ -117,6 +117,14 @@ describe('src/index.ts', () => {
     },
   );
 
+  it('points the dataframe sentence at one dataframe by name, never a listing, so it holds where listing is off', async () => {
+    const { options } = await boot();
+    expect(options.instructions).toContain(
+      'Large results are staged as df_<id> dataframes: inspect one by name with ilostat_dataframe_describe and run SQL over them with ilostat_dataframe_query.',
+    );
+    expect(options.instructions).not.toMatch(/\blist them\b/);
+  });
+
   it('passes the drop flag through when it is on', async () => {
     process.env.ILOSTAT_DATAFRAME_DROP_ENABLED = 'true';
     const { options, buildToolDefinitions } = await boot();

@@ -2,9 +2,9 @@
  * @fileoverview Input and rendering helpers shared by the tool definitions:
  * blank-as-unset wrappers for form clients; the dataset-ID, area-code, sex,
  * period, and year inputs, each normalized in the schema before its pattern or
- * enum runs, so every form a description promises is accepted; and the guards
- * for ILO-published text in `content[]` — blockquotes for multi-line text,
- * escaped table cells.
+ * enum runs, so every form a description promises is accepted; the guards for
+ * ILO-published text in `content[]` — blockquotes for multi-line text, escaped
+ * table cells; and the frequency names `content[]` spells out.
  * @module mcp-server/tools/tool-helpers
  */
 
@@ -14,7 +14,7 @@ import {
   normalizeDatasetId,
   normalizeSexCode,
 } from '@/services/catalog/codes.js';
-import { inlineText } from '@/services/catalog/text.js';
+import { inlineText, LINE_BREAK } from '@/services/catalog/text.js';
 
 /**
  * Optional string input: trimmed, and `''` or whitespace-only treated as unset
@@ -27,54 +27,65 @@ export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
     return trimmed === '' ? undefined : trimmed;
   }, schema);
 
-/** Optional string-array input: elements trimmed and blank elements dropped before the inner schema runs. */
-export const blankFreeArray = <T extends z.ZodType>(schema: T) =>
-  z.preprocess(
-    (value) =>
-      Array.isArray(value)
-        ? value
-            .map((item) => (typeof item === 'string' ? item.trim() : item))
-            .filter((item) => item !== '')
-        : value,
-    schema,
-  );
+/**
+ * A bare string sent where an array is expected, as the one-element array it
+ * stands for; a blank one is unset, as in `blankAsUnset`.
+ */
+const asArray = (value: unknown): unknown => {
+  if (typeof value !== 'string') return value;
+  return value.trim() === '' ? undefined : [value];
+};
 
 /**
- * Dataset-ID array input: an element holding `+`- or `,`-joined IDs is split,
- * then elements are trimmed and blanks dropped before the inner schema runs.
+ * Optional string-array input: a bare string read as a one-element array, then
+ * elements trimmed and blank elements dropped before the inner schema runs.
+ */
+export const blankFreeArray = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((raw) => {
+    const value = asArray(raw);
+    return Array.isArray(value)
+      ? value
+          .map((item) => (typeof item === 'string' ? item.trim() : item))
+          .filter((item) => item !== '')
+      : value;
+  }, schema);
+
+/**
+ * Dataset-ID array input: a bare string read as a one-element array, an
+ * element holding `+`- or `,`-joined IDs split, then elements trimmed and
+ * blanks dropped before the inner schema runs.
  */
 export const splitIdArray = <T extends z.ZodType>(schema: T) =>
-  z.preprocess(
-    (value) =>
-      Array.isArray(value)
-        ? value
-            .flatMap((item) =>
-              typeof item === 'string' ? item.split(/[+,]/).map((part) => part.trim()) : [item],
-            )
-            .filter((item) => item !== '')
-        : value,
-    schema,
-  );
+  z.preprocess((raw) => {
+    const value = asArray(raw);
+    return Array.isArray(value)
+      ? value
+          .flatMap((item) =>
+            typeof item === 'string' ? item.split(/[+,]/).map((part) => part.trim()) : [item],
+          )
+          .filter((item) => item !== '')
+      : value;
+  }, schema);
 
 /** A normalized dataset ID or bare indicator code: letters, digits, and underscores. */
-export const DATASET_ID_PATTERN = /^[A-Z0-9_]+$/;
+const DATASET_ID_PATTERN = /^[A-Z0-9_]+$/;
 
 const DATASET_ID_MESSAGE =
   'Expected a dataset ID such as UNE_DEAP_SEX_AGE_RT_A (letters, digits, and underscores); find one with ilostat_search_indicators.';
 
 /**
  * Dataset-ID input: trimmed, uppercased, and an SDMX `DF_` prefix stripped
- * before `pattern` runs. Pass a wider pattern where the handler answers a
- * joined value itself.
+ * before the `max` length cap and `pattern` run. Pass a wider pattern and cap
+ * where the handler answers a joined value itself.
  */
-export const datasetIdInput = (pattern: RegExp = DATASET_ID_PATTERN) =>
+export const datasetIdInput = (pattern: RegExp = DATASET_ID_PATTERN, max = 64) =>
   z.preprocess(
     (value) => (typeof value === 'string' ? normalizeDatasetId(value) : value),
-    z.string().regex(pattern, DATASET_ID_MESSAGE),
+    z.string().max(max).regex(pattern, DATASET_ID_MESSAGE),
   );
 
 /** A normalized reference-area or area-group code: three letters or digits (`KEN`, `X01`, `XA1`). */
-export const AREA_CODE_PATTERN = /^[A-Z0-9]{3}$/;
+const AREA_CODE_PATTERN = /^[A-Z0-9]{3}$/;
 
 /**
  * Reference-area or area-group input: trimmed, uppercased, and the `ILO_GEO_`
@@ -93,7 +104,7 @@ export const AREA_GROUP_MESSAGE =
   'Expected an X-coded area group such as X06; ilostat_list_reference topic area_groups lists them.';
 
 /** The ILOSTAT sex codes. */
-export const SEX_CODES = ['SEX_T', 'SEX_M', 'SEX_F', 'SEX_O'] as const;
+const SEX_CODES = ['SEX_T', 'SEX_M', 'SEX_F', 'SEX_O'] as const;
 
 /** Sex input: `T`/`M`/`F`/`O` and `total`/`both`/`male`/`female`/`other` mapped onto the codes before the enum runs. */
 export const sexCodeInput = () =>
@@ -127,13 +138,13 @@ export const dataframeNameInput = (field: string) =>
   );
 
 /** `YYYY`, `YYYYQn`, or `YYYYMmm`. */
-export const PERIOD_PATTERN = /^\d{4}(Q[1-4]|M(0[1-9]|1[0-2]))?$/;
+const PERIOD_PATTERN = /^\d{4}(Q[1-4]|M(0[1-9]|1[0-2]))?$/;
 
 /**
  * Trim and uppercase; `2024-Q2` and `2024 Q2` → `2024Q2`; `2025-03` → `2025M03`.
  * Anything else is returned for the pattern to judge.
  */
-export function normalizePeriod(value: string): string {
+function normalizePeriod(value: string): string {
   const upper = value.trim().toUpperCase();
   const quarter = /^(\d{4})[-\s]?Q([1-4])$/.exec(upper);
   if (quarter) return `${quarter[1]}Q${quarter[2]}`;
@@ -177,15 +188,34 @@ export const yearInput = () =>
       .optional(),
   );
 
-/** Upstream text as a markdown blockquote, every line prefixed so none escapes the quote. */
+/**
+ * Upstream text as a markdown blockquote: split at every {@link LINE_BREAK} and
+ * each line prefixed, so none escapes the quote.
+ */
 export function blockquote(text: string): string {
   return text
-    .split(/\r\n|\r|\n/)
+    .split(LINE_BREAK)
     .map((line) => `> ${line}`)
     .join('\n');
 }
 
-/** Text for one markdown table cell: line breaks flattened, then `\` and `|` escaped. */
-export function tableCell(text: string): string {
-  return inlineText(text).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+/**
+ * Text for one markdown table cell: line breaks flattened to a space, or each
+ * replaced by `lineBreak` when one is given (`<br>`), so a value cannot end the
+ * row; then backslashes escaped (a backslash before punctuation is an escape in
+ * inline markdown), then pipes.
+ */
+export function tableCell(text: string, lineBreak?: string): string {
+  const flat = lineBreak === undefined ? inlineText(text) : text.replace(LINE_BREAK, lineBreak);
+  return flat.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 }
+
+/**
+ * The ILOSTAT frequency codes spelled out. A Map, so an upstream frequency
+ * named like an `Object.prototype` member finds no name and renders as itself.
+ */
+export const FREQUENCY_NAMES: ReadonlyMap<string, string> = new Map([
+  ['A', 'annual'],
+  ['Q', 'quarterly'],
+  ['M', 'monthly'],
+]);

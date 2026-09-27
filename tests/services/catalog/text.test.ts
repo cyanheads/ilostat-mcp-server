@@ -1,6 +1,6 @@
 /**
  * @fileoverview Tests for the catalog text helpers: search/filter normalization,
- * word-prefix term matching, CR/LF flattening for inline markdown slots, the
+ * word-prefix term matching, line-terminator flattening for inline markdown slots, the
  * indicator-definition HTML stripper, and the upstream timestamp conversion.
  * @module tests/services/catalog/text.test
  */
@@ -72,6 +72,18 @@ describe('inlineText', () => {
     expect(inlineText('Line one\r\nLine two\nLine three\rend')).toBe(
       'Line one Line two Line three end',
     );
+  });
+
+  it.each([
+    ['NEL (U+0085)', '\u0085'],
+    ['LS (U+2028)', '\u2028'],
+    ['PS (U+2029)', '\u2029'],
+  ])('flattens %s to one space', (_label, terminator) => {
+    expect(inlineText(`Line one${terminator}## Line two`)).toBe('Line one ## Line two');
+  });
+
+  it('flattens a mixed run of every terminator to one space', () => {
+    expect(inlineText('a\r\n\u0085\u2028\u2029\nb')).toBe('a b');
   });
 });
 

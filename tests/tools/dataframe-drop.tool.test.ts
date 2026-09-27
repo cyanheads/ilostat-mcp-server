@@ -5,7 +5,8 @@
  * drop and an unknown name find nothing, and a record whose table already left
  * the canvas still drops and frees the name for `register_as`; malformed and
  * blank names fail at the schema; a canvas drop that fails fails the call with
- * the dataframe still listed; `canvas_unavailable` from an engine that cannot
+ * the dataframe still listed, and with any path it names redacted to `[path]`;
+ * `canvas_unavailable` from an engine that cannot
  * load, and a call with no canvas wired failing `InternalError`; the severity
  * pin — on both consumption paths (`structuredContent` and `content[]`).
  * @module tests/tools/dataframe-drop.tool.test
@@ -15,6 +16,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { ErrorHandler } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, describe, expect, it } from 'vitest';
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
@@ -154,6 +156,29 @@ describe('a canvas drop that fails', () => {
     expect(result.structuredContent).not.toHaveProperty('dropped');
     expect(contentText(result)).toContain(DROP_ERROR);
   });
+
+  it('keeps the path of an engine I/O failure off both surfaces, with code and cause kept', async () => {
+    const engineError = new Error(
+      'IO Error: Cannot open file "/srv/canvas-tmp/duckdb_temp_storage_DEFAULT-0.tmp": Permission denied',
+    );
+    const redacted = 'IO Error: Cannot open file "[path]": Permission denied';
+    const { code } = ErrorHandler.classifyOnly(engineError);
+    wireCanvas(faultyCanvas({ at: 'drop', error: engineError }));
+    const error = await drop('df_GONE0_GONE0', newContext()).then(
+      () => {
+        throw new Error('expected the handler to fail');
+      },
+      (thrown: unknown) => thrown as McpError,
+    );
+    expect(error).toMatchObject({ code, message: redacted });
+    expect(error.cause).toBe(engineError);
+
+    const result = await runToolContract(dataframeDropTool, { name: 'df_GONE0_GONE0' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ error: { code, message: redacted } });
+    expect(contentText(result)).toContain(redacted);
+    expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
+  });
 });
 
 describe('registration', () => {
@@ -161,6 +186,16 @@ describe('registration', () => {
     reason: 'Dataframes are turned off in this deployment.',
     hint: 'CANVAS_PROVIDER_TYPE=duckdb',
   };
+
+  it('declares itself destructive and idempotent, with no auth scope', () => {
+    expect(dataframeDropTool.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect(dataframeDropTool.auth).toBeUndefined();
+  });
 
   it.each([
     [

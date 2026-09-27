@@ -11,7 +11,12 @@
  * the request maps it to a domain error first. A buffered request reads and
  * interprets the whole body inside each retry attempt; a streamed request retries
  * only up to the response headers, then hands the body over as text chunks, and a
- * stream that fails after that point is never retried.
+ * stream that fails after that point is never retried. Every body is bounded:
+ * each request names its byte cap, past which the read stops and the call fails
+ * `upstream_too_large` (never retried); an error body is read only for its
+ * message, so it is cut off at 64 KiB instead and its status still decides the
+ * error. A body must arrive in full within `bodyMs` of its first read, however
+ * steadily it trickles.
  * @module services/upstream/upstream-http
  */
 
@@ -41,8 +46,12 @@ export interface PacingOptions {
   minStartGapMs: number;
 }
 
-/** Per-attempt timers: time to response headers, and the longest gap between body chunks. */
+/**
+ * Per-attempt timers: time to response headers, the longest gap between body
+ * chunks, and the longest a whole body may take from its first read.
+ */
 export interface TimeoutOptions {
+  bodyMs: number;
   headersMs: number;
   stallMs: number;
 }
@@ -83,10 +92,13 @@ interface RequestBase {
    * background catalog loader waits without a cap.
    */
   bounded: boolean;
+  /** Most body bytes (decoded from any content encoding) read before the call fails `upstream_too_large`. */
+  maxBytes: number;
   operation: string;
   /**
    * Maps a non-accepted status and its body to a domain error; `undefined`
-   * falls through to the generic status mapping. The body is read only when this is set.
+   * falls through to the generic status mapping. The body is read only when
+   * this is set, and at most {@link ERROR_BODY_MAX_BYTES} of it.
    */
   rejectStatus?: (status: number, body: string) => Error | undefined;
   url: string;
@@ -98,14 +110,36 @@ export interface UpstreamRequest<T> extends RequestBase {
   interpret: (exchange: { body: string; status: number }) => T;
 }
 
-/** A streamed request: the body is handed to the caller as text chunks once the headers arrive. */
-export type UpstreamStreamRequest = RequestBase;
+/**
+ * A buffered body is also bounded by the retry deadline (45 s), so `bodyMs` binds
+ * the streamed ones: a full 1,000,000-row download is ~92 MiB.
+ */
+const DEFAULT_TIMEOUTS: TimeoutOptions = { headersMs: 30_000, stallMs: 30_000, bodyMs: 600_000 };
+const DEFAULT_RETRY: RetryPolicy = { maxRetries: 2, baseDelayMs: 1_000, deadlineMs: 45_000 };
 
-export const DEFAULT_TIMEOUTS: TimeoutOptions = { headersMs: 30_000, stallMs: 30_000 };
-export const DEFAULT_RETRY: RetryPolicy = { maxRetries: 2, baseDelayMs: 1_000, deadlineMs: 45_000 };
+const KIB = 1024;
+const MIB = 1024 * KIB;
+
+/**
+ * The most of an error body `rejectStatus` interprets; the one upstream sends (a
+ * retired dataset ID) is ~150 bytes. The rest is never read, and never fails the
+ * call: a 503 with a long page is still retried as a 503.
+ */
+const ERROR_BODY_MAX_BYTES = 64 * KIB;
+
+const byteSize = (bytes: number): string =>
+  bytes % MIB === 0 ? `${bytes / MIB} MiB` : `${bytes / KIB} KiB`;
+
+/** A body past its request's cap. Never retried: the same request would send the same body. */
+function upstreamTooLarge(service: string, operation: string, maxBytes: number): McpError {
+  return serviceUnavailable(
+    `${service} sent more than ${byteSize(maxBytes)} for ${operation}; the rest of the response was not read.`,
+    { reason: 'upstream_too_large', retryable: false, maxBytes },
+  );
+}
 
 /** Reason carried by every throttling failure — upstream 429, challenge page, or pacer shed. */
-export const UPSTREAM_BUSY_REASON = 'upstream_busy';
+const UPSTREAM_BUSY_REASON = 'upstream_busy';
 
 /** True for the throttling failure, which is never retried in-call: the pacer cooldown handles the wait. */
 export function isUpstreamBusy(error: unknown): boolean {
@@ -143,24 +177,34 @@ function upstreamBusy(
 
 /** `Retry-After` as whole seconds, when the upstream sent the delta-seconds form. */
 function retryAfterSeconds(response: Response): number | undefined {
-  const header = response.headers.get('retry-after');
-  if (!header || !/^\d+$/.test(header.trim())) return;
-  return Number(header.trim());
+  const header = response.headers.get('retry-after')?.trim();
+  if (!header || !/^\d+$/.test(header)) return;
+  return Number(header);
 }
 
 type ReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>;
 
-/** One read that fails with `Timeout` when no bytes arrive for `stallMs`. */
-function readWithStall(
+/** What bounds one body: its byte cap and operation, and the client's stall and total timers. */
+interface BodyLimits {
+  bodyMs: number;
+  maxBytes: number;
+  operation: string;
+  /** Past `maxBytes`: fail `upstream_too_large`, or end the body at the cap (an error body). */
+  overflow: 'fail' | 'truncate';
+  stallMs: number;
+}
+
+/** One read that fails with `expired()` when no bytes arrive for `waitMs`. */
+function readWithin(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  stallMs: number,
-  service: string,
+  waitMs: number,
+  expired: () => McpError,
 ): Promise<ReadResult> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reader.cancel().catch(() => undefined);
-      reject(timeout(`${service} stopped sending data for ${stallMs / 1000} s mid-response.`));
-    }, stallMs);
+      reject(expired());
+    }, waitMs);
     reader.read().then(
       (value) => {
         clearTimeout(timer);
@@ -175,29 +219,42 @@ function readWithStall(
 }
 
 /**
- * A body as decoded text chunks. A stall past `stallMs` fails with `Timeout`; a
- * connection dropped mid-body fails with `ServiceUnavailable`; a cancellation
- * (`signal`) passes through untouched. Stopping early cancels the body.
+ * A body as decoded text chunks. A stall past `stallMs`, or a body still arriving
+ * `bodyMs` after its first read, fails with `Timeout`; a body past `maxBytes`
+ * fails `upstream_too_large` before the chunk that crossed it is decoded, or
+ * under `truncate` ends at `maxBytes`; a connection dropped mid-body fails with
+ * `ServiceUnavailable`; a cancellation (`signal`) passes through untouched.
+ * Stopping early cancels the body.
  *
  * The body is locked here, before the first read: Node's fetch cancels an
  * unlocked body once its `Response` is garbage-collected, and a cancelled body
  * then reads as an empty one — no error, no bytes.
  */
-export function streamBodyText(
+function streamBodyText(
   body: ReadableStream<Uint8Array> | null,
-  stallMs: number,
+  limits: BodyLimits,
   service: string,
   signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const reader = body?.getReader();
+  const overdue = () =>
+    timeout(`${service} took longer than ${limits.bodyMs / 1000} s to send the response.`);
+  const stalled = () =>
+    timeout(`${service} stopped sending data for ${limits.stallMs / 1000} s mid-response.`);
   return (async function* () {
     if (!reader) return;
     const decoder = new TextDecoder();
+    const deadline = Date.now() + limits.bodyMs;
+    let received = 0;
     try {
       for (;;) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw overdue();
         let result: ReadResult;
         try {
-          result = await readWithStall(reader, stallMs, service);
+          result = await (remainingMs < limits.stallMs
+            ? readWithin(reader, remainingMs, overdue)
+            : readWithin(reader, limits.stallMs, stalled));
         } catch (error) {
           if (signal?.aborted || error instanceof McpError) throw error;
           throw serviceUnavailable(`${service} dropped the connection mid-response.`, undefined, {
@@ -205,6 +262,16 @@ export function streamBodyText(
           });
         }
         if (result.done) break;
+        const room = limits.maxBytes - received;
+        received += result.value.byteLength;
+        if (received > limits.maxBytes) {
+          if (limits.overflow === 'fail') {
+            throw upstreamTooLarge(service, limits.operation, limits.maxBytes);
+          }
+          const text = decoder.decode(result.value.subarray(0, room));
+          if (text) yield text;
+          return;
+        }
         const text = decoder.decode(result.value, { stream: true });
         if (text) yield text;
       }
@@ -216,15 +283,15 @@ export function streamBodyText(
   })();
 }
 
-/** Reads a whole body to text under the same stall and drop rules as {@link streamBodyText}. */
+/** Reads a whole body to text under the same limits and rules as {@link streamBodyText}. */
 async function readBodyText(
   body: ReadableStream<Uint8Array> | null,
-  stallMs: number,
+  limits: BodyLimits,
   service: string,
   signal: AbortSignal,
 ): Promise<string> {
   const chunks: string[] = [];
-  for await (const chunk of streamBodyText(body, stallMs, service, signal)) chunks.push(chunk);
+  for await (const chunk of streamBodyText(body, limits, service, signal)) chunks.push(chunk);
   return chunks.join('');
 }
 
@@ -274,7 +341,7 @@ export class UpstreamHttp {
           const response = await this.send(request, signal, scope);
           return {
             status: response.status,
-            body: await readBodyText(response.body, this.timeouts.stallMs, this.service, signal),
+            body: await readBodyText(response.body, this.bodyLimits(request), this.service, signal),
           };
         });
         return request.interpret(exchange);
@@ -289,7 +356,7 @@ export class UpstreamHttp {
    * stops reading, so an early stop never leaves the connection draining.
    */
   async openStream(
-    request: UpstreamStreamRequest,
+    request: RequestBase,
     scope: UpstreamScope,
     signal: AbortSignal,
   ): Promise<AsyncGenerator<string>> {
@@ -302,10 +369,20 @@ export class UpstreamHttp {
     );
     return streamBodyText(
       response.body,
-      this.timeouts.stallMs,
+      this.bodyLimits(request),
       this.service,
       scope.signal ? AbortSignal.any([scope.signal, signal]) : signal,
     );
+  }
+
+  private bodyLimits(request: RequestBase): BodyLimits {
+    return {
+      maxBytes: request.maxBytes,
+      overflow: 'fail',
+      operation: request.operation,
+      stallMs: this.timeouts.stallMs,
+      bodyMs: this.timeouts.bodyMs,
+    };
   }
 
   private retryOptions(request: RequestBase, scope: UpstreamScope): RetryOptions {
@@ -401,7 +478,7 @@ export class UpstreamHttp {
       if (request.rejectStatus) {
         const body = await readBodyText(
           response.body,
-          this.timeouts.stallMs,
+          { ...this.bodyLimits(request), maxBytes: ERROR_BODY_MAX_BYTES, overflow: 'truncate' },
           this.service,
           attemptSignal,
         );

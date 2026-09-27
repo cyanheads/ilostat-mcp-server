@@ -40,6 +40,7 @@ import {
   sdmxText,
   structureRoute,
   tooManyRequests,
+  upstreamParams,
   type WireOptions,
   wireServices,
 } from '../helpers/ilostat-upstream.js';
@@ -208,10 +209,11 @@ function contentText(result: ContractResult): string {
 
 const dataUrls = (wired: ReturnType<typeof wire>) => callUrls(wired.http, isIndicatorData);
 
+/** The one `/data/indicator` request a call sent, as its query parameters, read as upstream reads them. */
 function sentParams(wired: ReturnType<typeof wire>): Record<string, string> {
   const urls = dataUrls(wired);
   expect(urls).toHaveLength(1);
-  return Object.fromEntries(urls[0]?.searchParams ?? []);
+  return Object.fromEntries(urls[0] ? upstreamParams(urls[0]) : []);
 }
 
 const areasOf = (result: Output) => result.rows.map((row) => row.ref_area);
@@ -309,6 +311,33 @@ describe('latest mode', () => {
       { ref_area: 'X01', label: 'World', reason: 'no_value_in_window' },
     ]);
     expect(result.window_from).toBe(2025);
+  });
+
+  it('keeps the lookback_years bound when change_years widens timefrom: older rows are change bases only', async () => {
+    const wired = wire();
+    const { result } = await compare({
+      dataset_id: UNE,
+      ref_areas: ['USA', 'KEN', 'X01'],
+      lookback_years: 1,
+      change_years: 1,
+    });
+    // timefrom reaches back one more year for the change base; a latest value still needs 2025+
+    expect(sentParams(wired).timefrom).toBe('2024');
+    expect(result.window_from).toBe(2024);
+    expect(result.rows).toEqual([
+      { rank: 1, ...USA_2025, change: { from_period: '2024', from_value: 4.022, delta: 0.26 } },
+    ]);
+    // X01's 2024 modelled value is inside timefrom but outside lookback_years
+    expect(result.missing).toEqual([
+      { ref_area: 'KEN', label: 'Kenya', reason: 'no_value_in_window' },
+      { ref_area: 'X01', label: 'World', reason: 'no_value_in_window' },
+    ]);
+    const text = render(result);
+    expect(text).toContain(
+      '| 1 | USA — United States of America (country) | 4.282 | 2025 | reported |',
+    );
+    expect(text).not.toContain('X01 — World (aggregate)');
+    expect(text).toContain('- X01 — World: no_value_in_window');
   });
 
   it('adds change over change_years from the same period earlier, delta rounded, widening timefrom', async () => {
@@ -466,6 +495,27 @@ describe('period mode', () => {
     expect(enrichment.notice).toBe(
       '1 value is an ILO modelled estimate and 1 is reported; they are not directly comparable. 1 area has no value; see missing.',
     );
+  });
+
+  it('joins the two periods and the areas with a literal + on the wire, change on both surfaces', async () => {
+    const wired = wire();
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['USA', 'X01'],
+      period: 2025,
+      change_years: 2,
+    });
+    expect(result.isError).toBeFalsy();
+    const search = dataUrls(wired)[0]?.search ?? '';
+    expect(search).toMatch(/[?&]time=2025\+2023(&|$)/);
+    expect(search).toMatch(/[?&]ref_area=USA\+X01&/);
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.rows.map((row) => [row.ref_area, row.change])).toEqual([
+      ['X01', { from_period: '2023', from_value: 4.896, delta: -0.027 }],
+      ['USA', { from_period: '2023', from_value: 3.638, delta: 0.644 }],
+    ]);
+    const text = contentText(result);
+    for (const fragment of ['4.896', '3.638', '0.644']) expect(text).toContain(fragment);
   });
 
   it('normalizes a period and fails invalid_period on a frequency mismatch', async () => {
@@ -670,9 +720,10 @@ describe('routing', () => {
       modelled_estimate: 1,
       projection: 0,
     });
-    expect(enrichment).toMatchObject({ truncated: false, shown: result.rows.length, cap: 600 });
+    // The inline rows stop before the last area, so truncated is true; the dataframe holds the rest
+    expect(enrichment).toMatchObject({ truncated: true, shown: result.rows.length, cap: 600 });
     expect(enrichment.notice).toContain(
-      `Full result staged as ${name} (3 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL.`,
+      `Showing ${result.rows.length} of 3 areas inline; ranks, missing, and comparability cover every area. Full result staged as ${name} (3 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL.`,
     );
 
     const canvasId = await ctx.state.get<string>('canvas-id');
@@ -1038,6 +1089,38 @@ describe('format() with hostile upstream codes', () => {
     );
     expect(lines.filter((line) => /^## [a-z]\|/.test(line))).toEqual([]);
   });
+
+  it('renders status and note codes named like Object.prototype members as codes, verbatim in structuredContent', async () => {
+    const csv = [
+      `${CSV_HEADER},"note_source"`,
+      '"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2024",5,"__proto__",',
+      '"KEN","BA:7008","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2024",4,"constructor","toString"',
+      '',
+    ].join('\n');
+    wire({ routes: [dataRoute(() => csvResponse(csv))] });
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['USA', 'KEN'],
+    });
+    expect(result.isError).toBeFalsy();
+    const output = result.structuredContent as Output;
+    expect(output.rows.map((row) => [row.ref_area, row.obs_status, row.notes])).toEqual([
+      ['USA', '__proto__', []],
+      ['KEN', 'constructor', ['toString']],
+    ]);
+    // The output schema's record parse drops a __proto__ key, so that code has no label.
+    expect(Object.keys(output.legend.obs_status)).toEqual(['constructor']);
+    expect(Object.keys(output.legend.notes)).toEqual(['toString']);
+    const text = contentText(result);
+    expect(text).not.toMatch(/function|\[object Object\]/);
+    const lines = text.split('\n');
+    expect(lines.filter((line) => line.startsWith('| 1 | USA'))[0]).toContain(' | __proto__ | ');
+    expect(lines.filter((line) => line.startsWith('| 2 | KEN'))[0]).toContain(
+      ' | constructor | BA:7008',
+    );
+    expect(lines).toContain('- constructor — Not in the ILOSTAT dictionary');
+    expect(lines).toContain('- toString — Not in the ILOSTAT dictionary');
+  });
 });
 
 describe('contract envelope (runToolContract)', () => {
@@ -1111,6 +1194,32 @@ describe('contract envelope (runToolContract)', () => {
     expect(contentText(result)).toContain(notice);
   });
 
+  it('says 1 area, change over 1 year, and 1 distinct source in the singular on both surfaces', async () => {
+    wire();
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['USA'],
+      period: 2025,
+      change_years: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      change_years: 1,
+      comparability: { distinct_sources: 1 },
+      applied_filters: { ref_area_count: 1 },
+    });
+    const lines = contentText(result).split('\n');
+    expect(lines).toContain(
+      'Mode: period · period 2025 · change over 1 year · include_projections: false',
+    );
+    expect(lines).toContain(
+      '**Comparability:** periods 2025 · mixed_periods: false · reported 1 · modelled_estimate 0 · projection 0 · 1 distinct source',
+    );
+    expect(lines.find((line) => line.startsWith('**Applied filters:**'))).toContain(
+      ' · ref_areas USA · 1 area · ',
+    );
+  });
+
   it('a partial page validates as truncated, the disclosure on both surfaces', async () => {
     wire({ observations: { previewChars: 600 } });
     const result = await runToolContract(compareGeographiesTool, {
@@ -1126,7 +1235,7 @@ describe('contract envelope (runToolContract)', () => {
     );
   });
 
-  it('a staged page validates and names the dataframe on both surfaces', async () => {
+  it('a staged page validates as truncated and names the dataframe on both surfaces', async () => {
     const canvas = canvasOn();
     wire({ canvas, observations: { previewChars: 600 } });
     const result = await runToolContract(compareGeographiesTool, {
@@ -1134,11 +1243,17 @@ describe('contract envelope (runToolContract)', () => {
       ref_areas: ['USA', 'X01', 'KEN'],
     });
     expect(result.isError).toBeFalsy();
-    const name = (result.structuredContent as Output).dataframe?.name ?? '';
+    const structured = result.structuredContent as Output & { notice: string; shown: number };
+    const name = structured.dataframe?.name ?? '';
     expect(name).toMatch(/^df_/);
-    expect(contentText(result)).toContain(
-      `**Dataframe:** ${name} (3 rows, expires 2026-09-27T12:00:00.000Z)`,
-    );
+    expect(structured).toMatchObject({ truncated: true, cap: 600 });
+    expect(structured.rows).toHaveLength(structured.shown);
+    expect(structured.shown).toBeLessThan(3);
+    const disclosure = `Showing ${structured.shown} of 3 areas inline; ranks, missing, and comparability cover every area. Full result staged as ${name} (3 rows)`;
+    expect(structured.notice).toContain(disclosure);
+    const text = contentText(result);
+    expect(text).toContain(disclosure);
+    expect(text).toContain(`**Dataframe:** ${name} (3 rows, expires 2026-09-27T12:00:00.000Z)`);
   });
 
   it('a declared failure reaches both surfaces with its reason and recovery', async () => {

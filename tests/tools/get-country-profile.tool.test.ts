@@ -32,6 +32,7 @@ import {
   refAreaRows,
   rplumberBody,
   tooManyRequests,
+  upstreamParams,
   type WireOptions,
   wireServices,
 } from '../helpers/ilostat-upstream.js';
@@ -146,9 +147,9 @@ function contentText(result: ContractResult): string {
   return result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
 }
 
-/** The `/data/ref_area` calls sent, as their query parameters. */
+/** The `/data/ref_area` calls sent, as their query parameters, read as upstream reads them. */
 const refAreaCalls = (wired: ReturnType<typeof wire>) =>
-  callUrls(wired.http, isRefAreaData).map((url) => Object.fromEntries(url.searchParams));
+  callUrls(wired.http, isRefAreaData).map((url) => Object.fromEntries(upstreamParams(url)));
 
 const R1_3513 = { code: 'R1:3513', label: 'Repository: ILO-STATISTICS - Micro data processing' };
 
@@ -185,6 +186,9 @@ const KEN_AREA = {
 
 const REPORTED_MISSING_NOTICE =
   'No reported value exists for labour_income_share, working_poverty_rate; the modelled estimates shown for them are ILO model output, not national observations.';
+/** KEN by sex: working poverty is modelled for SEX_T only, so the model sentence names labour income share alone. */
+const WORKING_POVERTY_UNMODELLED_NOTICE =
+  'No reported value exists for labour_income_share, working_poverty_rate; the modelled estimate shown for labour_income_share is ILO model output, not a national observation. working_poverty_rate has no modelled estimate either.';
 
 describe('country', () => {
   it('pairs the latest reported and modelled value per headline, never filling one from the other', async () => {
@@ -297,6 +301,17 @@ describe('country', () => {
         expect(code).not.toMatch(/_[AQM]$/);
       }
     }
+    // the codes are joined by a literal +, the separator upstream splits on
+    expect(
+      callUrls(wired.http, isRefAreaData)
+        .map((url) => url.search)
+        .sort(),
+    ).toEqual(
+      [
+        `?id=KEN_A&indicator=${MODELLED_CODES.join('+')}&timeto=2024&latestyear=TRUE&format=.json`,
+        `?id=KEN_A&indicator=${REPORTED_CODES.join('+')}&latestyear=TRUE&format=.json`,
+      ].sort(),
+    );
   });
 
   it('sends the reported and modelled calls in parallel', async () => {
@@ -343,9 +358,7 @@ describe('country', () => {
     expect(valuesOf(male.result, 'labour_income_share')).toEqual([undefined, 33.276]);
     // World and KEN working poverty is published for SEX_T only
     expect(valuesOf(male.result, 'working_poverty_rate')).toEqual([undefined, undefined]);
-    expect(male.enrichment.notice).toBe(
-      `${REPORTED_MISSING_NOTICE} working_poverty_rate has no modelled estimate either.`,
-    );
+    expect(male.enrichment.notice).toBe(WORKING_POVERTY_UNMODELLED_NOTICE);
   });
 
   it('reads a blank or omitted sex as SEX_T', async () => {
@@ -371,8 +384,25 @@ describe('country', () => {
     expect(result.indicators.find((entry) => entry.key === 'unemployment_rate')?.reported).toEqual(
       reported('UNE_DEAP_SEX_AGE_RT_A', 5.585),
     );
+    // Neither missing key has a modelled estimate, so no sentence calls one model output
     expect(enrichment.notice).toBe(
-      `${REPORTED_MISSING_NOTICE} labour_income_share, working_poverty_rate have no modelled estimate either.`,
+      'No reported value exists for labour_income_share, working_poverty_rate, and none has an ILO modelled estimate either.',
+    );
+  });
+
+  it('words the notice for a single missing key, with and without a modelled estimate', async () => {
+    const fixture: CatalogFixture = observationCatalogFixture();
+    // labour income share leaves the catalog, so working poverty is the only key without a reported value
+    fixture.indicatorToc = fixture.indicatorToc.filter((row) => row.id !== 'LAP_2GDP_NOC_RT_A');
+    wire({ fixture });
+    const total = await profile({ ref_area: 'KEN' });
+    expect(total.result.reported_missing).toEqual(['working_poverty_rate']);
+    expect(total.enrichment.notice).toBe(
+      'No reported value exists for working_poverty_rate; the modelled estimate shown for it is ILO model output, not a national observation.',
+    );
+    const male = await profile({ ref_area: 'KEN', sex: 'SEX_M' });
+    expect(male.enrichment.notice).toBe(
+      'No reported value exists for working_poverty_rate, and it has no ILO modelled estimate either.',
     );
   });
 
@@ -475,7 +505,7 @@ describe('aggregate', () => {
     ]);
     expect(result.indicators.every((entry) => entry.reported === undefined)).toBe(true);
     expect(enrichment.notice).toBe(
-      `No reported value exists for ${ALL_KEYS.join(', ')}; the modelled estimates shown for them are ILO model output, not national observations. labour_force_participation_rate, employment_to_population_ratio, youth_neet_rate, informal_employment_rate, employment, working_poverty_rate have no modelled estimate either.`,
+      `No reported value exists for ${ALL_KEYS.join(', ')}; the modelled estimates shown for unemployment_rate, youth_unemployment_rate, labour_income_share are ILO model output, not national observations. labour_force_participation_rate, employment_to_population_ratio, youth_neet_rate, informal_employment_rate, employment, working_poverty_rate have no modelled estimate either.`,
     );
   });
 });
@@ -653,9 +683,7 @@ describe('contract envelope (runToolContract)', () => {
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as Output & { notice?: string };
     expect(structured.sex).toBe('SEX_F');
-    expect(structured.notice).toBe(
-      `${REPORTED_MISSING_NOTICE} working_poverty_rate has no modelled estimate either.`,
-    );
+    expect(structured.notice).toBe(WORKING_POVERTY_UNMODELLED_NOTICE);
     const text = contentText(result);
     for (const entry of structured.indicators) {
       if (entry.reported) {

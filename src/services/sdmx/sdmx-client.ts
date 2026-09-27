@@ -6,7 +6,10 @@
  * results here: 404 means no dataflow or no data for the key, and a 500 carrying
  * an Oracle `ORA-` message means the key names an unknown member — both read as
  * "nothing here", and the Oracle text is never relayed. A 422 (wrong key arity)
- * is a bug in this server.
+ * is a bug in this server. Every path segment — the indicator from the catalog,
+ * the version and area codes from a structure document — is checked against the
+ * SDMX identifier grammar before a URL is built, so upstream data can never steer
+ * a request off its endpoint.
  * @module services/sdmx/sdmx-client
  */
 
@@ -32,13 +35,40 @@ const DATA_CSV_ACCEPT = 'application/vnd.sdmx.data+csv;version=1.0.0';
  * Structure documents are 50–130 KB and slow to build, so SDMX runs one request at
  * a time at 20 a minute with a 1 s start gap, and the same 60 s → 10 min cooldown.
  */
-export const SDMX_PACING: PacingOptions = {
+const SDMX_PACING: PacingOptions = {
   limits: [{ requests: 20, perMs: 60_000 }],
   maxConcurrent: 1,
   minStartGapMs: 1_000,
   cooldown: { baseMs: 60_000, maxMs: 600_000 },
   maxWaitMs: 15_000,
 };
+
+const MIB = 1024 * 1024;
+
+/**
+ * Body caps, far above the live responses (2026-09): structure documents run
+ * 127–130 KB, and a probe answers one row per series of one area, 3–13 KB.
+ */
+const STRUCTURE_MAX_BYTES = 16 * MIB;
+const PROBE_MAX_BYTES = MIB;
+
+/** SDMX identifiers: an indicator or area code, and a version such as `1.0`. */
+const CODE = /^[A-Z0-9_]+$/;
+const VERSION = /^\d+(\.\d+)*$/;
+/** A series key: codes or empty positions, `.`-separated (`USA....`). */
+const SERIES_KEY = /^[A-Z0-9_]*(\.[A-Z0-9_]*)*$/;
+
+/**
+ * Refuses a path segment outside the SDMX identifier grammar. The segments come
+ * from upstream data, never a caller, and nothing that passes needs percent-encoding.
+ */
+function checkSegment(value: string, pattern: RegExp, what: string): void {
+  if (!pattern.test(value)) {
+    throw serializationError(
+      `ILOSTAT sent an SDMX ${what} this server will not put in a URL; no request was made.`,
+    );
+  }
+}
 
 /** Every SDMX call here is tool-initiated (describe), so each caps its queue wait. */
 export class SdmxClient {
@@ -53,17 +83,19 @@ export class SdmxClient {
   }
 
   /** The dataflow `DF_{indicator}` with its structures and used codes; `undefined` when SDMX has no such dataflow. */
-  getDataflowStructure(indicator: string, scope: UpstreamScope): Promise<unknown> {
+  async getDataflowStructure(indicator: string, scope: UpstreamScope): Promise<unknown> {
+    checkSegment(indicator, CODE, 'indicator code');
     const url = new URL(`${BASE_URL}/dataflow/ILO/DF_${indicator}/latest`);
     url.searchParams.set('references', 'all');
     url.searchParams.set('detail', 'referencepartial');
-    return this.http.request(
+    return await this.http.request(
       {
         url: url.toString(),
         operation: 'sdmx dataflow structure',
         accept: STRUCTURE_ACCEPT,
         acceptStatuses: [200, 404],
         bounded: true,
+        maxBytes: STRUCTURE_MAX_BYTES,
         interpret: ({ status, body }) => {
           if (status === 404) return;
           try {
@@ -87,21 +119,25 @@ export class SdmxClient {
    * The first series row of `…/data/ILO,DF_{indicator},{version}/{key}?lastNObservations=1`,
    * keyed by CSV column; `undefined` when there is no data for the key.
    */
-  probeSeries(
+  async probeSeries(
     indicator: string,
     version: string,
     key: string,
     scope: UpstreamScope,
   ): Promise<Record<string, string> | undefined> {
+    checkSegment(indicator, CODE, 'indicator code');
+    checkSegment(version, VERSION, 'dataflow version');
+    checkSegment(key, SERIES_KEY, 'series key');
     const url = new URL(`${BASE_URL}/data/ILO,DF_${indicator},${version}/${key}`);
     url.searchParams.set('lastNObservations', '1');
-    return this.http.request(
+    return await this.http.request(
       {
         url: url.toString(),
         operation: 'sdmx unit probe',
         accept: DATA_CSV_ACCEPT,
         acceptStatuses: [200, 404, 422, 500],
         bounded: true,
+        maxBytes: PROBE_MAX_BYTES,
         interpret: ({ status, body }) => {
           if (status === 200) return parseCsvObjects(body)[0];
           if (status === 404) return;

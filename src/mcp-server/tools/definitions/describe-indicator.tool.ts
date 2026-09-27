@@ -5,27 +5,32 @@
  * aggregates, and how its observations are classed as reported, modelled, or
  * projected. Catalog metadata comes from memory; breakdown codes, default slice,
  * unit, and areas from the cached SDMX structure, which degrades to
- * `structure_status: 'unavailable'` rather than failing the call.
+ * `structure_status: 'unavailable'` rather than failing the call. A breakdown
+ * lists only the SDMX codes `ilostat_query_indicator` accepts in that slot.
  * @module mcp-server/tools/definitions/describe-indicator
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blockquote, datasetIdInput } from '@/mcp-server/tools/tool-helpers.js';
+import { blockquote, datasetIdInput, FREQUENCY_NAMES } from '@/mcp-server/tools/tool-helpers.js';
 import { ATTRIBUTION } from '@/services/attribution.js';
 import { MODELLED_SOURCE_LABEL } from '@/services/basis/basis.js';
 import { normalizeDatasetId } from '@/services/catalog/codes.js';
 import { inlineText } from '@/services/catalog/text.js';
 import type { CatalogSnapshot } from '@/services/catalog/types.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
+import { classificationInSlot } from '@/services/observations/request-validation.js';
 import type { BreakdownDimension } from '@/services/structure/sdmx-structure.js';
 
-const FREQUENCY_NAMES: Record<string, string> = { A: 'annual', Q: 'quarterly', M: 'monthly' };
 const RELATED_LIMIT = 20;
 const AREAS_PER_LINE = 20;
 
-/** Dataset IDs, also `+`- or `,`-joined, so a joined value reaches the handler's describe-one-per-call guidance. */
-const JOINED_IDS_PATTERN = /^[A-Z0-9_]+([+,][A-Z0-9_]+)*$/;
+/**
+ * Dataset IDs, also `+`- or `,`-joined with optional spaces around the separator
+ * (`A, B`), so a joined value reaches the handler's describe-one-per-call guidance.
+ * Spaces only: a line break still fails here, so it is never echoed.
+ */
+const JOINED_IDS_PATTERN = /^[A-Z0-9_]+( *[+,] *[A-Z0-9_]+)*$/;
 
 const STRUCTURE_NOTICE =
   "Breakdown codes and units are unavailable from the ILOSTAT structure service; ilostat_list_reference topic classifications lists every breakdown code, and the label's parenthetical — (%) or (thousands) — gives the unit.";
@@ -51,20 +56,22 @@ const BreakdownSchema = (slot: string) =>
               label: z.string().describe('Code label.'),
               is_total: z.boolean().describe('Whether the code is the total of its breakdown.'),
             })
-            .describe('One breakdown code the dataset uses.'),
+            .describe('One breakdown code.'),
         )
-        .describe('Codes the dataset actually uses; classification group headers excluded.'),
+        .describe(
+          `Codes ILOSTAT's structure service lists for this breakdown that ilostat_query_indicator accepts as ${slot}; classification group headers excluded. The list covers every frequency of the indicator, so a code may have no rows in one dataset.`,
+        ),
     })
     .describe(`The ${slot} breakdown.`);
 
 export const describeIndicatorTool = tool('ilostat_describe_indicator', {
   title: 'Describe an ILOSTAT dataset',
   description:
-    'Explain one ILOSTAT dataset before comparing numbers: its definition, unit and multiplier, frequency variants and coverage, the sex and breakdown codes it actually uses (the total code of each breakdown marked), the reference areas it covers, whether it carries World/regional/income-group aggregates, and how its observations are classed as reported, modelled, or projected. Accepts a dataset ID (UNE_DEAP_SEX_AGE_RT_A) or a bare indicator code (UNE_DEAP_SEX_AGE_RT), which describes every frequency. An unknown code returns found: false with guidance.',
+    'Explain one ILOSTAT dataset before comparing numbers: its definition, unit and multiplier, frequency variants and coverage, the sex and breakdown codes in use across its frequencies (the total code of each breakdown marked), the reference areas it covers, whether it carries World/regional/income-group aggregates, and how its observations are classed as reported, modelled, or projected. Accepts a dataset ID (UNE_DEAP_SEX_AGE_RT_A) or a bare indicator code (UNE_DEAP_SEX_AGE_RT), which describes every frequency. An unknown code returns found: false with guidance.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    dataset_id: datasetIdInput(JOINED_IDS_PATTERN).describe(
+    dataset_id: datasetIdInput(JOINED_IDS_PATTERN, 200).describe(
       'One dataset ID (indicator code plus _A, _Q, or _M, e.g. UNE_DEAP_SEX_AGE_RT_A) or a bare indicator code (UNE_DEAP_SEX_AGE_RT), as ilostat_search_indicators returns them. Case-insensitive; a DF_ prefix (the SDMX dataflow form) is stripped.',
     ),
   }),
@@ -257,16 +264,16 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       unitResolved: Boolean(lookup.unit),
     });
 
-    const breakdown = (dimension: BreakdownDimension) => {
+    /** The SDMX codes the query's slot filter accepts; the rest could only be rejected there. */
+    const breakdown = (dimension: BreakdownDimension, slot: 'classif1' | 'classif2') => {
       const typeLabel = snapshot.classificationTypes.get(dimension.id)?.label;
       return {
         type: dimension.id,
         ...(typeLabel ? { type_label: typeLabel } : {}),
-        codes: dimension.codes.map((code) => ({
-          code: code.code,
-          label: snapshot.classifications.get(code.code)?.label ?? code.name,
-          is_total: code.isTotal,
-        })),
+        codes: dimension.codes.flatMap((code) => {
+          const entry = classificationInSlot(snapshot, code.code, slot);
+          return entry ? [{ code: code.code, label: entry.label, is_total: code.isTotal }] : [];
+        }),
       };
     };
     const isAggregate = (code: string) =>
@@ -302,8 +309,8 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
             breakdowns: {
               sex: shape.sexCodes !== undefined,
               sex_codes: shape.sexCodes ?? [],
-              ...(shape.classif1 ? { classif1: breakdown(shape.classif1) } : {}),
-              ...(shape.classif2 ? { classif2: breakdown(shape.classif2) } : {}),
+              ...(shape.classif1 ? { classif1: breakdown(shape.classif1, 'classif1') } : {}),
+              ...(shape.classif2 ? { classif2: breakdown(shape.classif2, 'classif2') } : {}),
             },
             default_slice: { ...shape.defaultSlice },
             ref_areas: {
@@ -351,22 +358,32 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
     if (!result.found) lines.push('**No match.**');
     if (result.guidance) lines.push(result.guidance);
     if (result.indicator) {
-      lines.push(`## ${result.dataset_id ?? result.indicator} — ${inlineText(result.label ?? '')}`);
+      lines.push(
+        `## ${inlineText(result.dataset_id ?? result.indicator)} — ${inlineText(result.label ?? '')}`,
+      );
     }
-    if (result.dataset_id) lines.push(`Indicator: ${result.indicator}`);
+    if (result.dataset_id && result.indicator) {
+      lines.push(`Indicator: ${inlineText(result.indicator)}`);
+    }
     if (result.database) {
-      lines.push(`Database: ${inlineText(result.database.label)} (${result.database.code})`);
+      lines.push(
+        `Database: ${inlineText(result.database.label)} (${inlineText(result.database.code)})`,
+      );
     }
     if (result.subject) {
-      lines.push(`Subject: ${inlineText(result.subject.label)} (${result.subject.code})`);
+      lines.push(
+        `Subject: ${inlineText(result.subject.label)} (${inlineText(result.subject.code)})`,
+      );
     }
     if (result.measure) {
-      lines.push(`Measure: ${inlineText(result.measure.label)} (${result.measure.code})`);
+      lines.push(
+        `Measure: ${inlineText(result.measure.label)} (${inlineText(result.measure.code)})`,
+      );
     }
     if (result.unit) {
       const { unit } = result;
       lines.push(
-        `Unit: ${inlineText(unit.measure_label ?? unit.measure)} (${unit.measure}) · type ${inlineText(unit.type_label ?? unit.type)} (${unit.type}) · multiplier ${unit.multiplier}${unit.multiplier_label ? ` (${inlineText(unit.multiplier_label)})` : ''}`,
+        `Unit: ${inlineText(unit.measure_label ?? unit.measure)} (${inlineText(unit.measure)}) · type ${inlineText(unit.type_label ?? unit.type)} (${inlineText(unit.type)}) · multiplier ${unit.multiplier}${unit.multiplier_label ? ` (${inlineText(unit.multiplier_label)})` : ''}`,
       );
     } else if (result.found) {
       lines.push('Unit: not resolved');
@@ -385,7 +402,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       lines.push('', '### Frequency variants');
       for (const variant of result.datasets) {
         lines.push(
-          `- ${variant.dataset_id} · ${FREQUENCY_NAMES[variant.frequency] ?? variant.frequency} · ${variant.data_start}–${variant.data_end} · ${variant.n_ref_area} ${variant.n_ref_area === 1 ? 'area' : 'areas'} · ${variant.n_records.toLocaleString('en-US')} records (${variant.n_records_all.toLocaleString('en-US')} with secondary sources) · updated ${inlineText(variant.last_update)} · has aggregates: ${variant.has_aggregates}`,
+          `- ${inlineText(variant.dataset_id)} · ${inlineText(FREQUENCY_NAMES.get(variant.frequency) ?? variant.frequency)} · ${variant.data_start}–${variant.data_end} · ${variant.n_ref_area} ${variant.n_ref_area === 1 ? 'area' : 'areas'} · ${variant.n_records.toLocaleString('en-US')} records (${variant.n_records_all.toLocaleString('en-US')} with secondary sources) · updated ${inlineText(variant.last_update)} · has aggregates: ${variant.has_aggregates}`,
         );
       }
     }
@@ -395,7 +412,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       lines.push(
         '',
         '### Breakdowns',
-        `Sex breakdown: ${breakdowns.sex}${breakdowns.sex_codes.length > 0 ? ` — ${breakdowns.sex_codes.join(', ')}` : ''}`,
+        `Sex breakdown: ${breakdowns.sex}${breakdowns.sex_codes.length > 0 ? ` — ${breakdowns.sex_codes.map(inlineText).join(', ')}` : ''}`,
       );
       for (const [slot, dimension] of [
         ['classif1', breakdowns.classif1],
@@ -403,11 +420,11 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       ] as const) {
         if (!dimension) continue;
         lines.push(
-          `**${slot}** — ${dimension.type}${dimension.type_label ? ` (${inlineText(dimension.type_label)})` : ''}:`,
+          `**${slot}** — ${inlineText(dimension.type)}${dimension.type_label ? ` (${inlineText(dimension.type_label)})` : ''}:`,
         );
         for (const code of dimension.codes) {
           lines.push(
-            `- ${code.code} — ${inlineText(code.label)}${code.is_total ? ' · is_total: true' : ''}`,
+            `- ${inlineText(code.code)} — ${inlineText(code.label)}${code.is_total ? ' · is_total: true' : ''}`,
           );
         }
       }
@@ -419,7 +436,9 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
         slice.classif1 ? `classif1 ${slice.classif1}` : undefined,
         slice.classif2 ? `classif2 ${slice.classif2}` : undefined,
       ].filter(Boolean);
-      lines.push(`Default slice: ${parts.length > 0 ? parts.join(' · ') : 'no total codes'}`);
+      lines.push(
+        `Default slice: ${parts.length > 0 ? inlineText(parts.join(' · ')) : 'no total codes'}`,
+      );
     }
 
     if (result.ref_areas) {
@@ -427,7 +446,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       lines.push(
         '',
         '### Reference areas',
-        `${areas.count} areas: ${areas.countries.length} countries, ${areas.aggregates.length} aggregates`,
+        `${areas.count} ${areas.count === 1 ? 'area' : 'areas'}: ${areas.countries.length} ${areas.countries.length === 1 ? 'country' : 'countries'}, ${areas.aggregates.length} ${areas.aggregates.length === 1 ? 'aggregate' : 'aggregates'}`,
       );
       if (areas.aggregates.length > 0) lines.push(`Aggregates: ${areas.aggregates.join(', ')}`);
       for (let i = 0; i < areas.countries.length; i += AREAS_PER_LINE) {
@@ -440,7 +459,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       lines.push('', '### Related indicators (same measure)');
       for (const other of result.related_datasets) {
         lines.push(
-          `- ${other.indicator} — ${inlineText(other.label)}${other.classification ? ` (${other.classification})` : ''}`,
+          `- ${inlineText(other.indicator)} — ${inlineText(other.label)}${other.classification ? ` (${inlineText(other.classification)})` : ''}`,
         );
       }
     }

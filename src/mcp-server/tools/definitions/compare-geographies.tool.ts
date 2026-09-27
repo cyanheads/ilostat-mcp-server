@@ -10,12 +10,16 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  AreaGroupEchoSchema,
   BasisCountsSchema,
   DataframeSchema,
   DatasetMetaSchema,
   datasetMeta,
+  renderAreaGroup,
   renderBasisCounts,
+  renderDataframe,
   renderDatasetMeta,
+  stagedDataframe,
 } from '@/mcp-server/tools/observation-output.js';
 import {
   AREA_GROUP_MESSAGE,
@@ -35,21 +39,14 @@ import { inlineText } from '@/services/catalog/text.js';
 import type { CatalogSnapshot } from '@/services/catalog/types.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 import type { ComparisonRow } from '@/services/observations/comparison.js';
-import { noteCodesOf, UNLABELLED } from '@/services/observations/observation-rows.js';
+import { codeLabels, noteCodesOf, UNLABELLED } from '@/services/observations/observation-rows.js';
 import type { CompareAppliedFilters } from '@/services/observations/observation-service.js';
 
 const AppliedFiltersSchema = z
   .object({
     dataset_id: z.string().describe('Dataset compared.'),
     ref_areas: z.array(z.string()).optional().describe('Reference areas given, normalized.'),
-    area_group: z
-      .object({
-        code: z.string().describe('Area group code.'),
-        label: z.string().describe('Area group label.'),
-        member_count: z.number().describe('Member countries it expanded to.'),
-      })
-      .optional()
-      .describe('The area group and how many countries it expanded to.'),
+    area_group: AreaGroupEchoSchema,
     ref_area_count: z.number().describe('Areas compared: ref_areas plus the area_group members.'),
     sex: z.string().optional().describe('Sex code sent.'),
     classif1: z.string().optional().describe('classif1 code sent.'),
@@ -67,10 +64,7 @@ const AppliedFiltersSchema = z
 
 /** Labels for the status flags and note codes the inline comparison rows carry. */
 function comparisonLegend(rows: readonly ComparisonRow[], snapshot: CatalogSnapshot) {
-  const legend: { notes: Record<string, string>; obs_status: Record<string, string> } = {
-    obs_status: {},
-    notes: {},
-  };
+  const legend = { obs_status: codeLabels(), notes: codeLabels() };
   for (const row of rows) {
     if (row.obs_status !== null) {
       legend.obs_status[row.obs_status] = row.obs_status_label ?? UNLABELLED;
@@ -85,12 +79,8 @@ function comparisonLegend(rows: readonly ComparisonRow[], snapshot: CatalogSnaps
 function renderAppliedFilters(filters: CompareAppliedFilters): string {
   const parts = [`dataset ${filters.dataset_id}`];
   if (filters.ref_areas) parts.push(`ref_areas ${filters.ref_areas.join(', ')}`);
-  if (filters.area_group) {
-    parts.push(
-      `area_group ${filters.area_group.code} (${inlineText(filters.area_group.label)}, ${filters.area_group.member_count} countries)`,
-    );
-  }
-  parts.push(`${filters.ref_area_count} areas`);
+  if (filters.area_group) parts.push(renderAreaGroup(filters.area_group));
+  parts.push(`${filters.ref_area_count} ${filters.ref_area_count === 1 ? 'area' : 'areas'}`);
   if (filters.sex) parts.push(`sex ${filters.sex}`);
   if (filters.classif1) parts.push(`classif1 ${filters.classif1}`);
   if (filters.classif2) parts.push(`classif2 ${filters.classif2}`);
@@ -121,10 +111,10 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
     sex: blankAsUnset(sexCodeInput().optional()).describe(
       'Sex code SEX_T, SEX_M, SEX_F, or SEX_O; T/M/F/O and total/both/male/female/other are accepted. Defaults to SEX_T on a dataset with a sex breakdown; refused on one without.',
     ),
-    classif1: blankAsUnset(z.string().optional()).describe(
+    classif1: blankAsUnset(z.string().max(64).optional()).describe(
       "First breakdown code, case-insensitive. Defaults to the dataset's total code; required when the breakdown has no total (deciles); refused on a dataset without the breakdown. ilostat_describe_indicator lists the dataset's codes and marks its totals.",
     ),
-    classif2: blankAsUnset(z.string().optional()).describe(
+    classif2: blankAsUnset(z.string().max(64).optional()).describe(
       'Second breakdown code; same defaults and rules as classif1.',
     ),
     period: periodInput().describe(
@@ -171,7 +161,12 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       .enum(['latest', 'period'])
       .describe("latest: each area's latest value; period: every area at one period."),
     period: z.string().optional().describe('Period mode: the period compared.'),
-    window_from: z.number().optional().describe('Latest mode: the first year requested.'),
+    window_from: z
+      .number()
+      .optional()
+      .describe(
+        'Latest mode: the first year requested — lookback_years before the current year, and change_years further back to reach the change base. A latest value still falls within lookback_years.',
+      ),
     change_years: z
       .number()
       .optional()
@@ -256,7 +251,11 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       .describe(
         'Mixed periods, mixed bases, missing areas, a unit or area list the structure service could not supply, where the full comparison is staged, or why the inline rows stop early.',
       ),
-    truncated: z.boolean().describe('True when the inline rows stop before the last area.'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when the inline rows stop before the last area — also when a dataframe holds the full comparison.',
+      ),
     shown: z.number().describe('Rows returned inline.'),
     cap: z.number().describe('Inline preview budget, in serialized characters.'),
   },
@@ -397,11 +396,18 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       cap: result.previewChars,
     });
     const notices = [...result.notices];
-    if (outcome.kind === 'staged') notices.push(dataframeNotice(outcome.table));
+    if (outcome.kind === 'staged') {
+      notices.push(
+        `Showing ${shown} of ${comparison.entries.length} areas inline; ranks, missing, and comparability cover every area.`,
+        dataframeNotice(outcome.table),
+      );
+    }
     if (outcome.kind === 'preview') {
       notices.push(
         `Showing ${shown} of ${comparison.entries.length} areas inline: ${outcome.cause === 'canvas_off' ? 'dataframes are off in this deployment' : 'staging the full comparison as a dataframe failed'}. Ranks, missing, and comparability cover every area; narrow ref_areas or area_group to see the rest.`,
       );
+    }
+    if (outcome.kind !== 'complete') {
       ctx.enrich.truncated({ shown, cap: result.previewChars, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
@@ -461,15 +467,7 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
         basis_counts: { ...comparison.basisCounts },
         distinct_sources: comparison.distinctSources,
       },
-      ...(outcome.kind === 'staged'
-        ? {
-            dataframe: {
-              name: outcome.table.name,
-              row_count: outcome.table.rowCount,
-              expires_at: outcome.table.expiresAt,
-            },
-          }
-        : {}),
+      ...(outcome.kind === 'staged' ? { dataframe: stagedDataframe(outcome.table) } : {}),
       attribution: ATTRIBUTION,
     };
   },
@@ -483,7 +481,7 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
     ].filter(Boolean);
     lines.push(
       `Slice: ${slice.length > 0 ? inlineText(slice.join(' · ')) : 'no breakdowns'}${result.slice.defaulted.length > 0 ? ` (defaulted: ${result.slice.defaulted.join(', ')})` : ''}`,
-      `Mode: ${result.mode}${result.period ? ` · period ${result.period}` : ''}${result.window_from === undefined ? '' : ` · from ${result.window_from}`}${result.change_years === undefined ? '' : ` · change over ${result.change_years} years`} · include_projections: ${result.include_projections}`,
+      `Mode: ${result.mode}${result.period ? ` · period ${result.period}` : ''}${result.window_from === undefined ? '' : ` · from ${result.window_from}`}${result.change_years === undefined ? '' : ` · change over ${result.change_years} ${result.change_years === 1 ? 'year' : 'years'}`} · include_projections: ${result.include_projections}`,
       '',
       '| rank | area | value | period | basis | status | source | notes | change |',
       '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
@@ -520,13 +518,9 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
     const { comparability } = result;
     lines.push(
       '',
-      `**Comparability:** periods ${inlineText(comparability.periods.join(', ')) || 'none'} · mixed_periods: ${comparability.mixed_periods} · ${renderBasisCounts(comparability.basis_counts)} · ${comparability.distinct_sources} distinct sources`,
+      `**Comparability:** periods ${inlineText(comparability.periods.join(', ')) || 'none'} · mixed_periods: ${comparability.mixed_periods} · ${renderBasisCounts(comparability.basis_counts)} · ${comparability.distinct_sources} distinct ${comparability.distinct_sources === 1 ? 'source' : 'sources'}`,
     );
-    if (result.dataframe) {
-      lines.push(
-        `**Dataframe:** ${result.dataframe.name} (${result.dataframe.row_count} rows, expires ${result.dataframe.expires_at})`,
-      );
-    }
+    if (result.dataframe) lines.push(renderDataframe(result.dataframe));
     lines.push(result.attribution);
     return [{ type: 'text', text: lines.join('\n') }];
   },

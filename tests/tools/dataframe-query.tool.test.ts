@@ -3,27 +3,33 @@
  * DuckDB canvas: a `register_as` name in any case is stored under the minted
  * `df_XXXXX_XXXXX` form, which describe and a later `register_as` then resolve;
  * a `df_` name in the SQL is read in any case, bare or double-quoted, for the
- * `missing_table` pre-check and a derived table's provenance; a canvas re-minted
+ * `missing_table` name the engine's rejection is rebuilt with and a derived
+ * table's provenance; `missing_table` points at no listing where every caller
+ * shares one canvas; a canvas re-minted
  * after a restart leaves no stale name to clash with; a `register_as` result
  * larger than its inline rows reports an exact `row_count` and points at the
  * stored dataframe; `sql` is capped at 20,000 characters; the canvas-off
  * registration; zero rows, the `row_limit` and `preview` bounds (preview 0
  * included), and a blank `register_as`; every declared error reason with the
  * contract recovery, and a call with no canvas wired failing `InternalError`;
- * table-cell escaping; the severity pin — on both consumption paths
+ * a path in an engine failure, from the query or from storing its
+ * `register_as` result, redacted to `[path]`; table-cell escaping; the
+ * severity pin — on both consumption paths
  * (`structuredContent` and `content[]`).
  * @module tests/tools/dataframe-query.tool.test
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { CanvasInstance, type DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { resetConfig } from '@cyanheads/mcp-ts-core/config';
+import { databaseError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { ErrorHandler } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
-import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeIlostatServices } from '@/services/ilostat-services.js';
 import {
   FIXED_NOW,
@@ -42,6 +48,8 @@ const TENANT = 'default';
 const canvases: DataCanvas[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  resetConfig();
   disposeIlostatServices();
   for (const canvas of canvases.splice(0)) {
     await canvas.shutdown(createMockContext({ tenantId: TENANT }));
@@ -241,7 +249,7 @@ describe('df_ names in SQL', () => {
     expect(text).toContain(`- Dataset: ${UNE} — `);
   });
 
-  it('fails missing_table for a DF_-prefixed name that matches nothing, before the SQL runs, on both surfaces', async () => {
+  it('fails missing_table for a DF_-prefixed name that matches nothing, named in the minted form, on both surfaces', async () => {
     wireCanvas();
     const result = await runToolContract(dataframeQueryTool, {
       sql: 'SELECT * FROM DF_NOPE0_NOPE0',
@@ -261,6 +269,58 @@ describe('df_ names in SQL', () => {
     const text = contentText(result);
     expect(text).toContain('Dataframe df_NOPE0_NOPE0 does not exist or has expired.');
     expect(text).toContain(`Recovery: ${MISSING_TABLE_RECOVERY}`);
+  });
+
+  it('keeps the spill path of an engine I/O failure off both surfaces', async () => {
+    wireCanvas();
+    const query = vi
+      .spyOn(CanvasInstance.prototype, 'query')
+      .mockRejectedValueOnce(
+        databaseError(
+          'IO Error: Cannot open file "/srv/canvas-tmp/duckdb_temp_storage_DEFAULT-0.tmp": Permission denied',
+        ),
+      );
+    const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 AS one' });
+    query.mockRestore();
+    const redacted = 'IO Error: Cannot open file "[path]": Permission denied';
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.DatabaseError, message: redacted },
+    });
+    expect(contentText(result)).toContain(redacted);
+    expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
+  });
+
+  it.each([
+    [
+      'looking up the stored table',
+      (error: Error) => {
+        vi.spyOn(CanvasInstance.prototype, 'describe').mockRejectedValueOnce(error);
+      },
+    ],
+    [
+      'admitting it to the tenant budget',
+      (error: Error) => {
+        vi.spyOn(CanvasBridge.prototype, 'admitTable').mockRejectedValueOnce(error);
+      },
+    ],
+  ])('keeps the path of a register_as that fails %s off both surfaces', async (_label, arrange) => {
+    wireCanvas();
+    const engineError = new Error(
+      'IO Error: Cannot open file "/srv/canvas-tmp/duckdb_temp_storage_DEFAULT-0.tmp": Permission denied',
+    );
+    arrange(engineError);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS one',
+      register_as: 'df_STORE_D0001',
+    });
+    const redacted = 'IO Error: Cannot open file "[path]": Permission denied';
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: ErrorHandler.classifyOnly(engineError).code, message: redacted },
+    });
+    expect(contentText(result)).toContain(redacted);
+    expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
   });
 
   it.each([
@@ -301,7 +361,47 @@ describe('df_ names in SQL', () => {
     },
   );
 
-  it('fails missing_table for a double-quoted name that matches nothing, before the SQL runs, on both surfaces', async () => {
+  it('points missing_table at the returned name, not a listing, where every caller shares one canvas, on both surfaces', async () => {
+    resetConfig({ MCP_TRANSPORT_TYPE: 'http', MCP_AUTH_MODE: 'none' });
+    wireCanvas();
+    const hint =
+      'Check the name against the df_XXXXX_XXXXX name the producing tool returned, or re-run the producing tool to stage the data again.';
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: '/* shared */ SELECT * FROM df_NOPE0_NOPE0',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'missing_table', tableName: 'df_NOPE0_NOPE0', recovery: { hint } },
+      },
+    });
+    const text = contentText(result);
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).not.toContain('to list the staged dataframes');
+  });
+
+  it.each([
+    ['system_catalog_access', 'SELECT table_name FROM information_schema.tables'],
+    ['non_select_statement', 'DELETE FROM df_NOPE0_NOPE0'],
+    ['denied_function', "SELECT * FROM read_csv('/etc/hosts')"],
+  ])(
+    'points the %s recovery at no listing where every caller shares one canvas, on both surfaces',
+    async (reason, sql) => {
+      resetConfig({ MCP_TRANSPORT_TYPE: 'http', MCP_AUTH_MODE: 'none' });
+      wireCanvas();
+      const result = await runToolContract(dataframeQueryTool, { sql });
+      expect(result.isError).toBe(true);
+      const hint = contractRecovery(reason);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason, recovery: { hint } } },
+      });
+      expect(hint).not.toMatch(/\blists?\b/);
+      expect(contentText(result)).toContain(`Recovery: ${hint}`);
+    },
+  );
+
+  it('fails missing_table for a double-quoted name that matches nothing, named in the minted form, on both surfaces', async () => {
     wireCanvas();
     const result = await runToolContract(dataframeQueryTool, {
       sql: 'SELECT * FROM "DF_NOPE0_NOPE0"',
@@ -640,6 +740,7 @@ describe('errors', () => {
       invalid_sql: 'notice',
       sql_execution_error: 'notice',
       register_as_clash: 'notice',
+      register_as_too_large: 'notice',
       non_select_statement: 'notice',
       multi_statement: 'notice',
       denied_function: 'notice',
@@ -705,6 +806,142 @@ describe('errors', () => {
     expect(error.data).toMatchObject({ reason, recovery: { hint: contractRecovery(reason) } });
   });
 
+  it.each([
+    ['CREATE TABLE', (name: string) => `CREATE TABLE df_AAAAA_BBBBB AS SELECT * FROM ${name}`],
+    ['INSERT INTO', (name: string) => `INSERT INTO df_NEWNA_MEXXX SELECT * FROM ${name}`],
+    ['a comment-led DROP', () => '/* tidy */ -- up\nDROP TABLE df_GONE0_GONE0'],
+  ])(
+    'fails %s naming an unused df_ name non_select_statement, not missing_table, on both surfaces',
+    async (_label, sqlFor) => {
+      const { ctx, name } = await staged();
+      const error = await failure({ sql: sqlFor(name) }, ctx);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'non_select_statement',
+        recovery: { hint: contractRecovery('non_select_statement') },
+      });
+
+      wireCanvas();
+      const result = await runToolContract(dataframeQueryTool, { sql: sqlFor('df_OTHER_TABLE') });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'non_select_statement' } },
+      });
+      const text = contentText(result);
+      expect(text).toContain('Canvas query must be SELECT');
+      expect(text).toContain(`Recovery: ${contractRecovery('non_select_statement')}`);
+      expect(text).not.toContain('does not exist');
+    },
+  );
+
+  it('still fails a comment-led SELECT of an unused df_ name missing_table', async () => {
+    const { ctx } = await staged();
+    const error = await failure({ sql: '-- first\n/* then */ SELECT * FROM df_NOPE0_NOPE0' }, ctx);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.message).toBe('Dataframe df_NOPE0_NOPE0 does not exist or has expired.');
+    expect(error.data).toMatchObject({ reason: 'missing_table', tableName: 'df_NOPE0_NOPE0' });
+  });
+
+  /** Reads that open with neither SELECT, WITH, FROM, nor `(`, each run over `name`. */
+  const READ_OPENERS: [string, (name: string) => string][] = [
+    ['VALUES', (name) => `VALUES ((SELECT count(*) FROM ${name}))`],
+    ['PIVOT … IN', (name) => `PIVOT ${name} ON sex IN ('SEX_F', 'SEX_M') USING max(value)`],
+    [
+      'UNPIVOT',
+      (name) => `UNPIVOT (SELECT ref_area, value FROM ${name}) ON value INTO NAME k VALUE v`,
+    ],
+    ['SUMMARIZE', (name) => `SUMMARIZE ${name}`],
+    ['DESCRIBE', (name) => `DESCRIBE ${name}`],
+    ['SHOW', (name) => `SHOW ${name}`],
+    ['TABLE', (name) => `TABLE ${name}`],
+  ];
+
+  it.each(READ_OPENERS)(
+    'runs a %s over a staged dataframe through the gate',
+    async (_label, sqlFor) => {
+      const { ctx, name } = await staged();
+      const result = await runQuery({ sql: sqlFor(name) }, ctx);
+      expect(result.row_count).toBeGreaterThan(0);
+    },
+  );
+
+  it.each(READ_OPENERS)(
+    'fails a %s of an unused df_ name missing_table, not non_select_statement, on both surfaces',
+    async (_label, sqlFor) => {
+      const { ctx } = await staged();
+      const error = await failure({ sql: sqlFor('df_nope0_nope0') }, ctx);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.message).toBe('Dataframe df_NOPE0_NOPE0 does not exist or has expired.');
+      expect(error.data).toMatchObject({
+        reason: 'missing_table',
+        tableName: 'df_NOPE0_NOPE0',
+        recovery: { hint: MISSING_TABLE_RECOVERY },
+      });
+
+      const result = await runToolContract(dataframeQueryTool, { sql: sqlFor('df_nope0_nope0') });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'missing_table' } },
+      });
+      expect(contentText(result)).toContain(
+        'Dataframe df_NOPE0_NOPE0 does not exist or has expired.',
+      );
+    },
+  );
+
+  it('fails a PIVOT … IN naming an unknown column invalid_sql, not non_select_statement, on both surfaces', async () => {
+    const { ctx, name } = await staged();
+    const sql = `PIVOT ${name} ON nope IN ('x') USING max(value)`;
+    const error = await failure({ sql }, ctx);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({
+      reason: 'invalid_sql',
+      recovery: { hint: contractRecovery('invalid_sql') },
+    });
+
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "PIVOT (SELECT 'x' AS sex, 1 AS value) ON nope IN ('x') USING max(value)",
+    });
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'invalid_sql' } } });
+    expect(contentText(result)).toContain(`Recovery: ${contractRecovery('invalid_sql')}`);
+  });
+
+  it.each([
+    ['a PIVOT with no IN list', (name: string) => `PIVOT ${name} ON sex USING max(value)`],
+    [
+      'a PIVOT with no IN list in a subquery',
+      (name: string) => `SELECT * FROM (PIVOT ${name} ON sex USING max(value))`,
+    ],
+  ])('fails %s multi_statement with a recovery that names the IN list', async (_label, sqlFor) => {
+    const { ctx, name } = await staged();
+    const error = await failure({ sql: sqlFor(name) }, ctx);
+    expect(error.data).toMatchObject({
+      reason: 'multi_statement',
+      recovery: { hint: contractRecovery('multi_statement') },
+    });
+    expect(contractRecovery('multi_statement')).toContain('ON <column> IN (');
+  });
+
+  it.each([
+    [
+      'SUMMARIZE of a system catalog',
+      () => 'SUMMARIZE information_schema.tables',
+      'system_catalog_access',
+    ],
+    [
+      'VALUES over read_csv()',
+      () => "VALUES ((SELECT count(*) FROM read_csv('/etc/hosts')))",
+      'denied_function',
+    ],
+    ['SHOW TABLES', () => 'SHOW TABLES', 'plan_operator_not_allowed'],
+    ['a bare DESCRIBE', () => 'DESCRIBE', 'plan_operator_not_allowed'],
+    ['SHOW ALL TABLES', () => 'SHOW ALL TABLES', 'plan_operator_not_allowed'],
+  ])('still gates %s', async (_label, sql, reason) => {
+    const { ctx } = await staged();
+    const error = await failure({ sql: sql() }, ctx);
+    expect(error.data).toMatchObject({ reason, recovery: { hint: contractRecovery(reason) } });
+  });
+
   it('leaves the dataframe whole after a rejected DELETE', async () => {
     const { ctx, name } = await staged();
     await failure({ sql: `DELETE FROM ${name}` }, ctx);
@@ -736,7 +973,12 @@ describe('errors', () => {
     'register_as_clash with drop enabled %s carries the matching hint',
     async (dropEnabled, hint) => {
       const { canvas, ctx, name } = await staged();
-      initCanvasBridge(canvas, { tableTtlMs: 24 * HOUR_MS, dropEnabled, now: () => FIXED_NOW });
+      initCanvasBridge(canvas, {
+        tableTtlMs: 24 * HOUR_MS,
+        dropEnabled,
+        listingEnabled: true,
+        now: () => FIXED_NOW,
+      });
       await runQuery({ sql: `SELECT * FROM ${name}`, register_as: 'df_TWICE_TWICE' }, ctx);
       const error = await failure(
         { sql: `SELECT * FROM ${name}`, register_as: 'df_TWICE_TWICE' },
@@ -849,6 +1091,76 @@ describe('contract envelope (runToolContract)', () => {
     const text = contentText(result);
     expect(text).toContain('**2 rows** — capped at row_limit; more rows matched');
     expect(text).toContain(guidance);
+  });
+
+  it('a page capped at one row counts it in the singular on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3',
+      row_limit: 1,
+    });
+    const guidance =
+      'Showing 1 row. The query matched more than row_limit (1), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (max 10,000).';
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      row_count: 1,
+      row_count_capped: true,
+      truncated: true,
+      shown: 1,
+      cap: 1,
+      notice: guidance,
+    });
+    const text = contentText(result);
+    expect(text).toContain('**1 row** — capped at row_limit; more rows matched');
+    expect(text).toContain(guidance);
+  });
+
+  it.each([
+    [
+      'registered',
+      { register_as: 'df_SINGL_ROW01' },
+      'Showing 0 of 1 row. The row is stored as df_SINGL_ROW01; query that dataframe with ilostat_dataframe_query, or raise preview to see more inline.',
+    ],
+    [
+      'unregistered',
+      {},
+      'Showing 0 of 1 row. Use register_as to keep the full result, or raise preview.',
+    ],
+  ])(
+    'a one-row result at preview 0, %s, counts it in the singular on both surfaces',
+    async (_, extra, guidance) => {
+      wireCanvas();
+      const result = await runToolContract(dataframeQueryTool, {
+        sql: 'SELECT 1 AS n',
+        preview: 0,
+        ...extra,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        row_count: 1,
+        rows: [],
+        truncated: true,
+        shown: 0,
+        notice: guidance,
+      });
+      const text = contentText(result);
+      expect(text).toContain('**1 row** (showing 0 of 1)');
+      expect(text).toContain(guidance);
+    },
+  );
+
+  it('a cell holding NEL, LS, or PS gets one <br> per break, verbatim in structuredContent', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT 'a' || chr(8232) || '| forged |' || chr(8233) || 'b' || chr(133) || 'c' AS note",
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      rows: [{ note: 'a\u2028| forged |\u2029b\u0085c' }],
+    });
+    const text = contentText(result);
+    expect(text).toContain('| a<br>\\| forged \\|<br>b<br>c |');
+    expect(text).not.toMatch(/[\u0085\u2028\u2029]/);
   });
 
   it('a gate rejection reaches both surfaces with its reason and recovery', async () => {
