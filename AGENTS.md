@@ -388,6 +388,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run release:github` | Create the GitHub Release for the current version and attach the `.mcpb` (run by `release-and-publish`) |
+| `bun run publish-mcp` | Log in to the MCP Registry with the GitHub PAT from the macOS Keychain item `mcp-publisher-github-pat` and publish `server.json` (run by `release-and-publish`) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
