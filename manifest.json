@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "ilostat-mcp-server",
   "version": "0.1.0",
-  "description": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
+  "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/ilostat-mcp-server#readme",
   "license": "Apache-2.0",
@@ -46,12 +46,12 @@
     },
     "ILOSTAT_MAX_ROWS": {
       "title": "Row ceiling per query",
-      "description": "Ceiling on the rows one query may return or stage (1,000–2,000,000).",
+      "description": "Ceiling on the rows one query may return or stage (1,000–1,000,000).",
       "type": "number",
       "required": false,
       "default": 500000,
       "min": 1000,
-      "max": 2000000
+      "max": 1000000
     },
     "ILOSTAT_PREVIEW_CHARS": {
       "title": "Inline preview budget (characters)",

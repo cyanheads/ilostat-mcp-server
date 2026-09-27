@@ -1,7 +1,7 @@
 name: Bug Report
 description: Report a bug in ilostat-mcp-server
 labels: ["bug"]
-# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+assignees: ["cyanheads"]
 # The secondary labels listed below must exist in the repo — create each once: gh label create <name>
 body:
   - type: markdown
@@ -41,7 +41,6 @@ body:
       options:
         - Bun
         - Node.js
-        - Cloudflare Workers
     validations:
       required: true
 
@@ -60,7 +59,6 @@ body:
       options:
         - stdio
         - HTTP (Streamable HTTP)
-        - Worker (Cloudflare)
     validations:
       required: true
 

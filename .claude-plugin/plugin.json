@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "ilostat-mcp-server",
   "version": "0.1.0",
-  "description": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
+  "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -23,7 +23,11 @@
     "unemployment",
     "labour-market",
     "statistics",
-    "open-data"
+    "open-data",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http"
   ],
   "userConfig": {
     "ILOSTAT_CATALOG_REFRESH_HOURS": {
@@ -35,7 +39,7 @@
     "ILOSTAT_MAX_ROWS": {
       "type": "number",
       "title": "Row ceiling per query",
-      "description": "Ceiling on the rows one query may return or stage (1,000–2,000,000).",
+      "description": "Ceiling on the rows one query may return or stage (1,000–1,000,000).",
       "default": 500000
     },
     "ILOSTAT_PREVIEW_CHARS": {

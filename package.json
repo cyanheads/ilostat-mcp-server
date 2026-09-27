@@ -2,7 +2,7 @@
   "name": "@cyanheads/ilostat-mcp-server",
   "version": "0.1.0",
   "mcpName": "io.github.cyanheads/ilostat-mcp-server",
-  "description": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
+  "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -55,7 +55,11 @@
     "unemployment",
     "labour-market",
     "statistics",
-    "open-data"
+    "open-data",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http"
   ],
   "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",
   "repository": {

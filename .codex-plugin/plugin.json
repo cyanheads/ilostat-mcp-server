@@ -1,7 +1,7 @@
 {
   "name": "ilostat-mcp-server",
   "version": "0.1.0",
-  "description": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
+  "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -22,13 +22,17 @@
     "unemployment",
     "labour-market",
     "statistics",
-    "open-data"
+    "open-data",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http"
   ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "ilostat-mcp-server",
-    "shortDescription": "Global labour statistics from ILOSTAT — discover indicators, query country and regional time series, preserve source/estimate/status metadata, compare labour markets, and analyze results with SQL.",
-    "longDescription": "Labour statistics from ILOSTAT, the International Labour Organization's statistical database: employment, unemployment, labour-force participation, earnings, working time, informality, and more, broken down by sex, age, economic activity, and other classifications. Search the indicator catalog, read an indicator's definition, unit, and coverage, then pull time series for countries, regions, income groups, or the world. Every observation keeps its source, status flag, and notes, and ILO modelled estimates and projections stay labelled apart from national data. Compare reference areas on the same indicator and query larger result sets with SQL. The ILOSTAT API is free and keyless.",
+    "shortDescription": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL.",
+    "longDescription": "Labour statistics from ILOSTAT, the International Labour Organization's statistical database: employment, unemployment, labour-force participation, earnings, working time, informality, and more, broken down by sex, age, economic activity, and other classifications. Search the indicator catalog, read an indicator's definition, unit, and coverage, then pull time series for countries, regions, income groups, or the world. Every observation keeps its source, status flag, and notes, and ILO modelled estimates and projections stay labelled apart from national data. Compare reference areas on the same indicator, build a headline labour-market profile for one country, and query larger result sets with SQL. Both ILO APIs it reads are free and keyless.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": [

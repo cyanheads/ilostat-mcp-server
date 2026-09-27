@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -59,132 +46,160 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+Abridged from `src/mcp-server/tools/definitions/search-indicators.tool.ts`:
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { blankAsUnset } from '@/mcp-server/tools/tool-helpers.js';
+import { cursorOffset } from '@/services/catalog/paging.js';
+import { searchIndicators } from '@/services/catalog/search.js';
+import { getIlostatServices } from '@/services/ilostat-services.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const searchIndicatorsTool = tool('ilostat_search_indicators', {
+  title: 'Search ILOSTAT indicators',
+  description: "Search ILOSTAT's catalog of labour-statistics indicators by plain-language terms and filters. …",
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
+    query: blankAsUnset(z.string().optional()).describe('Plain-language terms, e.g. "youth unemployment" …'),
+    database: blankAsUnset(z.string().optional()).describe('Source database code, e.g. LFS or ILOEST; case-insensitive. …'),
+    limit: z.number().int().min(1).max(50).default(10).describe('Hits per page (1–50).'),
+    cursor: blankAsUnset(z.string().optional()).describe("Opaque continuation token: the previous page's next_cursor, passed unchanged."),
+    // … frequency, subject, breakdown, aggregates_only
   }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
+
+  output: z.object({ /* hits, total, facets, next_cursor, catalog_as_of */ }),
+  enrichment: { /* truncated, shown, cap, notice */ },
+
+  errors: [
+    {
+      reason: 'unknown_filter_code',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'database, subject, or breakdown is not an ILOSTAT code.',
+      recovery: 'Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes.',
+      severity: 'notice',
+    },
+    // … invalid_cursor and catalog_unavailable, both thrownBy: 'service'
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const offset = cursorOffset(input.cursor, ctx);
+    const snapshot = await getIlostatServices().catalog.ready(ctx);
+    const database = input.database?.toUpperCase();
+    if (database && !snapshot.databases.has(database)) {
+      throw ctx.fail('unknown_filter_code', `Not an ILOSTAT code: database ${database}.`, {
+        ...ctx.recoveryFor('unknown_filter_code'),
+      });
+    }
+    const result = searchIndicators(snapshot, { limit: input.limit, offset /* , … */ });
+    ctx.enrich({ truncated: false, shown: result.hits.length, cap: input.limit });
+    // … ctx.enrich.truncated() with next-page guidance when result.nextCursor is set
+    return { /* … */ };
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: /* every output field; ILO text through inlineText() */ '' }],
 });
 ```
 
-### Resource
+`format()` populates `content[]`, the markdown twin of `structuredContent`. Clients read different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`), so both carry the same data; the linter checks that every `output` field appears in the rendered text.
+
+Conventions every tool here follows:
+
+- The catalog snapshot comes from `getIlostatServices().catalog.ready(ctx)`, and every code is validated against it before a request goes upstream.
+- Optional inputs go through `blankAsUnset` / `blankFreeArray`, since form clients send every field blank. Dataset IDs, area codes, sex codes, periods, and dataframe names use the normalizing inputs in `src/mcp-server/tools/tool-helpers.ts`.
+- ILO-published text rendered in `format()` passes through `inlineText()`, `blockquote()`, or `tableCell()`.
+- Data-bearing outputs carry `attribution: ATTRIBUTION`, and every observation a `basis` (`reported` | `modelled_estimate` | `projection`). A modelled value never fills a missing reported one.
+
+### Tool registration
+
+`src/mcp-server/tools/definitions/index.ts` builds the list handed to `createApp()`. It is constant in length: a gated tool stays in it through `disabledTool()`, absent from `tools/list` but shown with its enable hint on the HTTP landing page.
 
 ```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
+export function buildToolDefinitions(options: ToolDefinitionOptions) {
+  const dataframeTools = options.canvasEnabled
+    ? [
+        dataframeQueryTool,
+        dataframeDescribeTool,
+        options.dropEnabled ? dataframeDropTool : disabledTool(dataframeDropTool, DROP_OFF),
+      ]
+    : [dataframeQueryTool, dataframeDescribeTool, dataframeDropTool].map((definition) =>
+        disabledTool(definition, CANVAS_OFF),
+      );
+  return [searchIndicatorsTool, describeIndicatorTool, /* … */ ...dataframeTools];
+}
 ```
 
-### Prompt
+### Resources and prompts
 
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+None. Every capability is a tool (`docs/design.md` § Design Decisions). Scaffold one with the `add-resource` or `add-prompt` skill if that changes.
 
 ### Server config
 
+Abridged from `src/config/server-config.ts` (the real `.describe()` text is longer):
+
 ```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  catalogRefreshHours: z.coerce.number().int().min(1).max(168).default(6).describe('Hours between catalog checks (1–168).'),
+  maxRows: z.coerce.number().int().min(1_000).max(1_000_000).default(500_000).describe('Row ceiling per query.'),
+  previewChars: z.coerce.number().int().min(1_000).default(40_000).describe('Inline preview budget, in characters.'),
+  cacheTtlSeconds: z.coerce.number().int().min(0).default(900).describe('Response cache TTL (0 disables).'),
+  datasetTtlSeconds: z.coerce.number().int().min(60).default(86_400).describe('Per-table dataframe TTL.'),
+  dataframeDropEnabled: z.stringbool().default(false).describe('Exposes ilostat_dataframe_drop.'),
 });
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
+let _config: ServerConfig | undefined;
+export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    catalogRefreshHours: 'ILOSTAT_CATALOG_REFRESH_HOURS',
+    maxRows: 'ILOSTAT_MAX_ROWS',
+    previewChars: 'ILOSTAT_PREVIEW_CHARS',
+    cacheTtlSeconds: 'ILOSTAT_CACHE_TTL_SECONDS',
+    datasetTtlSeconds: 'ILOSTAT_DATASET_TTL_SECONDS',
+    dataframeDropEnabled: 'ILOSTAT_DATAFRAME_DROP_ENABLED',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`ILOSTAT_MAX_ROWS`) not the path (`maxRows`). Throws `ConfigurationError`, which the framework prints as a clean startup banner. No variable is required: the upstream APIs are keyless.
+
+`CANVAS_PROVIDER_TYPE` is a framework variable, not part of this schema: `src/index.ts` loads `.env`, then sets it to `duckdb` when unset or blank, before `createApp()` runs. `none` turns dataframes off and registers the three dataframe tools disabled.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
 ### Server identity and instructions
 
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
+`createApp()` forwards its identity fields to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`). The call in `src/index.ts`:
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'ilostat-mcp-server',
+  title: 'ilostat-mcp-server', // display identity is the machine name, never Title Case
+  tools: buildToolDefinitions({ canvasEnabled, dropEnabled: dataframeDropEnabled }),
+  resources: [],
+  prompts: [],
+  sessionMode: 'stateless',
+  instructions: buildInstructions({ canvasEnabled }),
+  setup(core) {
+    initIlostatServices({ canvas: core.canvas }).catalog.start();
+  },
+  teardown() {
+    disposeIlostatServices();
+  },
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`description` is never set here: `package.json` is the canonical source, and the framework serves it from there.
+
+`instructions` is server-level orientation, sent on every `initialize` as session-level context. `src/mcp-server/server-instructions.ts` builds it: the dataset-ID workflow, the basis rule, the overlapping-classification warning, and the citation line, plus a dataframe sentence only when the canvas is on, so the instructions never name a capability the deployment can't serve.
 
 ### Session posture and shutdown
 
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
-
-```ts
-await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
-});
-```
+`sessionMode: 'stateless'` fits here because no tool asks the caller for input mid-handler. `setup()` constructs the services and starts the catalog load without blocking startup; `teardown()` releases the catalog refresh timer, in-flight loads, and both upstream pacers.
 
 `sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
 
@@ -199,14 +214,10 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Unique request ID. |
-| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). Here the canvas bridge keeps the tenant's canvas ID (`canvas-id`) and per-dataframe provenance (`df-meta/<name>`) in it. |
+| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). The observation tools carry `applied_filters` through it, rendered by an `enrichmentTrailer`. |
+| `ctx.fail(reason, …)` / `ctx.recoveryFor(reason)` | Typed throw against the tool's `errors[]` contract, and the contract's recovery hint to spread into its data. |
+| `ctx.signal` | `AbortSignal` for cancellation; composed into the upstream request timeouts. |
 
 ---
 
@@ -258,20 +269,32 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point; canvas default, drop gate
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
-  services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    server-config.ts                    # ILOSTAT_* env vars (Zod schema)
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    server-instructions.ts              # instructions string (dataframe sentence gated on the canvas)
+    tools/
+      tool-helpers.ts                   # blank-as-unset and normalizing inputs, ILO-text renderers
+      observation-output.ts             # output schemas + renderers shared by query and compare
+      definitions/
+        index.ts                        # buildToolDefinitions() — gated tools via disabledTool()
+        [tool-name].tool.ts             # 9 tool definitions
+  services/
+    ilostat-services.ts                 # init/accessor/dispose for every service below
+    attribution.ts                      # the CC BY 4.0 attribution string
+    upstream/                           # paced, retried GET per host; 429/challenge → upstream_busy
+    rplumber/                           # rplumber.ilo.org client: tables of contents, dictionaries, data
+    sdmx/                               # sdmx.ilo.org client: dataflow structure, unit probe
+    catalog/                            # in-memory catalog snapshot, search, reference listings, paging
+    structure/                          # per-indicator SDMX structure + unit, cached
+    observations/                       # request validation, streaming, rows, comparison, response cache
+    profile/                            # headline country profile
+    basis/                              # reported / modelled_estimate / projection rules
+    canvas-bridge/                      # DataCanvas adapter: df_<id> staging, provenance, SQL, drop
+    csv/                                # incremental RFC 4180 reader
+    wait.ts                             # shared-work waits bounded by the caller's signal
+tests/                                  # Vitest suite mirroring src/, with recorded upstream fixtures
 ```
 
 ---
@@ -280,10 +303,11 @@ src/
 
 | What | Convention | Example |
 |:-----|:-----------|:--------|
-| Files | kebab-case with suffix | `search-docs.tool.ts` |
-| Tool/resource/prompt names | snake_case | `search_docs` |
-| Directories | kebab-case | `src/services/doc-search/` |
-| Descriptions | Single string or template literal, no `+` concatenation | `'Search items by query and filter.'` |
+| Files | kebab-case with suffix | `search-indicators.tool.ts` |
+| Tool names | snake_case, `ilostat_` prefix | `ilostat_search_indicators` |
+| Input/output fields | snake_case | `dataset_id`, `ref_areas`, `latest_only` |
+| Directories | kebab-case | `src/services/canvas-bridge/` |
+| Descriptions | Single string or template literal, no `+` concatenation | `'Hits per page (1–50).'` |
 
 ---
 
@@ -356,11 +380,14 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with coverage (writes `coverage/`) |
+| `bun run start` | Run the built server (`node dist/index.js`) with the transport from the environment |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create the GitHub Release for the current version and attach the `.mcpb` (run by `release-and-publish`) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -368,7 +395,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. This server's bundle therefore ships portable and without the DuckDB native binding: `@duckdb/node-api` is a direct dependency here, but the framework loads it lazily, so in the bundle the dataframe tools report an actionable install hint and every other tool works normally. `CANVAS_PROVIDER_TYPE` is deliberately not a bundle option. MCPB is stdio-only; the npm, Docker, and HTTP installs are unaffected.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -438,4 +465,8 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
+- [ ] New env var added everywhere: `src/config/server-config.ts`, `.env.example`, both `server.json` package entries, `manifest.json` (`mcp_config.env` + `user_config`), both plugin manifests, and the README configuration table
+- [ ] Every code a tool accepts is validated against the catalog snapshot before any upstream request
+- [ ] Data-bearing outputs carry `attribution`; every observation carries a `basis`, and a modelled value never stands in for a missing reported one
+- [ ] ILO-published text in `format()` passes through `inlineText()`, `blockquote()`, or `tableCell()`
 - [ ] `npm run devcheck` passes
