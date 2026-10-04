@@ -39,8 +39,8 @@ RUN bun run build
 #
 # Installs the production dependency tree for the target platform while running
 # on $BUILDPLATFORM, so no JavaScript runs under QEMU. Both installs below run
-# JavaScript: Bun spawns the security scanner bunfig.toml names as `bun -e`,
-# and the OpenTelemetry step reads the framework's peer ranges with `bun -e`.
+# JavaScript: Bun spawns the security scanner bunfig.toml names,
+# and the OpenTelemetry and musl-prune steps run TypeScript scripts.
 # Under emulation, bun >= 1.4 aborts on them as it does on `bun run build`.
 #
 # `--os=linux --cpu=<arch>` makes Bun select optional dependencies for the target
@@ -71,52 +71,29 @@ COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner
 # that are not needed in the final production image.
 # `--omit=peer` drops the framework's optional peer tiers (test runner, service
 # SDKs, parsers) that Bun would otherwise auto-install. Anything this server
-# actually imports belongs in its own `dependencies`, so nothing needed at
-# runtime is lost. The OTEL `bun add` carries the same flag, and the same
-# `--os`/`--cpu` pair — without them, that install re-resolves the graph, pulls
-# every optional peer back in, and adds the build host's DuckDB binding.
-#
-# Then conditionally install the OpenTelemetry optional peer dependencies (Tier 3).
-# Installed by default. Omit them for a leaner image at build time
-# with: docker build --build-arg OTEL_ENABLED=false
-# Each package is requested at the range the installed framework declares in
-# `peerDependencies`, so the resolution stays inside the framework's tested
-# peer range; a name with no declared range fails the build.
-#
-# TARGETARCH is Docker's name for the target CPU; `case` maps it to Bun's and
-# fails the build on an architecture with no mapping.
+# actually imports belongs in its own `dependencies`.
+ARG TARGETOS
 ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) echo x64 ;; \
+      arm64) echo arm64 ;; \
+      *) echo "Unsupported TARGETARCH '$TARGETARCH': expected amd64 or arm64" >&2; exit 1 ;; \
+    esac > .bun-cpu
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --production --omit=peer --frozen-lockfile --ignore-scripts \
+      --os="$TARGETOS" --cpu="$(cat .bun-cpu)"
+
+# Install OTel peers at the installed framework's ranges, for the target CPU.
+COPY scripts/install-otel.ts ./scripts/
 ARG OTEL_ENABLED=true
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    case "$TARGETARCH" in \
-      amd64) cpu=x64 ;; \
-      arm64) cpu=arm64 ;; \
-      *) echo "No Bun --cpu value for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
-    esac \
-    && bun install --production --omit=peer --frozen-lockfile --ignore-scripts --os=linux --cpu="$cpu" \
-    && if [ "$OTEL_ENABLED" = "true" ]; then \
-      specs=$(bun -e ' \
-        const { peerDependencies: peers } = await Bun.file("node_modules/@cyanheads/mcp-ts-core/package.json").json(); \
-        const names = process.argv.slice(1); \
-        const missing = names.filter((name) => !peers?.[name]); \
-        if (missing.length > 0) throw new Error(`no peerDependencies range for ${missing.join(", ")}`); \
-        console.log(names.map((name) => `${name}@${peers[name]}`).join(" ")); \
-      ' \
-        @hono/otel \
-        @opentelemetry/api-logs \
-        @opentelemetry/exporter-logs-otlp-http \
-        @opentelemetry/exporter-metrics-otlp-http \
-        @opentelemetry/exporter-trace-otlp-http \
-        @opentelemetry/instrumentation-http \
-        @opentelemetry/instrumentation-pino \
-        @opentelemetry/resources \
-        @opentelemetry/sdk-logs \
-        @opentelemetry/sdk-metrics \
-        @opentelemetry/sdk-node \
-        @opentelemetry/sdk-trace-node \
-        @opentelemetry/semantic-conventions) \
-      && bun add --omit=dev --omit=peer --ignore-scripts --os=linux --cpu="$cpu" $specs; \
+    if [ "$OTEL_ENABLED" = "true" ]; then \
+      bun scripts/install-otel.ts --os="$TARGETOS" --cpu="$(cat .bun-cpu)"; \
     fi
+
+# The Debian runtime uses glibc; drop the unused musl native bindings after installs.
+COPY scripts/prune-musl-packages.ts ./scripts/
+RUN bun scripts/prune-musl-packages.ts
 
 # The seeded scanner served only the installs above; keep it out of the image.
 RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
