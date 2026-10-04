@@ -1,6 +1,6 @@
 # ilostat-mcp-server - Directory Structure
 
-Generated on: 2026-09-27 02:53:57
+Generated on: 2026-10-04 05:50:50
 
 ```text
 ilostat-mcp-server/
@@ -126,9 +126,11 @@ ilostat-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/

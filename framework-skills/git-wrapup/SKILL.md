@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.26"
+  version: "1.28"
   audience: external
   type: workflow
 ---
@@ -144,8 +144,8 @@ When every concern is committed, `git status` is clean. That clean tree is what 
 Every file that declares a version must be updated. Skip any file that doesn't exist in the project. For `@cyanheads/mcp-ts-core` projects:
 
 - `package.json` — `version`
-- `server.json` — top-level `version` AND every `packages[].version` entry
-- `manifest.json` (if present) — `version`. Verify `name` is the bare package name (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
+- `server.json` — top-level `version` AND every `packages[].version` entry. `lint:mcp` flags a mismatch at either level
+- `manifest.json` (if present) — `version`. Packaging validation fails on a mismatch, and on a scoped `name` (use `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
 - `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` is connection config and carries none
 - `README.md` — version badge. Packaging validation fails on a mismatch with `package.json`; a literal `-` in a prerelease is escaped as `--` (`Version-0.14.0--rc.1-`)
 - `CLAUDE.md` / `AGENTS.md` — if they pin a version string
@@ -173,7 +173,7 @@ security: false    # true ONLY for a security fix in this server's own source �
 ---
 ```
 
-**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see: `changelog:build` copies it verbatim into the `CHANGELOG.md` rollup, which ships inside the npm tarball, and in release PR mode it opens the PR body. Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there. Derived-from-the-body means the facts come from the body — not that every body item appears: it is one headline, and comma-stitching every change into an inventory near the 350-char cap is the failure mode.
+**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see: `changelog:build` copies it verbatim into the `CHANGELOG.md` rollup, the entry file ships inside the npm tarball (`changelog/` is in `package.json` `files`; the rollup is not), and in release PR mode it opens the PR body. Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there. Derived-from-the-body means the facts come from the body — not that every body item appears: it is one headline, and comma-stitching every change into an inventory near the 350-char cap is the failure mode.
 
 **`security:` is a source-code signal — not a dependency-CVE signal.** Set `security: true` only when this release fixes a vulnerability or adds hardening in code *this server ships*. A dependency or transitive CVE bump — even one that clears an advisory (`bun audit` going 1 → 0) — is routine maintenance: record it under `## Dependencies` with the advisory ID and leave the flag `false`. The `🛡️ Security` badge answers "does the server itself have a vuln"; a dep bump must not trip it.
 
@@ -194,15 +194,16 @@ Both scripts are idempotent — safe to run even if nothing changed.
 
 ### 7. Run the verification gate
 
-The stack being shipped must pass verification. Both must succeed:
+The stack being shipped must pass verification. All must succeed:
 
 ```bash
 bun run devcheck
+bun run rebuild
 bun run test:all           # or `bun run test` if no test:all script exists
 bun run test:package       # only if the script exists — NOT part of test:all
 ```
 
-**If either fails, halt.** Do not bypass verification to land the release commit.
+**If any fails, halt.** Do not bypass verification to land the release commit.
 
 The work is already committed by this point, so the fix is a new commit on top of the stack, under step 3's conventions — never `git commit --amend`, never a rebase, reset, or any other rewrite of a commit the stack already carries. Land the fix, then re-run this step. The same holds when the gate passes but leaves the tree dirty: `devcheck` auto-fixes as it runs, and a formatter fix to a file committed in step 3 is a follow-up commit of its own, not something to fold into the release commit.
 
@@ -298,13 +299,14 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 
 - [ ] Diff reviewed end-to-end before the first commit
 - [ ] Work concerns committed before the version bump — a version-bearing file a work concern also touches ships whole in that concern's commit, so the release commit brings it the version hunk alone
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — verify by command, not by eye: `v=$(jq -r .version package.json); grep -rl "$v" package.json server.json manifest.json .claude-plugin/plugin.json .codex-plugin/plugin.json README.md | wc -l` must equal the count of files that exist, and `grep -c "Version-$v-" README.md` must print `1`. `lint:packaging` checks the README badge against `package.json`, so a stale badge now fails `devcheck` instead of shipping unnoticed — the grep still catches a badge written in a shape the check skips
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, both plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`
 - [ ] `CHANGELOG.md` rollup regenerated (`bun run changelog:build`)
 - [ ] `docs/tree.md` regenerated if structure changed (`bun run tree`)
 - [ ] `bun run devcheck` passes
+- [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it — it guards the public-export manifest and `test:all` does not run it
 - [ ] Release PR mode: stack committed on `release/<version>`, never on `main`

@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.17"
   audience: external
   type: reference
 ---
@@ -73,7 +73,7 @@ A failed flush is logged as a warning and the logger still closes, so the final 
 |:--------|:-----|:-----|
 | `SIGTERM` / `SIGINT` | `shutdown(signal)`, then an explicit exit | `0`, or `1` when the backstop fires |
 | `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then an explicit exit | `1` |
-| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then an explicit exit | `0`, backstop or not |
+| stdin EOF, stdio transport | the SDK transport closes itself, aborting in-flight requests unanswered; then `shutdown('STDIN_EOF')` and an explicit exit | `0`, backstop or not |
 | a second signal during shutdown | none — the handlers are already detached | the OS default (`143` / `130`) |
 | `ServerHandle.shutdown()` called directly | the same drain | none — exit-free by contract |
 
@@ -94,7 +94,7 @@ Every handler call gets a span. Nested operations (storage, graph, LLM) become c
 | Span name | Source | Key attributes |
 |:----------|:-------|:---------------|
 | `tool_execution:<tool>` | every tool call | `mcp.tool.input_bytes`, `mcp.tool.output_bytes`, `mcp.tool.duration_ms`, `mcp.tool.success`, `mcp.tool.error_code`, `mcp.tool.input_required`, `mcp.tool.partial_success`, `mcp.tool.batch.{succeeded,failed}_count` |
-| `resource_read:<resource>` | every resource handler | `mcp.resource.uri`, `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code`, `mcp.resource.input_required` |
+| `resource_read:<resource>` | every resource handler | `mcp.resource.uri` (userinfo, query, and fragment stripped, then cut to its first 1,024 characters), `mcp.resource.uri_length` (the uncut length, only when the cut removed something), `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code`, `mcp.resource.input_required` |
 | `prompt_generation:<prompt>` | every prompt handler | `mcp.prompt.input_bytes`, `mcp.prompt.output_bytes`, `mcp.prompt.message_count`, `mcp.prompt.duration_ms`, `mcp.prompt.success`, `mcp.prompt.error_code`, `mcp.prompt.input_required` |
 | `storage:<op>` | `StorageService` (every call) | `mcp.storage.operation`, `mcp.storage.duration_ms`, `mcp.storage.success`, `mcp.storage.key_count` (batch ops) |
 | `graph:<op>` | `GraphService` (every call) | `mcp.graph.operation`, `mcp.graph.duration_ms`, `mcp.graph.success` |
@@ -138,7 +138,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
 | `mcp.input.ignored_key` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.ignore_rule` (the ignore-list entry that matched, or `underscore_prefix`) |
 | `mcp.input.aliased` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.target` (the declared key), `mcp.input.alias_kind` (`declared`/`case_style`) |
-| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`) |
+| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`/`stringified_object`/`integer_as_string`) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
@@ -153,7 +153,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 
 **Rejections and cancellations.** A call refused before the handler runs — argument validation (`-32602`) or the inline `auth` check (`-32005` missing scope, `-32006` no auth context) — never reaches the measured region, so it is absent from `mcp.tool.calls`, `mcp.tool.duration`, and `mcp.tool.errors` and counts once on `mcp.tool.rejections` instead, labelled with the code and category the caller received. `mcp.tool.outcome` separates a caller hang-up from a failure: `cancelled` for a `RequestCancelled` (`-32011`, always paired with `error_category="client"`), `error` for any other failure, `ok` for a success or an `input_required` round. `mcp.tool.success` and `error_category` keep their meaning, so existing `sum()` queries are unchanged. An error rate that excludes hang-ups filters on `mcp.tool.outcome!="cancelled"`; the failure rate a caller sees is `(errors + rejections) / (calls + rejections)`. Resources and prompts carry neither split.
 
-The three `mcp.input.*` counters are the only trace of the pre-validation step a tool call leaves. Each marks a call the strict `input` schema would otherwise have rejected: a client-added root key dropped, a key rewritten to its canonical spelling, or a stringified array repaired after the parse failed (one increment per repaired call, not per repaired value). Nothing about any of them reaches the response, so a client artifact spreading across a fleet shows up here first. All three are lazy: a server whose callers never trip a stage emits no series at all.
+The three `mcp.input.*` counters are the pre-validation step's metrics. Each marks a call the strict `input` schema would otherwise have rejected: a key rewritten to its canonical spelling, a client-added root key dropped, or a value repaired after the parse failed — a stringified array or object, or an integer sent for a string. `mcp.input.coerced` adds one per repaired call per kind, not per repaired value: a call repairing an array and an object adds one to each `mcp.input.coercion` series, and a call repairing three arrays adds one. A call the step rescues carries nothing about it in its response, so a client artifact spreading across a fleet shows up here first. The counters describe the arguments the handler receives: when a call is retried with the alias stage first (see `add-tool`), the key the retry rewrote counts on `mcp.input.aliased` and never also on `mcp.input.ignored_key`, and a rejected call counts the attempt its rejection reports — the retry's when it ran. The counters are not the only record: every stage writes a debug log naming the key or the repair kinds, the opt-in failure-payload record ([below](#failed-call-payloads)) keeps a failed call's arguments as the caller sent them, and a rejected call reports its rewrites and underscore-rule drops to the caller as `data.input` (see `api-errors`). All three are lazy: a server whose callers never trip a stage emits no series at all.
 
 **Every label is author- or framework-defined — the caller's own key text is never one.** `mcp.input.ignore_rule` is the ignore-list entry that matched or the fixed `underscore_prefix`, bounded by the list's length plus one. `mcp.input.aliased` is labelled by the canonical `mcp.input.target` (a declared property of the tool) and `mcp.input.alias_kind`, not by the alias the caller sent — the case-style half accepts every `-`/`_`/case permutation of a declared key, so labelling the alias would put a caller-controlled set on a permanent series. That is the unbounded-label leak removed from the rate-limiter counter in 0.9.0: a metric attribute set lives until process restart, so anything the caller names belongs on a span or in a log, never on a counter.
 
@@ -214,15 +214,17 @@ A dashboard reading `error_category` alone therefore no longer needs to special-
 A definition may put `severity` on an `errors[]` entry — `debug`, `info`, `notice`, or `warning` — for an outcome it models rather than suffers. Two things move, and nothing else:
 
 - The `Error in tool:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
-- `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a declared severity resolved, so a server that declares none emits exactly the series it did before.
+- `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a severity resolved below `error`.
 
-The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources re-throw for the SDK to log. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
+The framework's own refusals resolve one without a declaration: an argument rejection (`invalid_arguments`) and a `ctx.requestInput` the client connection cannot serve (`client_capability_missing`) log at `notice`, so even a server that declares no severity sees `mcp.error.severity: "notice"` on those `mcp.errors.classified` increments — a bounded split a dashboard can use to separate caller rejections from faults. An argument rejection opens no execution span and reaches no call counter either way; it still counts once on `mcp.tool.rejections`.
+
+The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources write no failure record of their own. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
 
 ### Errors, rate limits, HTTP client
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when the failure's declared severity resolved |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when a tool failure's level resolved below `error` — a declared severity, or `notice` for an `invalid_arguments` / `client_capability_missing` refusal |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
@@ -245,17 +247,21 @@ Auto-registered when `process.memoryUsage` / `process.uptime` / `perf_hooks` are
 
 Every framework log record carries `requestId`, `traceId`, `spanId`, and `tenantId` from the request context, so every log line is searchable by trace. `@opentelemetry/instrumentation-pino` does not touch these records: it patches only a `pino` loaded after the SDK starts. To ship the records to the same backend as traces, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (see Enabling export).
 
-For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`) — auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler carries a `metrics` payload, with fields tuned to each surface:
+For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`) — auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler — at `info`, whatever the outcome — carries a `metrics` payload, with fields tuned to each surface:
 
 | Handler | Log message | `metrics` fields |
 |:--------|:------------|:-----------------|
 | Tool | `Tool execution finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, plus `partialSuccess` / `batchSucceeded` / `batchFailed` when the result is a partial-success batch |
-| Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri`, `mimeType` |
-| Prompt | `Prompt generation finished.` (or `failed.`) | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, `messageCount` |
+| Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri` (the same capped URI as `mcp.resource.uri`), `mimeType` |
+| Prompt | `Prompt generation finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes` (0 for a prompt declaring no arguments), `outputBytes`, `messageCount` |
+
+Every record of a resource read — scope checks, the handler's `ctx.log` lines, the completion record — carries the read's URI as `resourceUri`, capped like `mcp.resource.uri`, plus `resourceUriLength` when the cap cut it. The handler's `ctx.uri` and the response keep the full URI.
+
+A failed tool call or prompt adds exactly one `Error in tool:<name>` / `Error in prompt:<name>` record. Each call — prompts included — logs under its own `requestId`, and the client receives that value as `data.requestId` on the call's error envelope, so a reported failure resolves to its records.
 
 ### Failed-call payloads
 
-Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` included.
+Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` and the `notice` of an argument rejection included. A payload record below `MCP_LOG_LEVEL` is dropped with its `Error in tool:` record, so at `warning` or above an argument rejection writes neither.
 
 | Field | Content |
 |:------|:--------|
@@ -312,7 +318,7 @@ Series are cheap to emit but expensive to store and query. The framework deliber
 
 | On metrics | On spans / logs only |
 |:-----------|:---------------------|
-| `mcp.resource.name` (URI template) | `mcp.resource.uri` (full URI with IDs) |
+| `mcp.resource.name` (URI template) | `mcp.resource.uri` (URI with IDs, capped at 1,024 characters), `mcp.resource.uri_length` |
 | `gen_ai.request.model` (bounded enum) | `mcp.tenant.id`, `mcp.client.id`, `mcp.auth.subject` |
 | Bounded enum / template strings | Per-request unique IDs, free-form user input, opaque tokens |
 
