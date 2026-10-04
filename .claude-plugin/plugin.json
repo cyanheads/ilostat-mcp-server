@@ -30,6 +30,12 @@
     "streamable-http"
   ],
   "userConfig": {
+    "CANVAS_PROVIDER_TYPE": {
+      "type": "string",
+      "title": "DataCanvas engine",
+      "description": "DataCanvas engine for staged dataframes: duckdb (default) or none to turn dataframes off.",
+      "default": ""
+    },
     "ILOSTAT_CATALOG_REFRESH_HOURS": {
       "type": "number",
       "title": "Catalog refresh interval (hours)",
@@ -76,6 +82,7 @@
       ],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
+        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}",
         "ILOSTAT_CATALOG_REFRESH_HOURS": "${user_config.ILOSTAT_CATALOG_REFRESH_HOURS}",
         "ILOSTAT_MAX_ROWS": "${user_config.ILOSTAT_MAX_ROWS}",
         "ILOSTAT_PREVIEW_CHARS": "${user_config.ILOSTAT_PREVIEW_CHARS}",
