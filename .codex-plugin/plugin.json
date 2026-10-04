@@ -1,6 +1,6 @@
 {
   "name": "ilostat-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL.",
   "author": {
     "name": "cyanheads",

@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "ilostat-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/ilostat-mcp-server#readme",

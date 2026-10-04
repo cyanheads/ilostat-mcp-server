@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/ilostat-mcp-server",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/ilostat-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "environmentVariables": [
         {
           "name": "ILOSTAT_CATALOG_REFRESH_HOURS",
@@ -87,7 +87,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/ilostat-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",
