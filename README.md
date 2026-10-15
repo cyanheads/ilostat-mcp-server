@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/ilostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/ilostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/ilostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/ilostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/ilostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/ilostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -37,7 +37,7 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 |:---|:---|
 | `ilostat_search_indicators` | Search the indicator catalog by plain-language terms and filters; each hit lists a dataset ID per available frequency |
 | `ilostat_describe_indicator` | Explain one dataset: definition, unit and multiplier, breakdown codes in use, covered areas, and how its values are classed |
-| `ilostat_query_indicator` | Fetch observations for up to 3 datasets, filtered by area or area group, sex, breakdown codes, source, and period |
+| `ilostat_query_indicator` | Fetch observations for up to 3 datasets per call, filtered by area or area group, sex, breakdown codes, source, and period |
 | `ilostat_get_country_profile` | Headline labour-market figures for one area: latest reported value and latest ILO modelled estimate, side by side |
 | `ilostat_compare_geographies` | Rank areas on one slice of one dataset at a common or latest period, with optional change over N years |
 | `ilostat_list_reference` | Decode ILOSTAT's code vocabulary: areas, area groups, databases, subjects, sexes, breakdowns, sources, status flags, notes |
@@ -51,23 +51,24 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 ### `ilostat_search_indicators` <sub>tool</sub>
 
-- Plain-language `query` (every term must match a word or word prefix; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, and `aggregates_only` filters; omit `query` to browse by filters
-- Up to 50 hits per page (default 10), continued with `next_cursor`; each hit is one indicator with a `dataset_id` per frequency, coverage years, `n_ref_area`, `last_update`, and `has_aggregates`, and `facets` count the whole match set
-- An unrecognized `database`, `subject`, or `breakdown` code fails as `unknown_filter_code`
+- Plain-language `query` (every term must match a word or word prefix, and a derived form no catalog word starts with matches by its stem, so `informality` finds `informal`; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure` (every indicator of one measured quantity, by describe's `measure.code`), and `aggregates_only` filters; omit `query` to browse by filters
+- Up to 50 hits per page (default 10; a larger `limit` is applied as 50, with a notice), continued with `next_cursor`; each hit is one indicator with a `dataset_id` per frequency, coverage years, `n_ref_area`, `last_update`, and `has_aggregates`, and `facets` count the whole match set
+- An unrecognized `database`, `subject`, `breakdown`, or `measure` code fails as `unknown_filter_code`
 
 ---
 
 ### `ilostat_describe_indicator` <sub>tool</sub>
 
 - One `dataset_id` (`UNE_DEAP_SEX_AGE_RT_A`) or a bare indicator code, which describes every frequency; an unknown code returns `found: false` with `guidance`
-- Definition, `unit` and its `multiplier`, frequency variants, `breakdowns` (sex codes, plus `classif1` / `classif2` codes with totals marked `is_total`), `default_slice`, covered `ref_areas`, `basis_rule`, and up to 20 `related_datasets`
+- Definition, `unit` and its `multiplier`, frequency variants, `breakdowns` (sex codes, plus `classif1` / `classif2` codes with totals marked `is_total`), `default_slice`, covered `ref_areas`, `basis_rule`, and the first 20 `related_datasets` with `related_total`, the count of every other indicator sharing the measure (search with `measure` lists them all, this one included)
 - Breakdowns, unit, and areas come from the SDMX API; when it can't answer, `structure_status` is `unavailable` and those fields are absent rather than the call failing
 
 ---
 
 ### `ilostat_query_indicator` <sub>tool</sub>
 
-- 1–3 `dataset_ids`, filtered by `ref_areas` (up to 300) and/or an `area_group`, `sex`, `classif1`, `classif2`, `sources`, and period: one exact `time`, or a `time_from` / `time_to` year window, `latest_only`, or both
+- Up to 100 `dataset_ids`, every one validated; the first 3 distinct datasets are queried and the rest come back as `remaining_dataset_ids` for another call. Filtered by `ref_areas` (up to 300) and/or an `area_group`, `sex`, `classif1`, `classif2`, `sources`, and period: one exact `time`, or a `time_from` / `time_to` year window, `latest_only`, or both
+- `latest_only` keeps each series' own latest period (one dataset, area, sex, classif1, and classif2 code), so a youth series ending a year before the 15+ total still comes back; a request whose full history is too large or too slow to read in one call falls back to the latest period per area and dataset, and `applied_filters.latest_mode` and the notice say so
 - `source_selection` is `best` by default (the preferred source per area and period), `all`, or `secondary`; rows carry `source`, `obs_status`, `notes`, and `basis`, decoded in `legend`, and `applied_filters` echoes every parameter sent
 - A result past the inline preview stages in full as a `df_<id>` `dataframe`; an unfiltered request larger than `ILOSTAT_MAX_ROWS` fails as `request_too_broad`, and a filtered one that streams past it as `result_too_large`
 
@@ -76,7 +77,7 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 ### `ilostat_get_country_profile` <sub>tool</sub>
 
 - One `ref_area` with annual data, an ISO3 country (`KEN`) or an X-coded aggregate (`X01` World, regions, income groups), and `sex` (`SEX_T` by default, `SEX_M`, or `SEX_F`)
-- Nine headline indicators (labour force participation, employment-to-population ratio, unemployment, youth unemployment, youth NEET, informal employment, employment, labour income share, working poverty), each with its latest `reported` value and, separately, its latest non-projected `modelled` estimate
+- Nine headline indicators (labour force participation, employment-to-population ratio, unemployment, youth unemployment, youth NEET, informal employment, employment, labour income share, working poverty), each with its latest `reported` value for that slice and, separately, its latest non-projected `modelled` estimate
 - A missing reported value stays missing and is listed in `reported_missing`; aggregates carry modelled values only
 
 ---
@@ -85,6 +86,7 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 - One `dataset_id` and one slice (`sex`, `classif1`, `classif2`, defaulting to the dataset's totals); areas from `ref_areas` (up to 300), an `area_group`, or both, and at least one is required
 - `period` puts every area at one period; without it, each area gets its latest value within `lookback_years` (default 10), projections excluded unless `include_projections`; `change_years` (1–30) adds each value's change over that span
+- A change carries the earlier value's source, basis, status, and notes, with `source_changed`, `basis_changed`, and `break_in_series` flags, and the notice counts the changes that are not like-for-like; period mode reads the years between the two values so a break marked there shows, and when they are too many to read in one call it reads the two values alone and leaves `break_in_series` null unless the current value marks a break
 - Rows carry `rank`, `value`, `period`, `basis`, and `source`; areas without a value land in `missing` with a `reason`, and `comparability` reports `mixed_periods`, `basis_counts`, and `distinct_sources`
 
 ---
@@ -93,7 +95,7 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 - `topic`: `ref_areas`, `area_groups`, `databases`, `subjects`, `sexes`, `classifications`, `classification_types`, `sources`, `obs_status`, `notes`, or `frequencies`
 - A text `filter` or up to 100 exact `codes` (misses in `not_found`; exact `area_groups` lookups list member countries); `ref_area` narrows `sources`, and `classification_type` narrows `classifications`
-- Up to 500 entries per page (default 50), continued with `next_cursor`
+- Up to 500 entries per page (default 50; a larger `limit` is applied as 500, with a notice), continued with `next_cursor`
 
 ---
 
@@ -101,13 +103,14 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 - Pass one `df_XXXXX_XXXXX`, or omit `name` to list every staged dataframe, newest first. Listing is off under HTTP with auth `none`, where every caller shares one canvas: there a dataframe is reached by its exact name only
 - Each entry carries the producing `source_tool` and its `query_params`, `datasets`, `coverage`, `basis_counts`, `attribution`, `created_at` / `expires_at`, `row_count`, and the `column_schema` to write SQL against
+- Each dataset keeps its full unit beside `unit`: `unit_measure`, `unit_type`, `unit_type_label`, `unit_multiplier`, and `unit_multiplier_label`, so a `register_as` dataframe whose SQL drops the `unit_multiplier` column still records its scale; values are never rescaled
 
 ---
 
 ### `ilostat_dataframe_query` <sub>tool</sub>
 
-- One DuckDB `SELECT` (joins, aggregates, window functions, CTEs) over `df_<id>` tables, up to 20,000 characters; writes, DDL, multi-statement SQL, file-reading functions, and system catalogs are rejected
-- `row_limit` caps the rows materialized (default 1,000, max 10,000; `row_count_capped` flags a hit) and `preview` the rows returned inline; BIGINT values arrive as strings
+- One DuckDB `SELECT` (joins, aggregates, window functions, CTEs) over `df_<id>` tables, up to 20,000 characters; writes, DDL, multi-statement SQL, file references and file-reading functions, engine-setting reads, and system catalogs are rejected
+- `row_limit` caps the rows materialized (default 1,000, or the per-call cap when lower; a value past the 10,000-row per-call cap is applied as the cap; `row_count_capped` flags a hit) and `preview` the rows returned inline, which also stop at `ILOSTAT_PREVIEW_CHARS` (whole rows only; a lone row past it is withheld, its widest column named with a `substr()` part size that fits, or a pointer to fewer columns when that column fits alone); `applied_limits` echoes the values applied, and BIGINT values arrive as strings
 - `register_as` stores the full result as a new dataframe with a fresh TTL, so analyses chain; a result over 1,000,000 rows is refused as `register_as_too_large`, and `evicted` names any older dataframes dropped to make room
 
 ---
@@ -253,7 +256,7 @@ cp .env.example .env
 |:---|:---|:---|
 | `ILOSTAT_CATALOG_REFRESH_HOURS` | Hours between checks of the ILOSTAT tables of contents (1–168). The dictionaries are re-fetched only when a dataset was added, removed, or updated. | `6` |
 | `ILOSTAT_MAX_ROWS` | Ceiling on the rows one query may return or stage (1,000–1,000,000). | `500000` |
-| `ILOSTAT_PREVIEW_CHARS` | Inline preview budget in serialized characters (at least 1,000); a larger result stages as a dataframe. | `40000` |
+| `ILOSTAT_PREVIEW_CHARS` | Inline preview budget in serialized characters (at least 1,000); a larger query or comparison result stages as a dataframe, and a dataframe SQL result returns only the leading rows that fit. | `40000` |
 | `ILOSTAT_CACHE_TTL_SECONDS` | Seconds an upstream data response of up to 5,000 rows stays cached; `0` disables the cache. | `900` |
 | `ILOSTAT_DATASET_TTL_SECONDS` | Per-table TTL for staged dataframes, in seconds (at least 60). | `86400` |
 | `ILOSTAT_DATAFRAME_DROP_ENABLED` | Set `true` to expose `ilostat_dataframe_drop`. | `false` |
