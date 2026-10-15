@@ -1,8 +1,9 @@
 /**
  * @fileoverview Builds a {@link CatalogSnapshot} from the raw tables of contents and
- * dictionaries: datasets grouped into indicators, the per-indicator search words,
- * reference areas with their region and income-group memberships, the area groups
- * `area_group` accepts, and every decoded code vocabulary. Pure.
+ * dictionaries: datasets grouped into indicators, the per-indicator search words and
+ * the catalog-wide search vocabulary with its words grouped by stem, reference areas
+ * with their region and income-group memberships, the area groups `area_group`
+ * accepts, and every decoded code vocabulary. Pure.
  * @module services/catalog/snapshot
  */
 
@@ -14,7 +15,7 @@ import type {
   RefAreaTocRow,
 } from '@/services/rplumber/types.js';
 import { classificationTypeOf, FREQUENCY_ORDER, normalizeAreaCode } from './codes.js';
-import { htmlToText, toIsoTimestamp, wordsOf } from './text.js';
+import { htmlToText, stemOf, toIsoTimestamp, wordsOf } from './text.js';
 import {
   AREA_GROUP_TYPES,
   type AreaGroup,
@@ -353,6 +354,27 @@ function buildNotes(dictionaries: Record<DictionaryVar, DictionaryEntry[]>): Map
   );
 }
 
+/**
+ * The catalog words a stemmed search term matches, keyed by the term's stem: each
+ * word under its own stem and, when that differs, under the word itself, so
+ * `families` (stem `family`) reaches `family` (stem `fami`). Each list keeps the
+ * vocabulary's sorted order.
+ */
+function stemGroups(vocabulary: readonly string[]): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  const add = (key: string, word: string) => {
+    const group = groups.get(key);
+    if (group) group.push(word);
+    else groups.set(key, [word]);
+  };
+  for (const word of vocabulary) {
+    const stem = stemOf(word);
+    add(stem, word);
+    if (stem !== word) add(word, word);
+  }
+  return groups;
+}
+
 /** Builds the snapshot; `asOf` is when it was confirmed current against upstream. */
 export function buildSnapshot(raw: RawCatalog, asOf: string): CatalogSnapshot {
   const { dictionaries } = raw;
@@ -378,6 +400,9 @@ export function buildSnapshot(raw: RawCatalog, asOf: string): CatalogSnapshot {
 
   const { areaGroups, refAreas } = buildRefAreas(raw.refAreaToc, dictionaries.ref_area);
   const catalogEdition = latestCatalogEdition(indicators.map((indicator) => indicator.label));
+  const searchVocabulary = [
+    ...new Set(indicators.flatMap((indicator) => indicator.search.definition)),
+  ].sort();
 
   return {
     asOf,
@@ -386,6 +411,8 @@ export function buildSnapshot(raw: RawCatalog, asOf: string): CatalogSnapshot {
     indicators,
     indicatorsByCode: new Map(indicators.map((indicator) => [indicator.code, indicator])),
     indicatorsByMeasure: Map.groupBy(indicators, (indicator) => indicator.measure.code),
+    searchVocabulary,
+    searchStems: stemGroups(searchVocabulary),
     datasets: new Map(datasetList.map((dataset) => [dataset.id, dataset])),
     refAreas,
     areaGroups,

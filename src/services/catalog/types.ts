@@ -144,6 +144,10 @@ export interface CatalogSnapshot {
   notes: Map<string, NoteCode>;
   obsStatus: Map<string, CodeLabel>;
   refAreas: Map<string, RefArea>;
+  /** The {@link searchVocabulary} words a stemmed search term matches, keyed by the term's stem: the words sharing that stem, plus the word equal to it; each list sorted. */
+  searchStems: Map<string, string[]>;
+  /** Every distinct word an indicator is searched on, sorted; decides when a search term falls back to its stem. */
+  searchVocabulary: string[];
   sexes: Map<string, CodeLabel>;
   /** Change signal: sorted `id|last.update` over both ToCs. */
   signature: string;

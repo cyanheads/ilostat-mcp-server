@@ -14,6 +14,11 @@ import { searchIndicators } from '@/services/catalog/search.js';
 import { inlineText } from '@/services/catalog/text.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 
+/** Hits one page returns; a larger `limit` is applied as this. */
+const PAGE_CAP = 50;
+/** The largest `limit` accepted; past it the value is rejected, not applied. */
+const LIMIT_CEILING = 1_000;
+
 const CodeLabelSchema = (what: string) =>
   z
     .object({
@@ -52,12 +57,12 @@ const FacetSchema = z
 export const searchIndicatorsTool = tool('ilostat_search_indicators', {
   title: 'Search ILOSTAT indicators',
   description:
-    "Search ILOSTAT's catalog of labour-statistics indicators by plain-language terms and filters. Each hit is one indicator with its datasets — one per available frequency (annual, quarterly, monthly) — plus breakdowns, coverage years, number of reference areas, source database, and last update; pass a dataset ID to ilostat_describe_indicator for its units and breakdown codes, then to ilostat_query_indicator or ilostat_compare_geographies for values. Every search term must match a word or word prefix in the indicator's label, subject, database, breakdown names, code, or definition; British and American spellings (labour/labor) match alike. Facet counts reflect all applied filters.",
+    "Search ILOSTAT's catalog of labour-statistics indicators by plain-language terms and filters. Each hit is one indicator with its datasets — one per available frequency (annual, quarterly, monthly) — plus breakdowns, coverage years, number of reference areas, source database, and last update; pass a dataset ID to ilostat_describe_indicator for its units and breakdown codes, then to ilostat_query_indicator or ilostat_compare_geographies for values. Every search term must match a word or word prefix in the indicator's label, subject, database, breakdown names, code, or definition; a term that matches no word or word prefix anywhere in the catalog matches the words sharing its stem instead (informality finds informal, unionization finds union), and the notice names it. British and American spellings (labour/labor) match alike. The measure filter lists every indicator of one measured quantity, as ilostat_describe_indicator's related indicators count them. Facet counts reflect all applied filters.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
     query: blankAsUnset(z.string().max(500).optional()).describe(
-      'Plain-language terms, e.g. "youth unemployment" or "informal employment rate". Case, accents, and punctuation are ignored, labor matches labour, and a trailing plural s is tolerated. Omit to browse by filters (results then order by indicator code).',
+      'Plain-language terms, e.g. "youth unemployment" or "informal employment rate". Case, accents, and punctuation are ignored, labor matches labour, and a trailing plural s is tolerated; a term no catalog word starts with is matched by its stem (-ity, -ization, -ive, -ment, -ing, -ed, -ly, and a plural s dropped, -ies read as y). Omit to browse by filters (results then order by indicator code).',
     ),
     frequency: blankAsUnset(z.enum(['A', 'Q', 'M']).optional()).describe(
       "Keep only datasets of this frequency: A annual, Q quarterly, M monthly. Narrows each hit's datasets; an indicator with none left drops out.",
@@ -71,13 +76,26 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
     breakdown: blankAsUnset(z.string().max(32).optional()).describe(
       'Classification type the indicator is broken down by, e.g. AGE, ECO, GEO, SEX; case-insensitive. ilostat_list_reference topic classification_types lists them.',
     ),
+    measure: blankAsUnset(z.string().max(32).optional()).describe(
+      "Measure code, exactly as ilostat_describe_indicator's measure.code gives it (e.g. EMP_TEMP_NB); case-insensitive. Keeps every indicator measuring that quantity, under any breakdown.",
+    ),
     aggregates_only: z
       .boolean()
       .default(false)
       .describe(
         'Keep only datasets carrying World, regional, or income-group rows, dropping indicators with none.',
       ),
-    limit: z.number().int().min(1).max(50).default(10).describe('Hits per page (1–50).'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(LIMIT_CEILING, {
+        message: `limit must be at most 1,000; any value past the page cap (${PAGE_CAP}) is applied as that cap.`,
+      })
+      .default(10)
+      .describe(
+        `Hits per page, at most ${PAGE_CAP}; a larger value, up to 1,000, is applied as ${PAGE_CAP} and the notice says so.`,
+      ),
     cursor: blankAsUnset(z.string().max(256).optional()).describe(
       "Opaque continuation token: the previous page's next_cursor, passed unchanged.",
     ),
@@ -155,7 +173,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
       .string()
       .optional()
       .describe(
-        'Why the query was browsed by filters alone, how to widen a search that matched nothing, that the cursor starts past the last match, and how to reach the remaining pages — whichever apply, joined.',
+        'That a limit past the page cap was applied as the cap, why the query was browsed by filters alone, which terms were matched by stem and as which catalog words (check those hits are on topic), how to widen a search that matched nothing, that the cursor starts past the last match, and how to reach the remaining pages — whichever apply, joined.',
       ),
   },
 
@@ -163,9 +181,9 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
     {
       reason: 'unknown_filter_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'database, subject, or breakdown is not an ILOSTAT code.',
+      when: 'database, subject, breakdown, or measure is not an ILOSTAT code.',
       recovery:
-        'Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes.',
+        "Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes; a measure code is ilostat_describe_indicator's measure.code for any indicator of that measure.",
       severity: 'notice',
     },
     {
@@ -194,12 +212,14 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
     const database = input.database?.toUpperCase();
     const subject = input.subject?.toUpperCase();
     const breakdown = input.breakdown?.toUpperCase();
+    const measure = input.measure?.toUpperCase();
     const invalid = [
       database && !snapshot.databases.has(database) ? `database ${database}` : undefined,
       subject && !snapshot.subjects.has(subject) ? `subject ${subject}` : undefined,
       breakdown && !snapshot.classificationTypes.has(breakdown)
         ? `breakdown ${breakdown}`
         : undefined,
+      measure && !snapshot.indicatorsByMeasure.has(measure) ? `measure ${measure}` : undefined,
     ].filter((entry) => entry !== undefined);
     if (invalid.length > 0) {
       throw ctx.fail(
@@ -209,28 +229,35 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
       );
     }
 
+    const limit = Math.min(input.limit, PAGE_CAP);
+    const clamp =
+      limit < input.limit
+        ? `limit ${input.limit} was applied as ${limit}, the per-call page cap.`
+        : undefined;
     const result = searchIndicators(snapshot, {
       aggregatesOnly: input.aggregates_only,
-      limit: input.limit,
+      limit,
       offset,
       ...(input.query ? { query: input.query } : {}),
       ...(input.frequency ? { frequency: input.frequency } : {}),
       ...(database ? { database } : {}),
       ...(subject ? { subject } : {}),
       ...(breakdown ? { breakdown } : {}),
+      ...(measure ? { measure } : {}),
     });
 
-    ctx.enrich({ truncated: false, shown: result.hits.length, cap: input.limit });
-    // The page guidance replaces the notice slot, so a paged result carries both in it.
+    ctx.enrich({ truncated: false, shown: result.hits.length, cap: limit });
+    // The page guidance replaces the notice slot, so a paged result carries every notice in it.
+    const notice = [clamp, result.notice].filter((part) => part !== undefined).join(' ');
     if (result.nextCursor) {
       const pageGuidance = `Showing ${result.hits.length} of ${result.total} matching indicators; pass next_cursor as cursor for the next page.`;
       ctx.enrich.truncated({
         shown: result.hits.length,
-        cap: input.limit,
-        guidance: result.notice ? `${result.notice} ${pageGuidance}` : pageGuidance,
+        cap: limit,
+        guidance: notice ? `${notice} ${pageGuidance}` : pageGuidance,
       });
-    } else if (result.notice) {
-      ctx.enrich.notice(result.notice);
+    } else if (notice) {
+      ctx.enrich.notice(notice);
     }
     ctx.log.info('Searched ILOSTAT indicators', { total: result.total, shown: result.hits.length });
 

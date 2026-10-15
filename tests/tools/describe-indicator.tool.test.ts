@@ -18,6 +18,7 @@ import {
 import { afterEach, describe, expect, it } from 'vitest';
 import { describeIndicatorTool } from '@/mcp-server/tools/definitions/describe-indicator.tool.js';
 import { queryIndicatorTool } from '@/mcp-server/tools/definitions/query-indicator.tool.js';
+import { searchIndicatorsTool } from '@/mcp-server/tools/definitions/search-indicators.tool.js';
 import { disposeIlostatServices } from '@/services/ilostat-services.js';
 import {
   CATALOG_UNAVAILABLE_RECOVERY,
@@ -94,6 +95,20 @@ function contentText(result: Awaited<ReturnType<typeof runToolContract>>): strin
 
 const sdmxCalls = (wired: ReturnType<typeof wireServices>) =>
   callUrls(wired.http, (request) => isStructureRequest(request) || isProbeRequest(request));
+
+/** The recorded catalog plus `extra` more indicators sharing UNE_DEAP_SEX_AGE_RT's measure, which already has one other. */
+function catalogWithRelated(extra: number): CatalogFixture {
+  const fixture = loadCatalogFixture();
+  const template = tocRow(fixture, 'UNE_DEAP_SEX_EDU_RT_A');
+  for (let i = 0; i < extra; i += 1) {
+    const indicator = `UNE_DEAP_SEX_X${String(i).padStart(2, '0')}_RT`;
+    fixture.indicatorToc.push({ ...template, id: `${indicator}_A`, indicator });
+  }
+  return fixture;
+}
+
+const RELATED_CUT_NOTICE =
+  'Showing the first 20 of 26 other indicators sharing this measure, by code; call ilostat_search_indicators with measure UNE_DEAP_RT and limit 50 to list all 27, this one included.';
 
 /** A catalog whose labels name no ILO modelled estimates edition. */
 function catalogWithoutIloEdition(): CatalogFixture {
@@ -182,12 +197,13 @@ describe('hits', () => {
           classification: 'SEX_EDU',
         },
       ],
+      related_total: 1,
       structure_status: 'complete',
       catalog_as_of: '2026-09-26T12:00:00.000Z',
       attribution:
         'Source: ILOSTAT, International Labour Organization (CC BY 4.0) — https://ilostat.ilo.org',
     });
-    expect(enrichment).toEqual({});
+    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 20 });
   });
 
   it('sets has_aggregates from the requested dataset: the quarterly variant has none', async () => {
@@ -319,6 +335,7 @@ describe('hits', () => {
     expect(result.breakdowns).toEqual({ sex: false, sex_codes: [] });
     expect(result.default_slice).toEqual({});
     expect(result.related_datasets).toEqual([]);
+    expect(result.related_total).toBe(0);
     expect(result.has_aggregates).toBe(false);
     expect(result.definition).toBe(
       'Data may differ from nationally reported figures and the Global SDG Indicators Database. The female share of employment in managerial positions conveys the number of women in management as a percentage of employment in management.',
@@ -326,18 +343,69 @@ describe('hits', () => {
   });
 
   it('caps related_datasets at 20 other indicators sharing the measure', async () => {
-    const fixture = loadCatalogFixture();
-    const template = tocRow(fixture, 'UNE_DEAP_SEX_EDU_RT_A');
-    for (let i = 0; i < 25; i += 1) {
-      const indicator = `UNE_DEAP_SEX_X${String(i).padStart(2, '0')}_RT`;
-      fixture.indicatorToc.push({ ...template, id: `${indicator}_A`, indicator });
-    }
-    wireServices({ fixture });
+    wireServices({ fixture: catalogWithRelated(25) });
     const { result } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     const related = result.related_datasets?.map((entry) => entry.indicator) ?? [];
     expect(related).toHaveLength(20);
     expect(related).not.toContain('UNE_DEAP_SEX_AGE_RT');
     expect(related[0]).toBe('UNE_DEAP_SEX_EDU_RT');
+  });
+
+  it('past the cap, gives the total, marks the list cut, and points to search by measure, on both surfaces', async () => {
+    wireServices({ fixture: catalogWithRelated(25) });
+    const result = await runToolContract(describeIndicatorTool, {
+      dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      related_total: 26,
+      truncated: true,
+      shown: 20,
+      cap: 20,
+      notice: RELATED_CUT_NOTICE,
+    });
+    expect((result.structuredContent as Output).related_datasets).toHaveLength(20);
+    const text = contentText(result);
+    expect(text).toContain('26 other indicators share this measure; the first 20 by code:');
+    expect(text).toContain(`> ${RELATED_CUT_NOTICE}`);
+  });
+
+  it('the search the notice names lists exactly related_total plus the described indicator', async () => {
+    wireServices({ fixture: catalogWithRelated(25) });
+    const { result } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
+    const listed = await searchIndicatorsTool.handler(
+      searchIndicatorsTool.input.parse({ measure: result.measure?.code, limit: 50 }),
+      createMockContext({ errors: searchIndicatorsTool.errors }),
+    );
+    expect(listed.total).toBe((result.related_total ?? 0) + 1);
+    expect(listed.hits).toHaveLength(listed.total);
+    expect(listed.hits.map((hit) => hit.indicator)).toContain('UNE_DEAP_SEX_AGE_RT');
+  });
+
+  it('at exactly 20 related, the list is complete: truncated false, no notice', async () => {
+    wireServices({ fixture: catalogWithRelated(19) });
+    const { result, enrichment } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
+    expect(result.related_total).toBe(20);
+    expect(result.related_datasets).toHaveLength(20);
+    expect(enrichment).toEqual({ truncated: false, shown: 20, cap: 20 });
+  });
+
+  it('composes the cut notice after the structure-unavailable notice', async () => {
+    wireServices({
+      fixture: catalogWithRelated(25),
+      routes: [structureRoute('UNE_DEAP_SEX_AGE_RT', () => tooManyRequests('60'))],
+    });
+    const result = await runToolContract(describeIndicatorTool, {
+      dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
+    });
+    expect(result.structuredContent).toMatchObject({
+      structure_status: 'unavailable',
+      truncated: true,
+      shown: 20,
+      cap: 20,
+      notice: `${STRUCTURE_NOTICE} ${RELATED_CUT_NOTICE}`,
+    });
+    expect(contentText(result)).toContain(`> ${STRUCTURE_NOTICE} ${RELATED_CUT_NOTICE}`);
   });
 
   it('serves a repeat describe of the indicator, any frequency, from the structure cache', async () => {
@@ -512,7 +580,7 @@ describe('degraded structure', () => {
     }
     expect(result.datasets).toHaveLength(1);
     expect(result.basis_rule?.projection_after_year).toBe(2023);
-    expect(enrichment).toEqual({ notice: STRUCTURE_NOTICE });
+    expect(enrichment).toEqual({ truncated: false, shown: 0, cap: 20, notice: STRUCTURE_NOTICE });
   });
 
   it('SDMX unreachable: degrades the same way, and is asked again on the next call', async () => {
@@ -529,7 +597,7 @@ describe('degraded structure', () => {
     down = false;
     const recovered = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     expect(recovered.result.structure_status).toBe('complete');
-    expect(recovered.enrichment).toEqual({});
+    expect(recovered.enrichment).toEqual({ truncated: false, shown: 1, cap: 20 });
     expect(callUrls(wired.http, (request) => isStructureRequest(request))).toHaveLength(2);
   });
 
@@ -554,7 +622,7 @@ describe('degraded structure', () => {
     expect(result.structure_status).toBe('complete');
     expect(result.breakdowns?.classif1?.type).toBe('AGE');
     expect(result).not.toHaveProperty('unit');
-    expect(enrichment).toEqual({ notice: STRUCTURE_NOTICE });
+    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 20, notice: STRUCTURE_NOTICE });
     expect(callUrls(wired.http, (request) => isProbeRequest(request))).toHaveLength(3);
     expect(render(result)).toContain('Unit: not resolved');
   });
@@ -629,6 +697,7 @@ describe('format()', () => {
       'Aggregates: X01, X06',
       'Countries: ABW, KEN, USA',
       '### Related indicators (same measure)',
+      '1 other indicator shares this measure:',
       '- UNE_DEAP_SEX_EDU_RT — Unemployment rate by sex and education (%) (SEX_EDU)',
       'Catalog as of 2026-09-26T12:00:00.000Z · found: true',
       'Source: ILOSTAT, International Labour Organization (CC BY 4.0) — https://ilostat.ilo.org',
@@ -815,15 +884,39 @@ describe('format()', () => {
 });
 
 describe('contract envelope (runToolContract)', () => {
-  it('a complete hit validates with no enrichment trailer', async () => {
+  it('a complete hit carries the related-list disclosure and no notice', async () => {
     wireServices();
     const result = await runToolContract(describeIndicatorTool, {
       dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
     });
     expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toMatchObject({ found: true, structure_status: 'complete' });
+    expect(result.structuredContent).toMatchObject({
+      found: true,
+      structure_status: 'complete',
+      related_total: 1,
+      truncated: false,
+      shown: 1,
+      cap: 20,
+    });
     expect(result.structuredContent).not.toHaveProperty('notice');
-    expect(contentText(result)).toContain('## UNE_DEAP_SEX_AGE_RT_A');
+    const text = contentText(result);
+    expect(text).toContain('## UNE_DEAP_SEX_AGE_RT_A');
+    expect(text).toContain('**truncated:** false');
+  });
+
+  it('a hit with no related indicator says so on content[]', async () => {
+    wireServices();
+    const result = await runToolContract(describeIndicatorTool, {
+      dataset_id: 'SDG_0552_NOC_RT_A',
+    });
+    expect(result.structuredContent).toMatchObject({
+      related_datasets: [],
+      related_total: 0,
+      truncated: false,
+      shown: 0,
+      cap: 20,
+    });
+    expect(contentText(result)).toContain('No other indicator shares this measure.');
   });
 
   it('a degraded hit carries the notice on both surfaces', async () => {

@@ -20,6 +20,11 @@ import { inlineText } from '@/services/catalog/text.js';
 import { AREA_GROUP_TYPES } from '@/services/catalog/types.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 
+/** Entries one page returns; a larger `limit` is applied as this. */
+const PAGE_CAP = 500;
+/** The largest `limit` accepted; past it the value is rejected, not applied. */
+const LIMIT_CEILING = 10_000;
+
 const EntrySchema = z
   .object({
     code: z.string().describe('The code other ILOSTAT tools take.'),
@@ -129,7 +134,17 @@ export const listReferenceTool = tool('ilostat_list_reference', {
     classification_type: blankAsUnset(z.string().max(32).optional()).describe(
       'Topic classifications only: keep codes of this classification type, the code prefix (AGE, ECO, EDU, …).',
     ),
-    limit: z.number().int().min(1).max(500).default(50).describe('Entries per page (1–500).'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(LIMIT_CEILING, {
+        message: `limit must be at most 10,000; any value past the page cap (${PAGE_CAP}) is applied as that cap.`,
+      })
+      .default(50)
+      .describe(
+        `Entries per page, at most ${PAGE_CAP}; a larger value, up to 10,000, is applied as ${PAGE_CAP} and the notice says so.`,
+      ),
     cursor: blankAsUnset(z.string().max(256).optional()).describe(
       "Opaque continuation token: the previous page's next_cursor, passed unchanged.",
     ),
@@ -164,7 +179,7 @@ export const listReferenceTool = tool('ilostat_list_reference', {
       .string()
       .optional()
       .describe(
-        'Why a filter with no searchable word was not applied, why nothing matched, that the cursor starts past the last entry, and how to reach the remaining pages — whichever apply, joined.',
+        'That a limit past the page cap was applied as the cap, why a filter with no searchable word was not applied, why nothing matched, that the cursor starts past the last entry, and how to reach the remaining pages — whichever apply, joined.',
       ),
   },
 
@@ -232,9 +247,14 @@ export const listReferenceTool = tool('ilostat_list_reference', {
       });
     }
 
+    const limit = Math.min(input.limit, PAGE_CAP);
+    const clamp =
+      limit < input.limit
+        ? `limit ${input.limit} was applied as ${limit}, the per-call page cap.`
+        : undefined;
     const result = listReference(snapshot, {
       topic: input.topic,
-      limit: input.limit,
+      limit,
       offset,
       ...(input.filter ? { filter: input.filter } : {}),
       ...(input.codes?.length ? { codes: input.codes } : {}),
@@ -244,17 +264,18 @@ export const listReferenceTool = tool('ilostat_list_reference', {
         : {}),
     });
 
-    ctx.enrich({ truncated: false, shown: result.entries.length, cap: input.limit });
-    // The page guidance replaces the notice slot, so a paged result carries both in it.
+    ctx.enrich({ truncated: false, shown: result.entries.length, cap: limit });
+    // The page guidance replaces the notice slot, so a paged result carries every notice in it.
+    const notice = [clamp, result.notice].filter((part) => part !== undefined).join(' ');
     if (result.nextCursor) {
       const pageGuidance = `Showing ${result.entries.length} of ${result.total} ${input.topic} entries; pass next_cursor as cursor for the next page.`;
       ctx.enrich.truncated({
         shown: result.entries.length,
-        cap: input.limit,
-        guidance: result.notice ? `${result.notice} ${pageGuidance}` : pageGuidance,
+        cap: limit,
+        guidance: notice ? `${notice} ${pageGuidance}` : pageGuidance,
       });
-    } else if (result.notice) {
-      ctx.enrich.notice(result.notice);
+    } else if (notice) {
+      ctx.enrich.notice(notice);
     }
     ctx.log.info('Listed ILOSTAT reference codes', {
       topic: input.topic,

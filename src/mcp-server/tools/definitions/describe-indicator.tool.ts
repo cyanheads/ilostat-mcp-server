@@ -201,7 +201,13 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       )
       .optional()
       .describe(
-        `Up to ${RELATED_LIMIT} other indicators sharing this measure under other breakdowns.`,
+        `The first ${RELATED_LIMIT} other indicators sharing this measure under other breakdowns, by code; related_total counts all of them.`,
+      ),
+    related_total: z
+      .number()
+      .optional()
+      .describe(
+        'How many other indicators share this measure. ilostat_search_indicators with measure set to measure.code lists them all.',
       ),
     structure_status: z
       .enum(['complete', 'unavailable'])
@@ -214,11 +220,17 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
   }),
 
   enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when related_datasets lists fewer than related_total.'),
+    shown: z.number().optional().describe('Related indicators listed.'),
+    cap: z.number().optional().describe('The most related indicators listed.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Where to find breakdown codes and units when the structure service did not supply them.',
+        'Where to find breakdown codes and units when the structure service did not supply them, and how to list every related indicator when the list is cut — whichever apply, joined.',
       ),
   },
 
@@ -257,7 +269,24 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
     const lookup = await structure.lookup(indicator.code, indicator.lastUpdate, ctx);
     const shape = lookup.structure;
     const cutoff = catalog.projectionCutoff(indicator, snapshot);
-    if (lookup.status === 'unavailable' || !lookup.unit) ctx.enrich.notice(STRUCTURE_NOTICE);
+    const allRelated = (snapshot.indicatorsByMeasure.get(indicator.measure.code) ?? []).filter(
+      (other) => other.code !== indicator.code,
+    );
+    const related = allRelated.slice(0, RELATED_LIMIT);
+    const structureNotice =
+      lookup.status === 'unavailable' || !lookup.unit ? STRUCTURE_NOTICE : undefined;
+    ctx.enrich({ truncated: false, shown: related.length, cap: RELATED_LIMIT });
+    // The cut guidance replaces the notice slot, so a cut list carries both in it.
+    if (allRelated.length > related.length) {
+      const guidance = `Showing the first ${related.length} of ${allRelated.length} other indicators sharing this measure, by code; call ilostat_search_indicators with measure ${inlineText(indicator.measure.code)} and limit 50 to list all ${allRelated.length + 1}, this one included.`;
+      ctx.enrich.truncated({
+        shown: related.length,
+        cap: RELATED_LIMIT,
+        guidance: structureNotice ? `${structureNotice} ${guidance}` : guidance,
+      });
+    } else if (structureNotice) {
+      ctx.enrich.notice(structureNotice);
+    }
     ctx.log.info('Described ILOSTAT dataset', {
       indicator: indicator.code,
       structureStatus: lookup.status,
@@ -280,9 +309,6 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       (snapshot.refAreas.get(code)?.kind ?? (code.startsWith('X') ? 'aggregate' : 'country')) ===
       'aggregate';
     const areas = shape ? [...shape.refAreas].sort() : [];
-    const related = (snapshot.indicatorsByMeasure.get(indicator.measure.code) ?? [])
-      .filter((other) => other.code !== indicator.code)
-      .slice(0, RELATED_LIMIT);
 
     return {
       found: true,
@@ -347,6 +373,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
         label: other.label,
         ...(other.classification ? { classification: other.classification } : {}),
       })),
+      related_total: allRelated.length,
       structure_status: lookup.status,
       catalog_as_of: snapshot.asOf,
       attribution: ATTRIBUTION,
@@ -455,9 +482,19 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       }
     }
 
-    if (result.related_datasets?.length) {
-      lines.push('', '### Related indicators (same measure)');
-      for (const other of result.related_datasets) {
+    if (result.related_total !== undefined) {
+      const total = result.related_total;
+      const listed = result.related_datasets ?? [];
+      lines.push(
+        '',
+        '### Related indicators (same measure)',
+        total === 0
+          ? 'No other indicator shares this measure.'
+          : listed.length < total
+            ? `${total} other indicators share this measure; the first ${listed.length} by code:`
+            : `${total} other ${total === 1 ? 'indicator shares' : 'indicators share'} this measure:`,
+      );
+      for (const other of listed) {
         lines.push(
           `- ${inlineText(other.indicator)} — ${inlineText(other.label)}${other.classification ? ` (${inlineText(other.classification)})` : ''}`,
         );

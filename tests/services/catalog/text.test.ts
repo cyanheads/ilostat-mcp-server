@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for the catalog text helpers: search/filter normalization,
- * word-prefix term matching, line-terminator flattening for inline markdown slots, the
- * indicator-definition HTML stripper, and the upstream timestamp conversion.
+ * word-prefix term matching, the light suffix stemmer, line-terminator flattening for
+ * inline markdown slots, the indicator-definition HTML stripper, and the upstream
+ * timestamp conversion.
  * @module tests/services/catalog/text.test
  */
 
@@ -11,6 +12,7 @@ import {
   inlineText,
   matchesAllTerms,
   normalizeText,
+  stemOf,
   toIsoTimestamp,
   wordsOf,
 } from '@/services/catalog/text.js';
@@ -64,6 +66,60 @@ describe('matchesAllTerms', () => {
 
   it('does not match a term inside a word', () => {
     expect(matchesAllTerms(['employment'], words)).toBe(false);
+  });
+});
+
+describe('stemOf', () => {
+  it.each([
+    ['informality', 'informal'],
+    ['informalization', 'informal'],
+    ['unionization', 'union'],
+    ['unionisations', 'union'],
+    ['unionized', 'union'],
+    ['unionised', 'union'],
+    ['productivity', 'product'],
+    ['productivities', 'product'],
+    ['productive', 'product'],
+    ['productively', 'product'],
+    ['inactivity', 'inact'],
+    ['inactive', 'inact'],
+    ['fatalities', 'fatal'],
+    ['nationalities', 'national'],
+    ['underemployment', 'underemploy'],
+    ['underemployments', 'underemploy'],
+    ['underemployed', 'underemploy'],
+    ['earnings', 'earn'],
+    ['training', 'train'],
+    ['industries', 'industry'],
+    ['informally', 'informal'],
+    ['workers', 'worker'],
+  ])('strips one suffix: %s → %s', (word, stem) => {
+    expect(stemOf(word)).toBe(stem);
+  });
+
+  it('keeps the word whole when the stem would be shorter than four letters', () => {
+    expect(stemOf('city')).toBe('city');
+    expect(stemOf('jobs')).toBe('jobs');
+    expect(stemOf('used')).toBe('used');
+    expect(stemOf('sing')).toBe('sing');
+  });
+
+  it('tries only the longest suffix that ends the word, never a shorter one after it', () => {
+    // ivities would leave "act"; the shorter ities is not tried.
+    expect(stemOf('activities')).toBe('activities');
+  });
+
+  it('never strips the s of a double s, and leaves a word with no suffix alone', () => {
+    expect(stemOf('business')).toBe('business');
+    expect(stemOf('informal')).toBe('informal');
+    expect(stemOf('union')).toBe('union');
+  });
+});
+
+describe('matchesAllTerms keeps the word-prefix rule', () => {
+  it('does not match a derived form by stem', () => {
+    expect(matchesAllTerms(['informality'], wordsOf('Informal employment rate'))).toBe(false);
+    expect(matchesAllTerms(['unionization'], wordsOf('Trade union density rate'))).toBe(false);
   });
 });
 

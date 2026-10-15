@@ -1,8 +1,9 @@
 /**
  * @fileoverview Text handling for the catalog: the search/filter normalization,
- * word-prefix term matching, the line-break class and inline flattening for
- * markdown slots, the indicator-definition HTML stripper, and the upstream
- * timestamp conversion. Pure functions.
+ * word-prefix term matching, the light suffix stemmer search falls back to, the
+ * line-break class and inline flattening for markdown slots, the
+ * indicator-definition HTML stripper, and the upstream timestamp conversion. Pure
+ * functions.
  * @module services/catalog/text
  */
 
@@ -52,7 +53,7 @@ export function inlineText(text: string): string {
  * True when `term` is a word or word prefix of one of `words`. A trailing plural
  * `s` is tolerated, so `workers` still matches the word `worker`.
  */
-function termMatches(term: string, words: readonly string[]): boolean {
+export function termMatches(term: string, words: readonly string[]): boolean {
   const singular = term.length > 3 && term.endsWith('s') ? term.slice(0, -1) : undefined;
   return words.some(
     (word) => word.startsWith(term) || (singular !== undefined && word.startsWith(singular)),
@@ -62,6 +63,45 @@ function termMatches(term: string, words: readonly string[]): boolean {
 /** True when every term matches a word or word prefix of `words`. */
 export function matchesAllTerms(terms: readonly string[], words: readonly string[]): boolean {
   return terms.every((term) => termMatches(term, words));
+}
+
+/** Suffix and replacement, longest first; the first that ends the word is the only one tried. */
+const STEM_RULES: readonly (readonly [suffix: string, replacement: string])[] = [
+  ['izations', ''],
+  ['isations', ''],
+  ['ization', ''],
+  ['isation', ''],
+  ['ivities', ''],
+  ['ivity', ''],
+  ['ities', ''],
+  ['ity', ''],
+  ['ively', ''],
+  ['ive', ''],
+  ['ments', ''],
+  ['ment', ''],
+  ['ings', ''],
+  ['ing', ''],
+  ['ized', ''],
+  ['ised', ''],
+  ['ies', 'y'],
+  ['ly', ''],
+  ['ed', ''],
+  ['s', ''],
+];
+
+/**
+ * Light suffix stem of a normalized word: one suffix stripped (`informality` →
+ * `informal`, `unionization` → `union`, `inactive` and `inactivity` → `inact`),
+ * `ies` turned to `y`, never an `s` after `ss`. The word stays whole when the stem
+ * would be shorter than four letters.
+ */
+export function stemOf(word: string): string {
+  for (const [suffix, replacement] of STEM_RULES) {
+    if (!word.endsWith(suffix) || (suffix === 's' && word.endsWith('ss'))) continue;
+    const stem = word.slice(0, -suffix.length) + replacement;
+    return stem.length >= 4 ? stem : word;
+  }
+  return word;
 }
 
 const ENTITIES: Record<string, string> = {

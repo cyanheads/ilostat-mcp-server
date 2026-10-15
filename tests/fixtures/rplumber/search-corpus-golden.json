@@ -1,0 +1,507 @@
+[
+  {
+    "query": "informality",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "unionization",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "productive",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "informal",
+    "total": 243,
+    "sha256": "f815465cbc590651e7203cdacb8903a64dc19ead2340c8e5c104e8e66fa97a8a"
+  },
+  {
+    "query": "union",
+    "total": 1,
+    "sha256": "59183fddb86ed7a835f122386c878921ccac9bc2d16c924135b4e13108d7d9ed"
+  },
+  {
+    "query": "productivity",
+    "total": 6,
+    "sha256": "244e30640e684b5151183eeb818c113f91ddfde5eba19c485ec10043b0070ea5"
+  },
+  {
+    "query": "unemployment",
+    "total": 256,
+    "sha256": "33d6a7d8c3f787b55ef085843c37116a10aa6d1a8156df28160d353025739010"
+  },
+  {
+    "query": "unemployed",
+    "total": 187,
+    "sha256": "9fc1df7c6dc84780b8e10f7267b8ea497493deb12d707d7598ea76c28ee6d1bd"
+  },
+  {
+    "query": "youth unemployment",
+    "total": 44,
+    "sha256": "9ea4d54438a7936fd5d6f3592a3125d4e226365bb82fb16094fb3b844bf0d95f"
+  },
+  {
+    "query": "informal employment",
+    "total": 238,
+    "sha256": "38eb8bd21a5db53bcb93cd8493f6142c4983a88d14d3732390fa87fab2f0be91"
+  },
+  {
+    "query": "wages",
+    "total": 197,
+    "sha256": "2d143e53d9f90bfde94ed5e2dc9571c6ba8bf05f9623e277a16dd20222f52f0c"
+  },
+  {
+    "query": "earnings",
+    "total": 118,
+    "sha256": "34f9b041b994af31ea55bfab6bc07ab9456be0bd4dab4c87aa8a3c11f8c8213d"
+  },
+  {
+    "query": "workers",
+    "total": 217,
+    "sha256": "63d9e00bb945fc400ac998205aa3e73d37a884fadc797b95670d3906211e8057"
+  },
+  {
+    "query": "employees",
+    "total": 237,
+    "sha256": "5d87730d3f298c6bb124a67d4b3fd2aa7a81c8b17ae858f022fffd40c0b1976a"
+  },
+  {
+    "query": "employers",
+    "total": 110,
+    "sha256": "7ec107bce7d2f571938e97b5dc47a7dde6c5b3d922e276727389958dbb9b263e"
+  },
+  {
+    "query": "injuries",
+    "total": 16,
+    "sha256": "5d36ad236ebcd47977bd4d4862836f5db7f417ed0dc16a48f51f404b5d83f515"
+  },
+  {
+    "query": "fatalities",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "occupational injuries",
+    "total": 16,
+    "sha256": "5d36ad236ebcd47977bd4d4862836f5db7f417ed0dc16a48f51f404b5d83f515"
+  },
+  {
+    "query": "labour productivity",
+    "total": 6,
+    "sha256": "244e30640e684b5151183eeb818c113f91ddfde5eba19c485ec10043b0070ea5"
+  },
+  {
+    "query": "participation",
+    "total": 152,
+    "sha256": "f4a582fe5166cb3a0086d67b4ba7ee025d739427d012390d3a852dfa18e3b394"
+  },
+  {
+    "query": "inactivity",
+    "total": 26,
+    "sha256": "db94ba06dbc5cfa24fcd3a8800c66105cadd0eba08b6659bac2d9c83218ea2b5"
+  },
+  {
+    "query": "inactive",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "underemployment",
+    "total": 65,
+    "sha256": "36f285741809bafd9f5fb33b467e82b177505723bd42dc8e34ff0505f5d227b7"
+  },
+  {
+    "query": "underemployed",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "working hours",
+    "total": 196,
+    "sha256": "0543e0e281aad0537f74e3d0bf43236025f42900144e834f5f8a231215064b81"
+  },
+  {
+    "query": "hours worked",
+    "total": 187,
+    "sha256": "2c08e0fab44a7dd3d74fb9f9ad963538ba5c832e8261ba376445c991d76ed3b9"
+  },
+  {
+    "query": "strikes",
+    "total": 4,
+    "sha256": "5a4e8fb7e7bed600347a82425f072cd968b12d847598f3eb9be46bea26fa66a7"
+  },
+  {
+    "query": "collective bargaining",
+    "total": 4,
+    "sha256": "848a4b107bb4e219befb0bc8bcffb6ffad190bf99b2c8c5b0f4183312f88a55a"
+  },
+  {
+    "query": "trade union",
+    "total": 1,
+    "sha256": "59183fddb86ed7a835f122386c878921ccac9bc2d16c924135b4e13108d7d9ed"
+  },
+  {
+    "query": "unions",
+    "total": 1,
+    "sha256": "59183fddb86ed7a835f122386c878921ccac9bc2d16c924135b4e13108d7d9ed"
+  },
+  {
+    "query": "unionised",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "migrants",
+    "total": 64,
+    "sha256": "b49971896117dcc48a3684d8623d394aec581b39ec5dcdfc2e04a6eade2aa4f0"
+  },
+  {
+    "query": "migration",
+    "total": 71,
+    "sha256": "9865b2d3b8e858c24edafdbd360f5c4112127716fd51856fca381ae1ee561220"
+  },
+  {
+    "query": "migrant workers",
+    "total": 8,
+    "sha256": "3f707a58d2aed62d62bde477e56a2862c67f112e6984612309c3bc0d54bda9b3"
+  },
+  {
+    "query": "disability",
+    "total": 144,
+    "sha256": "66fdae3cdaba3a91f131700dc6a018c1370cc75a44139089000467f441ae839c"
+  },
+  {
+    "query": "disabled",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "child labour",
+    "total": 47,
+    "sha256": "2d9cc157811e795f87adb202ce50ee0e53b9c862b66c06a8ace793609228109a"
+  },
+  {
+    "query": "children",
+    "total": 48,
+    "sha256": "a72861c5ab99ee50146f7fef1896047beb89928df531c0c3ae3d9ca17b676984"
+  },
+  {
+    "query": "educational attainment",
+    "total": 6,
+    "sha256": "387b0e1433a8200536e35a35702c9dd0003aeb5bd2226b9ebcbbfff62435481b"
+  },
+  {
+    "query": "agricultural",
+    "total": 10,
+    "sha256": "d039c0255a4bc61325c4ced3f1dc3972dad4d444c099c90b27e8350bbd5d746b"
+  },
+  {
+    "query": "agriculture",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "manufacturing",
+    "total": 4,
+    "sha256": "374689c7764d3c4b32d335399c0f2f3595c8a23a99db799aac2e8d2c42afde57"
+  },
+  {
+    "query": "SDG",
+    "total": 25,
+    "sha256": "67202d6b8c2e3a40576745663cc34bfb78c51204df7e622c6e04f3839160e631"
+  },
+  {
+    "query": "SDG 8.5.2",
+    "total": 9,
+    "sha256": "47a0b1c7aa10ea7a1cf7f1684109dcab71c9ce025f47c160961485798a7e49ed"
+  },
+  {
+    "query": "NEET",
+    "total": 23,
+    "sha256": "c9acd3345d6616ad4b503acaeddd87f377c0b576e6826f795158f3bef0e7c33a"
+  },
+  {
+    "query": "gender wage gap",
+    "total": 2,
+    "sha256": "85a374a405ec5bf4fb1a65299ae5c173552825c1017e313bacbbd222d851db50"
+  },
+  {
+    "query": "female labour force participation",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "poverty",
+    "total": 3,
+    "sha256": "3561d56d5ff25aaba126e028dbb8c110d211f1a747fa57fa1d1c5a656dc51b94"
+  },
+  {
+    "query": "working poor",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "social protection",
+    "total": 1,
+    "sha256": "6b38760033d59901e880b13b958d8e1a97045809b26d63b7aa9a831943ae7acd"
+  },
+  {
+    "query": "minimum wage",
+    "total": 2,
+    "sha256": "0d419be2a8137833831b9a67f7540ca8f7e67c6547c612c9abec7985a4d6b421"
+  },
+  {
+    "query": "self-employment",
+    "total": 262,
+    "sha256": "31cbb25e77f3210ded1f5ac60309e1866633cc1d11d8bc40f8a8709233b0551f"
+  },
+  {
+    "query": "self-employed",
+    "total": 228,
+    "sha256": "15df081fe62603cc2224f4350a4d1bee1d77c9fe6dfe19f3fe5b50e9ffd11ab3"
+  },
+  {
+    "query": "temporary employment",
+    "total": 16,
+    "sha256": "10ebfe8e8088dc8287ae6aeb620b1a3253affd28ec8f0896fbc72041936e7cb8"
+  },
+  {
+    "query": "part-time",
+    "total": 258,
+    "sha256": "ec661e5a667c5d1b7c3df27ca1c5895b3daa8190791e45580e18d4d46db57666"
+  },
+  {
+    "query": "occupation",
+    "total": 206,
+    "sha256": "a9b6b3096048b57894fb3c6c596c708c510dae082f48f191dd9efa02a5cd7dd3"
+  },
+  {
+    "query": "occupational",
+    "total": 40,
+    "sha256": "7d2695c517e3a92086a52ab78891f9f7e1ce51c24b926e1cf6a6585d6ed687f1"
+  },
+  {
+    "query": "economic activity",
+    "total": 175,
+    "sha256": "f0b99945f27a9427a1fb5e917c8a160761a84823abe9042ced03024cc1ca4a4f"
+  },
+  {
+    "query": "economically active",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "employment-to-population ratio",
+    "total": 33,
+    "sha256": "afa58d04427a753d1b8587d67edc59e4c11bb785174a1ddededf41f95fb3a8dd"
+  },
+  {
+    "query": "rate",
+    "total": 293,
+    "sha256": "785fdebf9ee54fae0f41ff3d34c47672e1a542bfd808d013ed7cb356612666a8"
+  },
+  {
+    "query": "rates",
+    "total": 293,
+    "sha256": "785fdebf9ee54fae0f41ff3d34c47672e1a542bfd808d013ed7cb356612666a8"
+  },
+  {
+    "query": "labour costs",
+    "total": 4,
+    "sha256": "2ca84c0d2b9f33cc70a9ee3f5e58dfc8773aaee2b4ab3f5e1e5785d5121bd521"
+  },
+  {
+    "query": "compensation",
+    "total": 3,
+    "sha256": "e5a7ad2aa1695685e1126550d1e37efedc278e73dad4f544227db05d288fde07"
+  },
+  {
+    "query": "vulnerable employment",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "status in employment",
+    "total": 367,
+    "sha256": "21ad0b14d97e24dc640b9663d1e090da8a16061070fbf3f3374c70b51f986f93"
+  },
+  {
+    "query": "discouraged",
+    "total": 12,
+    "sha256": "d47942f3f2f1ab4d0ffeed428dc5041d8793e27fb8d5d126c38220a49eda3eae"
+  },
+  {
+    "query": "time-related underemployment",
+    "total": 65,
+    "sha256": "36f285741809bafd9f5fb33b467e82b177505723bd42dc8e34ff0505f5d227b7"
+  },
+  {
+    "query": "organization",
+    "total": 1,
+    "sha256": "59183fddb86ed7a835f122386c878921ccac9bc2d16c924135b4e13108d7d9ed"
+  },
+  {
+    "query": "skills mismatch",
+    "total": 25,
+    "sha256": "d945e0afe951e596822df3e7d6619d00e41e10e20d408c5f3239748310a823bb"
+  },
+  {
+    "query": "training",
+    "total": 49,
+    "sha256": "0472b7059287b5be265abbe8361031223234f66c6405dd320592cdd9c5540f67"
+  },
+  {
+    "query": "age",
+    "total": 671,
+    "sha256": "0fc5de3feb01e3c463b011d61bfcba55363b1ead3062d07287c6b37187d5247c"
+  },
+  {
+    "query": "sex",
+    "total": 1139,
+    "sha256": "fe1eb28e9d19b71be7f53d2dc36ce839a75c7c2dac33393a967276cf8d917a2c"
+  },
+  {
+    "query": "pay",
+    "total": 115,
+    "sha256": "052d7142edcb15b0f505d97a316357d99c6e4090d4bb52d5071447efbd599b2d"
+  },
+  {
+    "query": "gap",
+    "total": 7,
+    "sha256": "bc208eb87423754be94dab5340f0bd35a811750aecb43b8ae29ae79dfa013f63"
+  },
+  {
+    "query": "ILO",
+    "total": 1213,
+    "sha256": "59900925ab3e6265efaaf5b53b4c42ae9b8a70b1fc4ecff917bc4d95e840001f"
+  },
+  {
+    "query": "labour income share",
+    "total": 3,
+    "sha256": "ff7d314e71b9670ffaf8fb1c40d3237104b2914da16c810501c42850340f5760"
+  },
+  {
+    "query": "households",
+    "total": 53,
+    "sha256": "e1b4a172df165defefff4de80594879ba23c143353703bf0db1ea15c89ca80e1"
+  },
+  {
+    "query": "employment growth",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "mean monthly earnings",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "safety",
+    "total": 19,
+    "sha256": "59669fb812587c262197cdbb3dbc6b55850967a2874d212430c21dc5e3492be6"
+  },
+  {
+    "query": "unemployment duration",
+    "total": 5,
+    "sha256": "c5811035c7af014618aafe68e6d2d971739bb37f4d7c72a6b3cbf681d80c12bf"
+  },
+  {
+    "query": "commuting",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "informally",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "unionized",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "unionisation",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "formalization",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "informalization",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "casualization",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "employability",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "flexibility",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "seasonality",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "disabilities",
+    "total": 1,
+    "sha256": "6b38760033d59901e880b13b958d8e1a97045809b26d63b7aa9a831943ae7acd"
+  },
+  {
+    "query": "wage inequality",
+    "total": 16,
+    "sha256": "1f0dc76a39f6695433a3fae0284d1ecfc83dcde1f12e657b1a4a9900fa571775"
+  },
+  {
+    "query": "inequality",
+    "total": 16,
+    "sha256": "1f0dc76a39f6695433a3fae0284d1ecfc83dcde1f12e657b1a4a9900fa571775"
+  },
+  {
+    "query": "precarity",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "informality rate",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "youth informality",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "unionization rate",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "productive employment",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "query": "inactive population",
+    "total": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+]

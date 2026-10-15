@@ -1,9 +1,10 @@
 /**
  * @fileoverview Tests for `ilostat_search_indicators` against the recorded catalog
  * served through `RplumberClient`'s fetch seam: the three-tier ranking, term
- * normalization, browse mode, the per-dataset frequency and aggregates filters,
- * code filters validated against the catalog, facets over the fully filtered match
- * set, every zero-hit notice fragment, cursor paging past the first page, blank
+ * normalization, the stem fallback and its notice, browse mode, the per-dataset frequency and aggregates filters,
+ * code filters (the measure filter included) validated against the catalog, facets
+ * over the fully filtered match set, every zero-hit notice fragment, cursor paging
+ * past the first page, a limit past the page cap applied as the cap, blank
  * form-client inputs, both consumption paths, and every declared error reason.
  * @module tests/tools/search-indicators.tool.test
  */
@@ -19,6 +20,7 @@ import {
   INVALID_CURSOR_RECOVERY,
   isRplumber,
   loadCatalogFixture,
+  loadFullCatalogFixture,
   tocRow,
   wireServices,
 } from '../helpers/ilostat-upstream.js';
@@ -64,6 +66,9 @@ function contentText(result: ContractResult): string {
 
 const nextCursorOf = (result: ContractResult) =>
   (result.structuredContent as { next_cursor?: string } | undefined)?.next_cursor;
+
+const UNKNOWN_FILTER_RECOVERY =
+  "Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes; a measure code is ilostat_describe_indicator's measure.code for any indicator of that measure.";
 
 /** The notice a cursor starting past the last of `total` matches carries. */
 const pastEndNotice = (total: number) =>
@@ -155,6 +160,63 @@ describe('term normalization', () => {
     wireServices();
     const { result } = await search({ query: 'unemployment astronauts' });
     expect(result.total).toBe(0);
+  });
+});
+
+describe('derived word forms', () => {
+  const MANAGERIALLY =
+    'managerially matched no catalog word or word prefix, so it was matched by stem: managerial. Check the hits are about managerially; if those words mean something else, search a synonym instead.';
+  const EMPLOYING =
+    'employing matched no catalog word or word prefix, so it was matched by stem: employed, employment. Check the hits are about employing; if those words mean something else, search a synonym instead.';
+
+  it('matches a term no catalog word starts with by its stem, and names it on both surfaces', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, { query: 'managerially' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      hits: [{ indicator: 'SDG_0552_NOC_RT', match_scope: 'definition' }],
+      total: 1,
+      truncated: false,
+      notice: MANAGERIALLY,
+    });
+    const text = contentText(result);
+    expect(text).toContain('### SDG_0552_NOC_RT');
+    expect(text).toContain(`> ${MANAGERIALLY}`);
+  });
+
+  it('keeps the stem notice ahead of the paging guidance on a paged result', async () => {
+    wireServices();
+    const first = await runToolContract(searchIndicatorsTool, { query: 'employing', limit: 2 });
+    const output = first.structuredContent as Output & { notice?: string; truncated?: boolean };
+    expect(output.truncated).toBe(true);
+    expect(output.notice).toBe(
+      `${EMPLOYING} Showing 2 of ${output.total} matching indicators; pass next_cursor as cursor for the next page.`,
+    );
+    expect(contentText(first)).toContain(`> ${EMPLOYING} Showing 2 of`);
+    const cursor = nextCursorOf(first);
+    expect(cursor).toBeDefined();
+    const second = await search({ query: 'employing', limit: 2, cursor: cursor ?? '' });
+    expect(String(second.enrichment.notice).startsWith(EMPLOYING)).toBe(true);
+  });
+
+  it('puts the stem notice ahead of the zero-hit notice', async () => {
+    wireServices();
+    const { result, enrichment } = await search({ query: 'managerially astronaut' });
+    expect(result.total).toBe(0);
+    expect(enrichment.notice).toBe(
+      `${MANAGERIALLY} No indicator matched every term. Use fewer or broader terms (for example "youth unemployment"), or browse subjects with ilostat_list_reference topic subjects and search by subject.`,
+    );
+  });
+
+  it('leaves a term that is a catalog word prefix on the word-prefix rule, with no notice', async () => {
+    wireServices();
+    const { result, enrichment } = await search({ query: 'unemployed' });
+    expect(indicators(result)).toEqual([
+      'UNE_DEAP_SEX_AGE_RT',
+      'UNE_2EAP_SEX_AGE_RT',
+      'UNE_DEAP_SEX_EDU_RT',
+    ]);
+    expect(enrichment.notice).toBeUndefined();
   });
 });
 
@@ -251,6 +313,40 @@ describe('filters', () => {
     expect(indicators((await search(filters)).result)).toEqual(expected);
   });
 
+  it('measure lists every indicator of that measure, case-insensitively, by code', async () => {
+    wireServices();
+    const { result } = await search({ measure: 'une_deap_rt' });
+    expect(indicators(result)).toEqual(['UNE_DEAP_SEX_AGE_RT', 'UNE_DEAP_SEX_EDU_RT']);
+    expect(result.facets.subjects).toEqual([
+      { code: 'LUU', label: 'Unemployment and labour underutilization', count: 2 },
+    ]);
+  });
+
+  it('measure combines with a query and the other filters', async () => {
+    wireServices();
+    expect(
+      indicators((await search({ measure: 'UNE_DEAP_RT', query: 'education' })).result),
+    ).toEqual(['UNE_DEAP_SEX_EDU_RT']);
+    expect(indicators((await search({ measure: 'UNE_DEAP_RT', frequency: 'Q' })).result)).toEqual([
+      'UNE_DEAP_SEX_AGE_RT',
+    ]);
+    expect((await search({ measure: 'UNE_DEAP_RT', database: 'ILOEST' })).result.total).toBe(0);
+  });
+
+  it('measure pages with next_cursor', async () => {
+    wireServices();
+    const first = await search({ measure: 'UNE_DEAP_RT', limit: 1 });
+    expect(indicators(first.result)).toEqual(['UNE_DEAP_SEX_AGE_RT']);
+    expect(first.enrichment).toMatchObject({ truncated: true, shown: 1, cap: 1 });
+    const second = await search({
+      measure: 'UNE_DEAP_RT',
+      limit: 1,
+      cursor: first.result.next_cursor ?? '',
+    });
+    expect(indicators(second.result)).toEqual(['UNE_DEAP_SEX_EDU_RT']);
+    expect(second.result.next_cursor).toBeUndefined();
+  });
+
   it.each(['subject', 'database'] as const)(
     'every code the %s description gives as an example is one the catalog carries',
     async (field) => {
@@ -343,6 +439,15 @@ describe('zero hits', () => {
     const both = await search({ query: 'unemployment', frequency: 'M', database: 'EMI' });
     expect(both.enrichment.notice).toBe(
       '1 indicator matches without the frequency filter — drop it or pick another value. 1 indicator matches without the database filter — drop it or pick another value.',
+    );
+  });
+
+  it('names the measure filter when dropping it alone would yield hits', async () => {
+    wireServices();
+    const { result, enrichment } = await search({ query: 'managerial', measure: 'UNE_DEAP_RT' });
+    expect(result.total).toBe(0);
+    expect(enrichment.notice).toBe(
+      '1 indicator matches without the measure filter — drop it or pick another value.',
     );
   });
 
@@ -478,6 +583,102 @@ describe('paging', () => {
   });
 });
 
+describe('limit past the page cap', () => {
+  const CLAMP = 'limit 100 was applied as 50, the per-call page cap.';
+
+  it('applies limit 100 as 50, keeps next_cursor, and names both values on both surfaces', async () => {
+    wireServices({ fixture: loadFullCatalogFixture() });
+    const result = await runToolContract(searchIndicatorsTool, {
+      query: 'unemployment',
+      limit: 100,
+    });
+    expect(result.isError).toBeFalsy();
+    const output = result.structuredContent as Output & { notice?: string };
+    expect(output.hits).toHaveLength(50);
+    expect(output.total).toBeGreaterThan(50);
+    expect(output.next_cursor).toBeDefined();
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 50, cap: 50 });
+    expect(output.notice).toBe(
+      `${CLAMP} Showing 50 of ${output.total} matching indicators; pass next_cursor as cursor for the next page.`,
+    );
+    expect(contentText(result)).toContain(`> ${CLAMP} Showing 50 of`);
+
+    // Both pages are the ones limit 50 returns: the cursor continues at hit 51, skipping none.
+    const atCap = await search({ query: 'unemployment', limit: 50 });
+    const atCapSecond = await search({
+      query: 'unemployment',
+      limit: 50,
+      cursor: atCap.result.next_cursor ?? '',
+    });
+    expect(output.hits.map((hit) => hit.indicator)).toEqual(indicators(atCap.result));
+    const second = await search({
+      query: 'unemployment',
+      limit: 100,
+      cursor: output.next_cursor ?? '',
+    });
+    expect(second.result.hits).toHaveLength(Math.min(50, output.total - 50));
+    expect(indicators(second.result)).toEqual(indicators(atCapSecond.result));
+  });
+
+  it('composes the clamp with the stem notice and the zero-hit notice', async () => {
+    wireServices();
+    const stemmed = await search({ query: 'managerially', limit: 51 });
+    expect(stemmed.enrichment.notice).toBe(
+      'limit 51 was applied as 50, the per-call page cap. managerially matched no catalog word or word prefix, so it was matched by stem: managerial. Check the hits are about managerially; if those words mean something else, search a synonym instead.',
+    );
+    const none = await search({ query: 'astronaut', limit: 1000 });
+    expect(none.enrichment).toEqual({
+      truncated: false,
+      shown: 0,
+      cap: 50,
+      notice:
+        'limit 1000 was applied as 50, the per-call page cap. No indicator matched every term. Use fewer or broader terms (for example "youth unemployment"), or browse subjects with ilostat_list_reference topic subjects and search by subject.',
+    });
+  });
+
+  it('leaves a limit within the cap unchanged, with no notice', async () => {
+    wireServices();
+    const { enrichment } = await search({ limit: 50 });
+    expect(enrichment).toEqual({ truncated: false, shown: 10, cap: 50 });
+  });
+
+  it('repairs a numeric string limit, then applies the cap', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, { limit: '60' } as never);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      cap: 50,
+      notice: 'limit 60 was applied as 50, the per-call page cap.',
+    });
+  });
+
+  it('rejects limit 1,001 as invalid arguments naming limit and 1,000', async () => {
+    const result = await runToolContract(searchIndicatorsTool, { limit: 1001 });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    const text = contentText(result);
+    expect(text).toContain('limit');
+    expect(text).toContain('1,000');
+  });
+
+  it.each([
+    ['0', 0],
+    ['-1', -1],
+    ['10.5', 10.5],
+    ['"abc"', 'abc'],
+    ['true', true],
+  ])('still rejects limit %s as invalid arguments naming the field', async (_label, limit) => {
+    const result = await runToolContract(searchIndicatorsTool, { limit } as never);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(contentText(result)).toContain('limit');
+  });
+});
+
 describe('output', () => {
   it('maps every hit and dataset field, ISO timestamps included', async () => {
     wireServices();
@@ -527,6 +728,7 @@ describe('form-client inputs', () => {
       database: '  ',
       subject: '',
       breakdown: '',
+      measure: ' ',
       cursor: '',
     });
     expect(result.total).toBe(10);
@@ -537,7 +739,8 @@ describe('form-client inputs', () => {
     expect(() => searchIndicatorsTool.input.parse({ frequency: 'annual' })).toThrow();
     expect(() => searchIndicatorsTool.input.parse({ frequency: 'q' })).toThrow();
     expect(() => searchIndicatorsTool.input.parse({ limit: 0 })).toThrow();
-    expect(() => searchIndicatorsTool.input.parse({ limit: 51 })).toThrow();
+    expect(() => searchIndicatorsTool.input.parse({ limit: 1001 })).toThrow();
+    expect(searchIndicatorsTool.input.parse({ limit: 1000 }).limit).toBe(1000);
     expect(() => searchIndicatorsTool.input.parse({ aggregates_only: 'yes' })).toThrow();
     expect(searchIndicatorsTool.input.parse({})).toEqual({ aggregates_only: false, limit: 10 });
   });
@@ -560,16 +763,36 @@ describe('errors', () => {
 
   it('unknown_filter_code names every filter code the catalog lacks, flattened', async () => {
     const { http } = wireServices();
-    const error = await failure({ database: 'no\npe', subject: 'XYZ', breakdown: 'foo' });
+    const error = await failure({
+      database: 'no\npe',
+      subject: 'XYZ',
+      breakdown: 'foo',
+      measure: 'eap_2wap_rt',
+    });
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.data).toMatchObject({
       reason: 'unknown_filter_code',
-      recovery: {
-        hint: 'Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes.',
+      recovery: { hint: UNKNOWN_FILTER_RECOVERY },
+    });
+    expect(error.message).toBe(
+      'Not an ILOSTAT code: database NO PE, subject XYZ, breakdown FOO, measure EAP_2WAP_RT.',
+    );
+    expect(http.calls).toHaveLength(15);
+  });
+
+  it('unknown_filter_code for a measure alone, on both surfaces, naming describe as the source', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, { measure: 'NOT_A_MEASURE' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'unknown_filter_code', recovery: { hint: UNKNOWN_FILTER_RECOVERY } },
       },
     });
-    expect(error.message).toBe('Not an ILOSTAT code: database NO PE, subject XYZ, breakdown FOO.');
-    expect(http.calls).toHaveLength(15);
+    const text = contentText(result);
+    expect(text).toContain('Not an ILOSTAT code: measure NOT_A_MEASURE.');
+    expect(text).toContain("ilostat_describe_indicator's measure.code");
   });
 
   it('catalog_unavailable: the catalog could not be loaded', async () => {
@@ -812,7 +1035,7 @@ describe('contract envelope (runToolContract)', () => {
 
   it('rejects arguments the schema refuses as InvalidParams', async () => {
     wireServices();
-    const result = await runToolContract(searchIndicatorsTool, { limit: 500 });
+    const result = await runToolContract(searchIndicatorsTool, { limit: 5000 });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({
       error: { code: JsonRpcErrorCode.InvalidParams },

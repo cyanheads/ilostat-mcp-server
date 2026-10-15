@@ -2,7 +2,8 @@
  * @fileoverview Tests for `ilostat_list_reference` against the recorded catalog
  * served through `RplumberClient`'s fetch seam: every topic's entry shape, the
  * word-prefix filter, exact code lookup with misses, the topic-scoped parameters,
- * cursor paging past the first page, blank form-client inputs, both consumption
+ * cursor paging past the first page, a limit past the page cap applied as the cap,
+ * blank form-client inputs, both consumption
  * paths (`structuredContent` and `content[]`), and every declared error reason.
  * @module tests/tools/list-reference.tool.test
  */
@@ -216,6 +217,18 @@ describe('filter', () => {
     expect(codes((await list({ topic: 'subjects', filter: 'Labor-Förce' })).result)).toEqual([
       'EAP',
     ]);
+  });
+
+  it('keeps the word-prefix rule with no stem fallback: unemployed does not reach unemployment', async () => {
+    wireServices();
+    expect(codes((await list({ topic: 'subjects', filter: 'unemployment' })).result)).toEqual([
+      'LUU',
+    ]);
+    const derived = await list({ topic: 'subjects', filter: 'unemployed' });
+    expect(derived.result.total).toBe(0);
+    expect(derived.enrichment.notice).toBe(
+      'No subjects entry matched "unemployed". Every filter term must appear in the code or label; try one distinctive word, or omit filter to page the full list.',
+    );
   });
 
   it('returns the zero-hit shape with a notice that echoes the filter on one line', async () => {
@@ -486,11 +499,110 @@ describe('paging', () => {
     expect(http.calls).toHaveLength(0);
   });
 
-  it('bounds limit to 1–500', () => {
+  it('bounds limit to 1–10,000 at the schema, defaulting to 50', () => {
     expect(() => listReferenceTool.input.parse({ topic: 'sexes', limit: 0 })).toThrow();
-    expect(() => listReferenceTool.input.parse({ topic: 'sexes', limit: 501 })).toThrow();
-    expect(listReferenceTool.input.parse({ topic: 'sexes', limit: 500 }).limit).toBe(500);
+    expect(() => listReferenceTool.input.parse({ topic: 'sexes', limit: 10_001 })).toThrow();
+    expect(listReferenceTool.input.parse({ topic: 'sexes', limit: 10_000 }).limit).toBe(10_000);
     expect(listReferenceTool.input.parse({ topic: 'sexes' }).limit).toBe(50);
+  });
+});
+
+describe('limit past the page cap', () => {
+  const CLAMP = 'limit 1000 was applied as 500, the per-call page cap.';
+
+  /** The recorded catalog plus `extra` AGE_TEST_* classif1 codes. */
+  function catalogWithClassifications(extra: number) {
+    const fixture = loadCatalogFixture();
+    const rows = Array.from({ length: extra }, (_, i) => ({
+      classif1: `AGE_TEST_${String(i).padStart(4, '0')}`,
+      'classif1.label': `Age test ${i}`,
+    }));
+    fixture.dictionaries.classif1 = [...(fixture.dictionaries.classif1 ?? []), ...rows];
+    return fixture;
+  }
+
+  it('applies limit 1000 as 500, keeps next_cursor, and names both values on both surfaces', async () => {
+    wireServices({ fixture: catalogWithClassifications(600) });
+    const result = await runToolContract(listReferenceTool, {
+      topic: 'classifications',
+      classification_type: 'AGE',
+      limit: 1000,
+    });
+    expect(result.isError).toBeFalsy();
+    const output = result.structuredContent as Output & { notice?: string };
+    expect(output.entries).toHaveLength(500);
+    expect(output.next_cursor).toBeDefined();
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 500, cap: 500 });
+    expect(output.notice).toBe(
+      `${CLAMP} Showing 500 of ${output.total} classifications entries; pass next_cursor as cursor for the next page.`,
+    );
+    expect(contentText(result)).toContain(`> ${CLAMP} Showing 500 of`);
+
+    const next = await list({
+      topic: 'classifications',
+      classification_type: 'AGE',
+      limit: 1000,
+      cursor: output.next_cursor ?? '',
+    });
+    expect(next.result.entries).toHaveLength(output.total - 500);
+    expect(next.enrichment).toEqual({
+      truncated: false,
+      shown: output.total - 500,
+      cap: 500,
+      notice: CLAMP,
+    });
+  });
+
+  it('names the clamp alone on a page the cap does not cut', async () => {
+    wireServices();
+    const { result, enrichment } = await list({ topic: 'sexes', limit: 10_000 });
+    expect(result.entries).toHaveLength(4);
+    expect(enrichment).toEqual({
+      truncated: false,
+      shown: 4,
+      cap: 500,
+      notice: 'limit 10000 was applied as 500, the per-call page cap.',
+    });
+  });
+
+  it('puts the clamp ahead of the zero-result notice', async () => {
+    wireServices();
+    const { enrichment } = await list({ topic: 'ref_areas', filter: 'atlantis', limit: 501 });
+    expect(enrichment.notice).toBe(
+      'limit 501 was applied as 500, the per-call page cap. No ref_areas entry matched "atlantis". Every filter term must appear in the code or label; try one distinctive word, or omit filter to page the full list.',
+    );
+  });
+
+  it('leaves a limit within the cap unchanged, with no notice', async () => {
+    wireServices();
+    const { enrichment } = await list({ topic: 'sexes', limit: 500 });
+    expect(enrichment).toEqual({ truncated: false, shown: 4, cap: 500 });
+  });
+
+  it('rejects limit 10,001 as invalid arguments naming limit and 10,000', async () => {
+    const result = await runToolContract(listReferenceTool, { topic: 'sexes', limit: 10_001 });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    const text = contentText(result);
+    expect(text).toContain('limit');
+    expect(text).toContain('10,000');
+  });
+
+  it.each([
+    ['0', 0],
+    ['-1', -1],
+    ['10.5', 10.5],
+    ['"abc"', 'abc'],
+    ['true', true],
+  ])('still rejects limit %s as invalid arguments naming the field', async (_label, limit) => {
+    const result = await runToolContract(listReferenceTool, { topic: 'sexes', limit } as never);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(contentText(result)).toContain('limit');
   });
 });
 
