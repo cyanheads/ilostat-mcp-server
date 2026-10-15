@@ -3,8 +3,8 @@
  * `df_` names an `ilostat_dataframe_query` statement names as identifiers and
  * whether it reads: line comments (ended by LF or CR), nested block comments,
  * `'…'` literals, `E'…'` strings with backslash escapes, and `$tag$…$tag$`
- * strings are skipped; bare and double-quoted identifiers are read whole; and a
- * 20,000-character adversarial input finishes in linear time.
+ * strings are skipped; bare and double-quoted identifiers are read whole; and
+ * adversarial inputs scale linearly in CPU time from 640 to 40,960 characters.
  * @module tests/services/canvas-bridge/scan-sql.test
  */
 
@@ -58,17 +58,70 @@ describe('scanSql', () => {
   });
 
   it.each([
-    ["'", "'".repeat(20_000)],
-    ['"', '"'.repeat(20_000)],
-    ['/* */', '/* */'.repeat(4_000)],
-    ['--', "--'\n".repeat(5_000)],
-    ['$a', '$a'.repeat(10_000)],
-    ['$', '$'.repeat(20_000)],
-    ["E'\\", "E'\\".repeat(6_667)],
-    ['df_', 'df_AAAAA_11111 '.repeat(1_334)],
-  ])('scans 20,000 characters of %s in under 50 ms', (_label, sql) => {
-    const started = performance.now();
-    scanSql(sql);
-    expect(performance.now() - started).toBeLessThan(50);
-  });
+    ["'", "'"],
+    ['"', '"'],
+    ['/* */', '/* */'],
+    ['--', "--'\n"],
+    ['$a', '$a'],
+    ['$', '$'],
+    ["E'\\", "E'\\"],
+    ['df_', 'df_AAAAA_11111 '],
+  ])(
+    'scans repeated %s in linear CPU time from 640 to 40,960 characters',
+    (_label, unit) => {
+      const [small = '', large = ''] = [SMALL, LARGE].map((size) =>
+        unit.repeat(Math.ceil(size / unit.length)),
+      );
+      const cost = perCallCpuMicros(
+        () => scanSql(small),
+        () => scanSql(large),
+      );
+      // 64× the input: a linear scan costs about 64× per call (41–70× measured), a quadratic one about 4,096×.
+      expect(cost.large / cost.small).toBeLessThan(256);
+      // One scan of 40,960 characters: under 1 ms measured; a quadratic scan takes tens to hundreds.
+      expect(cost.large).toBeLessThan(20_000);
+    },
+    // CPU time is what is asserted; the wall clock of a loaded machine is not.
+    60_000,
+  );
 });
+
+const SMALL = 640;
+const LARGE = 40_960;
+/** Calls in a batch of the large input; a small batch makes 64× the calls, so both scan as many characters. */
+const LARGE_CALLS = 2;
+const SMALL_CALLS = LARGE_CALLS * (LARGE / SMALL);
+/** CPU microseconds after which sampling stops: a linear scan spends under 50 ms in all seven rounds. */
+const SAMPLING_BUDGET = 500_000;
+
+/** CPU microseconds (user + system, this thread) of `calls` calls of `run`. */
+function cpuMicros(run: () => void, calls: number): number {
+  const start = process.threadCpuUsage();
+  for (let call = 0; call < calls; call += 1) run();
+  const used = process.threadCpuUsage(start);
+  return used.user + used.system;
+}
+
+/**
+ * Fewest CPU microseconds per call of `small` and of `large`, over up to seven rounds
+ * that each run one batch of both, in alternating order, so the two sizes are measured
+ * under the same core, clock, and heap conditions. Sampling ends early once
+ * {@link SAMPLING_BUDGET} is spent, so a quadratic scan fails in seconds, not minutes.
+ */
+function perCallCpuMicros(small: () => void, large: () => void): { large: number; small: number } {
+  small();
+  large();
+  let smallBest = Number.POSITIVE_INFINITY;
+  let largeBest = Number.POSITIVE_INFINITY;
+  let spent = 0;
+  for (let round = 0; round < 7 && spent < SAMPLING_BUDGET; round += 1) {
+    const smallFirst = round % 2 === 0;
+    const first = smallFirst ? cpuMicros(small, SMALL_CALLS) : cpuMicros(large, LARGE_CALLS);
+    const second = smallFirst ? cpuMicros(large, LARGE_CALLS) : cpuMicros(small, SMALL_CALLS);
+    const [smallCost, largeCost] = smallFirst ? [first, second] : [second, first];
+    smallBest = Math.min(smallBest, smallCost);
+    largeBest = Math.min(largeBest, largeCost);
+    spent += first + second;
+  }
+  return { small: smallBest / SMALL_CALLS, large: largeBest / LARGE_CALLS };
+}

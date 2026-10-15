@@ -83,6 +83,7 @@ function wireBridge(now: () => Date): CanvasBridge {
     dropEnabled: false,
     listingEnabled: true,
     now,
+    previewChars: 40_000,
   });
   if (!bridge) throw new Error('expected a bridge');
   return bridge;

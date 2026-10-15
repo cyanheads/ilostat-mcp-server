@@ -10,7 +10,13 @@
  * larger than its inline rows reports an exact `row_count` and points at the
  * stored dataframe; `sql` is capped at 20,000 characters; the canvas-off
  * registration; zero rows, the `row_limit` and `preview` bounds (preview 0
- * included), and a blank `register_as`; every declared error reason with the
+ * included), and a blank `register_as`; a `row_limit` or `preview` past the
+ * per-call cap (10,000, or a lower `CANVAS_DEFAULT_ROW_LIMIT`) applied as it and
+ * echoed in `applied_limits`, with the 1,000,000 ceiling still rejected; the
+ * inline size budget, which cuts whole rows in order by the larger of their JSON
+ * and table-line lengths plus their separators, and names the widest column of a
+ * lone oversized row with a `substr()` part size that reads it whole, or fewer
+ * columns when that column fits alone; every declared error reason with the
  * contract recovery, and a call with no canvas wired failing `InternalError`;
  * a path in an engine failure, from the query or from storing its
  * `register_as` result, redacted to `[path]`; table-cell escaping; the
@@ -138,6 +144,11 @@ async function describedNames(name: string | undefined, source: Context): Promis
     ctx as Parameters<typeof dataframeDescribeTool.handler>[1],
   );
   return result.dataframes.map((frame) => frame.name);
+}
+
+/** The `applied_limits` enrichment of a call that ran under these limits. */
+function appliedLimits(rowLimit: number, preview = rowLimit) {
+  return { row_limit: rowLimit, preview, preview_chars: 40_000 };
 }
 
 function render(result: Output): string {
@@ -385,6 +396,7 @@ describe('df_ names in SQL', () => {
     ['system_catalog_access', 'SELECT table_name FROM information_schema.tables'],
     ['non_select_statement', 'DELETE FROM df_NOPE0_NOPE0'],
     ['denied_function', "SELECT * FROM read_csv('/etc/hosts')"],
+    ['sql_read_only', "SELECT * FROM 'data.csv'"],
   ])(
     'points the %s recovery at no listing where every caller shares one canvas, on both surfaces',
     async (reason, sql) => {
@@ -476,7 +488,7 @@ describe('a register_as result larger than its inline rows', () => {
       'row_limit',
       { row_limit: 10 },
       10,
-      'Showing 10 of 52 rows. All 52 are stored as df_PART1_ROWS1; query that dataframe with ilostat_dataframe_query, or raise row_limit (max 10,000) to see more inline.',
+      'Showing 10 of 52 rows. All 52 are stored as df_PART1_ROWS1; query that dataframe with ilostat_dataframe_query, or raise row_limit (up to 10,000) to see more inline.',
     ],
   ])(
     'bounded by %s, counts every stored row and points at the stored dataframe, not at register_as',
@@ -564,7 +576,12 @@ describe('a SELECT over a staged dataframe', () => {
         { ref_area: 'X01', n: '28' },
       ],
     });
-    expect(getEnrichment(ctx)).toEqual({ truncated: false, shown: 3, cap: 1000 });
+    expect(getEnrichment(ctx)).toEqual({
+      truncated: false,
+      shown: 3,
+      cap: 1000,
+      applied_limits: appliedLimits(1000),
+    });
     expect(render(result)).toBe(
       [
         '**3 rows**',
@@ -594,6 +611,7 @@ describe('a SELECT over a staged dataframe', () => {
       truncated: false,
       shown: 0,
       cap: 1000,
+      applied_limits: appliedLimits(1000),
       notice: ZERO_ROWS_NOTICE,
     });
     expect(render(result)).toBe('**0 rows**\n\n_No rows._ Columns: ref_area, value');
@@ -604,7 +622,12 @@ describe('a SELECT over a staged dataframe', () => {
     const result = await runQuery({ sql: `SELECT * FROM ${name}`, row_limit: 52 }, ctx);
     expect(result).toMatchObject({ row_count: 52, row_count_capped: false });
     expect(result.rows).toHaveLength(52);
-    expect(getEnrichment(ctx)).toEqual({ truncated: false, shown: 52, cap: 52 });
+    expect(getEnrichment(ctx)).toEqual({
+      truncated: false,
+      shown: 52,
+      cap: 52,
+      applied_limits: appliedLimits(52),
+    });
     expect(render(result).split('\n')[0]).toBe('**52 rows**');
   });
 
@@ -617,8 +640,9 @@ describe('a SELECT over a staged dataframe', () => {
       truncated: true,
       shown: 51,
       cap: 51,
+      applied_limits: appliedLimits(51),
       notice:
-        'Showing 51 rows. The query matched more than row_limit (51), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (max 10,000).',
+        'Showing 51 rows. The query matched more than row_limit (51), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (up to 10,000).',
     });
     expect(render(result).split('\n')[0]).toBe(
       '**51 rows** — capped at row_limit; more rows matched',
@@ -634,6 +658,7 @@ describe('a SELECT over a staged dataframe', () => {
       truncated: true,
       shown: 2,
       cap: 2,
+      applied_limits: appliedLimits(1000, 2),
       notice: 'Showing 2 of 52 rows. Use register_as to keep the full result, or raise preview.',
     });
     expect(render(result).split('\n')[0]).toBe('**52 rows** (showing 2 of 52)');
@@ -647,8 +672,15 @@ describe('a SELECT over a staged dataframe', () => {
     );
     expect(result).toMatchObject({ row_count: 10, row_count_capped: true });
     expect(result.rows).toHaveLength(10);
-    expect(getEnrichment(ctx)).toMatchObject({ truncated: true, shown: 10, cap: 10 });
-    expect(getEnrichment(ctx).notice).toContain('or raise row_limit (max 10,000).');
+    expect(getEnrichment(ctx)).toMatchObject({
+      truncated: true,
+      shown: 10,
+      cap: 10,
+      applied_limits: appliedLimits(10),
+    });
+    expect(getEnrichment(ctx).notice).toMatch(
+      /^preview 100 was applied as 10, since preview never exceeds row_limit\. .*or raise row_limit \(up to 10,000\)\.$/,
+    );
   });
 
   it('returns no rows inline at preview 0 while counting all 52, without calling the result empty', async () => {
@@ -664,6 +696,7 @@ describe('a SELECT over a staged dataframe', () => {
       truncated: true,
       shown: 0,
       cap: 0,
+      applied_limits: appliedLimits(1000, 0),
       notice: 'Showing 0 of 52 rows. Use register_as to keep the full result, or raise preview.',
     });
     expect(render(result)).toBe(
@@ -682,7 +715,12 @@ describe('a SELECT over a staged dataframe', () => {
       expires_at: '2026-09-27T12:00:00.000Z',
     });
     expect(result.rows).toHaveLength(24);
-    expect(getEnrichment(ctx)).toEqual({ truncated: false, shown: 24, cap: 1000 });
+    expect(getEnrichment(ctx)).toEqual({
+      truncated: false,
+      shown: 24,
+      cap: 1000,
+      applied_limits: appliedLimits(1000),
+    });
     expect(render(result).split('\n').slice(0, 2)).toEqual([
       'Registered as df_REPOR_TED01 (expires 2026-09-27T12:00:00.000Z).',
       '**24 rows**',
@@ -725,6 +763,529 @@ describe('a SELECT over a staged dataframe', () => {
   });
 });
 
+describe('row_limit and preview past the per-call cap', () => {
+  const ROW_LIMIT_CLAMP = 'row_limit 10001 was applied as 10000, the per-call row cap.';
+
+  /** The row cap below the 10,000 default, as `CANVAS_DEFAULT_ROW_LIMIT` sets it. */
+  function wireLowCap(cap: number): void {
+    resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: String(cap) });
+    wireCanvas({}, memoryCanvas({ defaultRowLimit: cap }));
+  }
+
+  it('applies a row_limit and preview past 10,000 as the cap, naming both clamps on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS x',
+      row_limit: 10_001,
+      preview: 10_001,
+    });
+    expect(result.isError).toBeFalsy();
+    const notice = `${ROW_LIMIT_CLAMP} preview 10001 was applied as 10000, since preview never exceeds row_limit.`;
+    expect(result.structuredContent).toMatchObject({
+      row_count: 1,
+      row_count_capped: false,
+      rows: [{ x: 1 }],
+      truncated: false,
+      shown: 1,
+      cap: 10_000,
+      applied_limits: { row_limit: 10_000, preview: 10_000 },
+      notice,
+    });
+    const text = contentText(result);
+    expect(text).toContain(notice);
+    expect(text).toContain('**Applied limits:** row_limit 10000 · preview 10000');
+  });
+
+  it('applies row_limit 1,000,000 as the cap and rejects 1,000,001 naming row_limit and 1,000,000', async () => {
+    wireCanvas();
+    const applied = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS x',
+      row_limit: 1_000_000,
+    });
+    expect(applied.isError).toBeFalsy();
+    expect(applied.structuredContent).toMatchObject({
+      applied_limits: { row_limit: 10_000, preview: 10_000 },
+      notice: 'row_limit 1000000 was applied as 10000, the per-call row cap.',
+    });
+
+    const rejected = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS x',
+      row_limit: 1_000_001,
+    });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    const text = contentText(rejected);
+    expect(text).toContain('row_limit');
+    expect(text).toContain('1,000,000');
+  });
+
+  it('applies a preview past row_limit as row_limit', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS x',
+      row_limit: 10,
+      preview: 50_000,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      applied_limits: { row_limit: 10, preview: 10 },
+      notice: 'preview 50000 was applied as 10, since preview never exceeds row_limit.',
+    });
+  });
+
+  it.each([
+    ['row_limit 0', { row_limit: 0 }],
+    ['row_limit -1', { row_limit: -1 }],
+    ['preview -1', { preview: -1 }],
+    ['row_limit 10.5', { row_limit: 10.5 }],
+    ['row_limit "10.5"', { row_limit: '10.5' }],
+    ['preview 10.5', { preview: 10.5 }],
+    ['row_limit "abc"', { row_limit: 'abc' }],
+    ['row_limit true', { row_limit: true }],
+    ['preview "abc"', { preview: 'abc' }],
+  ])('still rejects %s as invalid arguments naming the field', async (_label, bounds) => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS x',
+      ...bounds,
+    } as never);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(contentText(result)).toContain(Object.keys(bounds)[0] ?? 'missing');
+  });
+
+  it.each([
+    ['"500"', '500', 500, undefined],
+    ['"10001"', '10001', 10_000, ROW_LIMIT_CLAMP],
+  ])(
+    'repairs row_limit %s to the number it spells, then applies the cap',
+    async (_label, sent, applied, notice) => {
+      wireCanvas();
+      const result = await runToolContract(dataframeQueryTool, {
+        sql: 'SELECT 1 AS x',
+        row_limit: sent,
+      } as never);
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        applied_limits: { row_limit: applied, preview: applied },
+      });
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+    },
+  );
+
+  it('applies a lower CANVAS_DEFAULT_ROW_LIMIT as the default row_limit, with no clamp notice for a value never sent', async () => {
+    wireLowCap(500);
+    const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 AS x' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      row_count: 1,
+      applied_limits: { row_limit: 500, preview: 500 },
+    });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('was applied as');
+  });
+
+  it('names the clamp of a row_limit 1000 the caller sent under a lower cap', async () => {
+    wireLowCap(500);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS x',
+      row_limit: 1000,
+    });
+    expect(result.structuredContent).toMatchObject({
+      applied_limits: { row_limit: 500, preview: 500 },
+      notice: 'row_limit 1000 was applied as 500, the per-call row cap.',
+    });
+    expect(contentText(result)).toContain(
+      'row_limit 1000 was applied as 500, the per-call row cap.',
+    );
+  });
+
+  it('applies a fractional CANVAS_DEFAULT_ROW_LIMIT as the whole rows below it instead of failing', async () => {
+    wireLowCap(500.5);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 2000)) AS n',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      row_count: 500,
+      row_count_capped: true,
+      applied_limits: { row_limit: 500, preview: 500 },
+    });
+  });
+
+  it('caps a larger result at the applied cap and names register_as, never raising row_limit, on both surfaces', async () => {
+    wireLowCap(500);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 2000)) AS n',
+      row_limit: 5_000,
+    });
+    expect(result.isError).toBeFalsy();
+    const notice =
+      'row_limit 5000 was applied as 500, the per-call row cap. Showing 500 rows. The query matched more than row_limit (500), so row_count is that cap, not a total. Use register_as to keep the whole result; its row_count is then exact.';
+    expect(result.structuredContent).toMatchObject({
+      row_count: 500,
+      row_count_capped: true,
+      truncated: true,
+      shown: 500,
+      cap: 500,
+      applied_limits: { row_limit: 500, preview: 500 },
+      notice,
+    });
+    const text = contentText(result);
+    expect(text).toContain(notice);
+    expect(text).not.toContain('raise row_limit');
+  });
+
+  it('names the cap as the most row_limit can be raised to while it sits below it', async () => {
+    wireLowCap(500);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 2000)) AS n',
+      row_limit: 100,
+    });
+    expect(result.structuredContent).toMatchObject({
+      row_count: 100,
+      row_count_capped: true,
+      notice:
+        'Showing 100 rows. The query matched more than row_limit (100), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (up to 500).',
+    });
+  });
+
+  it('stores a register_as result past the cap in full, its inline rows at the cap, pointing only at the stored dataframe', async () => {
+    wireLowCap(500);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 2000)) AS n',
+      register_as: 'df_ATCAP_ROWS1',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      row_count: 2000,
+      row_count_capped: false,
+      registered_as: 'df_ATCAP_ROWS1',
+      truncated: true,
+      shown: 500,
+      notice:
+        'Showing 500 of 2000 rows. All 2000 are stored as df_ATCAP_ROWS1; query that dataframe with ilostat_dataframe_query.',
+    });
+  });
+});
+
+describe('inline size budget', () => {
+  const BUDGET = 40_000;
+  const SELECTIVE = 'selective SQL: fewer columns, LIMIT … OFFSET over an ORDER BY, or aggregates.';
+  /** 100 rows of about 1,000 characters each, numbered from 1. */
+  const PADDED = (rows: number) =>
+    `SELECT n, repeat('a', 1000) AS pad FROM (SELECT unnest(generate_series(1, ${rows})) AS n) ORDER BY n`;
+
+  type Row = Record<string, unknown>;
+
+  /**
+   * The rows on each surface as the caller receives them: the `rows` array body
+   * (its brackets aside, separators included) and the table's data lines in
+   * content[] joined as rendered.
+   */
+  function surfaces(result: ContractResult) {
+    const rows = (result.structuredContent as { rows: Row[] }).rows;
+    const lines = contentText(result)
+      .split('\n')
+      .filter((line) => line.startsWith('| ') && !line.startsWith('| ---'))
+      .slice(1);
+    return {
+      rows,
+      jsonChars: JSON.stringify(rows).length - 2,
+      lines,
+      textChars: lines.join('\n').length,
+    };
+  }
+
+  /** The notice of a contract result. */
+  function noticeOf(result: ContractResult): string {
+    return (result.structuredContent as { notice: string }).notice;
+  }
+
+  /** The `substr()` part size a withheld-column notice gives, read off its recipe. */
+  function partSize(notice: string): number {
+    const match = /substr\("[^"]+", 1, (\d+)\)/.exec(notice);
+    if (!match?.[1]) throw new Error(`no substr() recipe in: ${notice}`);
+    return Number(match[1]);
+  }
+
+  /** The dataframe bridge over `canvas` with an inline budget of `previewChars`. */
+  function lowerBudget(canvas: DataCanvas, previewChars: number): void {
+    initCanvasBridge(canvas, {
+      tableTtlMs: 24 * HOUR_MS,
+      dropEnabled: false,
+      listingEnabled: true,
+      now: () => FIXED_NOW,
+      previewChars,
+    });
+  }
+
+  it('withholds a lone row past the budget, naming its widest column, its length, and substr(), on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 7 AS id, repeat(chr(120), 60000) AS wide',
+      row_limit: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    const notice =
+      'Showing 0 of 1 row. Inline rows are held to 40,000 characters; the next row alone is 60,018 characters, and its widest column, wide, holds 60,000 — select it alone in parts of 39,892 characters: substr("wide", 1, 39892), then substr("wide", 39893, 39892), and on to length("wide"). Use register_as to keep the full result and read it with selective SQL: fewer columns, LIMIT … OFFSET over an ORDER BY, or aggregates.';
+    expect(result.structuredContent).toMatchObject({
+      columns: ['id', 'wide'],
+      row_count: 1,
+      row_count_capped: false,
+      rows: [],
+      truncated: true,
+      shown: 0,
+      notice,
+    });
+    const text = contentText(result);
+    expect(text).toContain(notice);
+    expect(text).toContain(
+      '**1 row** (showing 0 of 1)\n\n_No rows shown inline._ Columns: id, wide',
+    );
+    expect(JSON.stringify(result.structuredContent)).not.toContain('xxxxxxxxxx');
+    expect(text).not.toContain('xxxxxxxxxx');
+  });
+
+  it('withholds a row whose JSON fits but whose escaped table row does not', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT repeat(chr(124), 30000) AS pipes',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify({ pipes: '|'.repeat(30_000) }).length).toBeLessThan(BUDGET);
+    expect(result.structuredContent).toMatchObject({ rows: [], shown: 0, truncated: true });
+    const { notice } = result.structuredContent as { notice: string };
+    expect(notice).toContain(
+      'the next row alone is 60,004 characters, and its widest column, pipes, holds 30,000',
+    );
+    expect(contentText(result)).not.toContain('\\|\\|\\|\\|');
+  });
+
+  it.each([
+    ['plain', 'repeat(chr(120), 60000)', 'x'.repeat(60_000)],
+    ['pipe', 'repeat(chr(124), 30000)', '|'.repeat(30_000)],
+    ['line-break', 'repeat(chr(10), 30000)', '\n'.repeat(30_000)],
+  ])(
+    'gives a withheld %s column a part size whose substr() recipe, run verbatim, reads it whole',
+    async (_label, expression, value) => {
+      wireCanvas();
+      const source = `(SELECT ${expression} AS cell)`;
+      const withheld = await runToolContract(dataframeQueryTool, {
+        sql: `SELECT cell FROM ${source}`,
+      });
+      expect(withheld.structuredContent).toMatchObject({ rows: [], shown: 0, truncated: true });
+      const notice = noticeOf(withheld);
+      const part = partSize(notice);
+      expect(notice).toContain(
+        `then substr("cell", ${part + 1}, ${part}), and on to length("cell")`,
+      );
+      let read = '';
+      for (let start = 1; start <= value.length; start += part) {
+        const result = await runToolContract(dataframeQueryTool, {
+          sql: `SELECT substr("cell", ${start}, ${part}) AS part FROM ${source}`,
+        });
+        expect(result.structuredContent).toMatchObject({
+          row_count: 1,
+          shown: 1,
+          truncated: false,
+        });
+        const { rows, jsonChars, textChars } = surfaces(result);
+        expect(jsonChars).toBeLessThanOrEqual(BUDGET);
+        expect(textChars).toBeLessThanOrEqual(BUDGET);
+        read += String(rows[0]?.part);
+      }
+      expect(read).toBe(value);
+    },
+  );
+
+  it('gives a withheld non-text column a recipe that casts it to text first', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT generate_series(1, 20000) AS ids',
+    });
+    const notice = noticeOf(result);
+    expect(notice).toContain('substr(CAST("ids" AS VARCHAR), 1, ');
+    const part = /substr\(CAST\("ids" AS VARCHAR\), 1, (\d+)\)/.exec(notice)?.[1];
+    const read = await runToolContract(dataframeQueryTool, {
+      sql: `SELECT substr(CAST("ids" AS VARCHAR), 1, ${part}) AS part FROM (SELECT generate_series(1, 20000) AS ids)`,
+    });
+    expect(read.structuredContent).toMatchObject({ row_count: 1, shown: 1 });
+  });
+
+  it('points a withheld row whose widest column fits alone at fewer columns, not substr()', async () => {
+    wireCanvas();
+    const columns = Array.from({ length: 8 }, (_, i) => `repeat(chr(${97 + i}), 6000) AS c${i}`);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: `SELECT ${columns.join(', ')}`,
+    });
+    expect(result.structuredContent).toMatchObject({ rows: [], shown: 0, truncated: true });
+    const notice = noticeOf(result);
+    expect(notice).toContain(
+      'the next row alone is 48,065 characters, and its widest column, c0, holds 6,000 and fits inline alone — select fewer columns.',
+    );
+    expect(notice).not.toContain('substr');
+    const fewer = await runToolContract(dataframeQueryTool, {
+      sql: `SELECT c0, c1, c2 FROM (SELECT ${columns.join(', ')})`,
+    });
+    expect(fewer.structuredContent).toMatchObject({ row_count: 1, shown: 1, truncated: false });
+  });
+
+  it('holds narrow rows to the budget with their separators counted, on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 20000)) AS x',
+      row_limit: 20_000,
+    });
+    expect(result.isError).toBeFalsy();
+    const { rows, jsonChars, lines, textChars } = surfaces(result);
+    expect(rows.length).toBeGreaterThan(3_000);
+    expect(lines).toHaveLength(rows.length);
+    expect(jsonChars).toBeLessThanOrEqual(BUDGET);
+    expect(textChars).toBeLessThanOrEqual(BUDGET);
+    const next = JSON.stringify({ x: String(rows.length + 1) }).length;
+    expect(jsonChars + 1 + next).toBeGreaterThan(BUDGET);
+    expect(result.structuredContent).toMatchObject({
+      row_count: 10_000,
+      row_count_capped: true,
+      shown: rows.length,
+    });
+  });
+
+  it('stops at the first row that does not fit, keeping order and every value whole, within the budget on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, { sql: PADDED(100) });
+    expect(result.isError).toBeFalsy();
+    const { rows, jsonChars, lines, textChars } = surfaces(result);
+    expect(rows.length).toBeGreaterThan(30);
+    expect(rows.length).toBeLessThan(100);
+    // generate_series yields BIGINT, which arrives as a string
+    expect(rows.map((row) => row.n)).toEqual(
+      Array.from({ length: rows.length }, (_, i) => String(i + 1)),
+    );
+    expect(rows.every((row) => row.pad === 'a'.repeat(1000))).toBe(true);
+    expect(lines).toHaveLength(rows.length);
+    expect(jsonChars).toBeLessThanOrEqual(BUDGET);
+    expect(textChars).toBeLessThanOrEqual(BUDGET);
+    const next = JSON.stringify({ n: String(rows.length + 1), pad: 'a'.repeat(1000) }).length;
+    expect(jsonChars + 1 + next).toBeGreaterThan(BUDGET);
+    const shown = rows.length;
+    expect(result.structuredContent).toMatchObject({
+      row_count: 100,
+      row_count_capped: false,
+      truncated: true,
+      shown,
+      cap: 1000,
+      applied_limits: { row_limit: 1000, preview: 1000, preview_chars: BUDGET },
+    });
+    const { notice } = result.structuredContent as { notice: string };
+    expect(notice).toBe(
+      `Showing ${shown} of 100 rows. Inline rows are held to 40,000 characters. Use register_as to keep the full result and read it with ${SELECTIVE}`,
+    );
+    expect(contentText(result)).toContain(`**100 rows** (showing ${shown} of 100)`);
+  });
+
+  it('cuts a result capped at row_limit without changing row_count or row_count_capped', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, { sql: PADDED(2000) });
+    expect(result.isError).toBeFalsy();
+    const { rows, jsonChars, textChars } = surfaces(result);
+    expect(jsonChars).toBeLessThanOrEqual(BUDGET);
+    expect(textChars).toBeLessThanOrEqual(BUDGET);
+    expect(result.structuredContent).toMatchObject({
+      row_count: 1000,
+      row_count_capped: true,
+      truncated: true,
+      shown: rows.length,
+      notice: `Showing ${rows.length} of the first 1000 rows. Inline rows are held to 40,000 characters. The query matched more than row_limit, so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — and read it with ${SELECTIVE}`,
+    });
+  });
+
+  it('counts preview rows against the first row_limit rows of a capped result, on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 20000)) AS x',
+      row_limit: 10_000,
+      preview: 3,
+    });
+    const notice =
+      'Showing 3 of the first 10000 rows. The query matched more than row_limit, so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise preview.';
+    expect(result.structuredContent).toMatchObject({
+      row_count: 10_000,
+      row_count_capped: true,
+      shown: 3,
+      notice,
+    });
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('stores every row under register_as, row_count exact, the notice naming the stored dataframe', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const result = await runQuery({ sql: PADDED(100), register_as: 'df_SIZED_ROWS1' }, ctx);
+    expect(result).toMatchObject({ row_count: 100, registered_as: 'df_SIZED_ROWS1' });
+    expect(result.rows.length).toBeLessThan(100);
+    expect(getEnrichment(ctx).notice).toBe(
+      `Showing ${result.rows.length} of 100 rows. Inline rows are held to 40,000 characters. All 100 are stored as df_SIZED_ROWS1; query that dataframe with ${SELECTIVE}`,
+    );
+    const stored = await runQuery(
+      { sql: 'SELECT count(*) AS n, sum(length(pad)) AS chars FROM df_SIZED_ROWS1' },
+      sharingState(newContext(), ctx),
+    );
+    expect(stored.rows).toEqual([{ n: '100', chars: '100000' }]);
+  });
+
+  it('names the widest column of a lone oversized row that follows rows that fit', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT 1 AS n, 'small' AS note UNION ALL SELECT 2, repeat('b', 50000) ORDER BY n",
+    });
+    expect(result.structuredContent).toMatchObject({
+      rows: [{ n: 1, note: 'small' }],
+      shown: 1,
+      truncated: true,
+    });
+    expect((result.structuredContent as { notice: string }).notice).toContain(
+      'its widest column, note, holds 50,000 — select it alone in parts of 39,891 characters: substr("note", 1, 39891), then substr("note", 39892, 39891), and on to length("note").',
+    );
+  });
+
+  it('reads a withheld value in parts with length() and substr()', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT length(wide) AS chars, substr(wide, 1, 5) AS head FROM (SELECT repeat(chr(120), 60000) AS wide)',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ rows: [{ chars: '60000', head: 'xxxxx' }] });
+  });
+
+  it('applies a lower budget, echoed as applied_limits.preview_chars', async () => {
+    const canvas = wireCanvas();
+    lowerBudget(canvas, 1_000);
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT n, repeat('c', 90) AS pad FROM (SELECT unnest(generate_series(1, 30)) AS n) ORDER BY n",
+    });
+    const { rows, jsonChars } = surfaces(result);
+    expect(jsonChars).toBeLessThanOrEqual(1_000);
+    expect(rows.length).toBeGreaterThan(5);
+    expect(rows.length).toBeLessThan(30);
+    expect(result.structuredContent).toMatchObject({
+      row_count: 30,
+      applied_limits: { row_limit: 1000, preview: 1000, preview_chars: 1_000 },
+    });
+    expect((result.structuredContent as { notice: string }).notice).toContain(
+      'Inline rows are held to 1,000 characters.',
+    );
+    expect(contentText(result)).toContain(
+      '**Applied limits:** row_limit 1000 · preview 1000 · preview_chars 1000',
+    );
+  });
+});
+
 describe('errors', () => {
   it('logs the reasons a caller’s SQL causes at notice, the canvas outage at error', () => {
     const severities = Object.fromEntries(
@@ -744,6 +1305,7 @@ describe('errors', () => {
       non_select_statement: 'notice',
       multi_statement: 'notice',
       denied_function: 'notice',
+      sql_read_only: 'notice',
       plan_operator_not_allowed: 'notice',
     });
   });
@@ -795,6 +1357,9 @@ describe('errors', () => {
     ],
     ['two statements', () => 'SELECT 1; SELECT 2', 'multi_statement'],
     ['read_csv()', () => "SELECT * FROM read_csv('/etc/hosts')", 'denied_function'],
+    ['current_setting()', () => "SELECT current_setting('threads') AS t", 'denied_function'],
+    ['query_table()', (name: string) => `SELECT * FROM query_table('${name}')`, 'denied_function'],
+    ['a file named as a table', () => "SELECT * FROM 'data.csv'", 'sql_read_only'],
     ['range()', () => 'SELECT * FROM range(10)', 'plan_operator_not_allowed'],
   ])('fails %s with its declared reason and the contract recovery', async (_label, sql, reason) => {
     const { ctx, name } = await staged();
@@ -978,6 +1543,7 @@ describe('errors', () => {
         dropEnabled,
         listingEnabled: true,
         now: () => FIXED_NOW,
+        previewChars: 40_000,
       });
       await runQuery({ sql: `SELECT * FROM ${name}`, register_as: 'df_TWICE_TWICE' }, ctx);
       const error = await failure(
@@ -1048,8 +1614,11 @@ describe('contract envelope (runToolContract)', () => {
       truncated: false,
       shown: 1,
       cap: 1000,
+      applied_limits: appliedLimits(1000),
     });
-    expect(contentText(result)).toContain('**1 row**\n\n| n | s |\n| --- | --- |\n| 1 | a |');
+    const text = contentText(result);
+    expect(text).toContain('**1 row**\n\n| n | s |\n| --- | --- |\n| 1 | a |');
+    expect(text).toContain('**Applied limits:** row_limit 1000 · preview 1000');
   });
 
   it('a zero-row page validates, its notice on both surfaces', async () => {
@@ -1064,6 +1633,7 @@ describe('contract envelope (runToolContract)', () => {
       truncated: false,
       shown: 0,
       cap: 1000,
+      applied_limits: appliedLimits(1000),
       notice: ZERO_ROWS_NOTICE,
     });
     const text = contentText(result);
@@ -1078,7 +1648,7 @@ describe('contract envelope (runToolContract)', () => {
       row_limit: 2,
     });
     const guidance =
-      'Showing 2 rows. The query matched more than row_limit (2), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (max 10,000).';
+      'Showing 2 rows. The query matched more than row_limit (2), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (up to 10,000).';
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({
       row_count: 2,
@@ -1100,7 +1670,7 @@ describe('contract envelope (runToolContract)', () => {
       row_limit: 1,
     });
     const guidance =
-      'Showing 1 row. The query matched more than row_limit (1), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (max 10,000).';
+      'Showing 1 row. The query matched more than row_limit (1), so row_count is that cap, not a total. Use register_as to keep the whole result — its row_count is then exact — or raise row_limit (up to 10,000).';
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({
       row_count: 1,
@@ -1182,9 +1752,8 @@ describe('contract envelope (runToolContract)', () => {
   it.each([
     ['a blank sql', { sql: '   ' }],
     ['row_limit 0', { sql: 'SELECT 1 AS n', row_limit: 0 }],
-    ['row_limit 10,001', { sql: 'SELECT 1 AS n', row_limit: 10_001 }],
+    ['row_limit 1,000,001', { sql: 'SELECT 1 AS n', row_limit: 1_000_001 }],
     ['preview -1', { sql: 'SELECT 1 AS n', preview: -1 }],
-    ['preview 10,001', { sql: 'SELECT 1 AS n', preview: 10_001 }],
   ])('rejects %s at the schema on both surfaces', async (_label, args) => {
     wireCanvas();
     const result = await runToolContract(dataframeQueryTool, args);

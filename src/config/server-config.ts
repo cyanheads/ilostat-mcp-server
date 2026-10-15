@@ -33,7 +33,7 @@ const ServerConfigSchema = z.object({
     .min(1_000)
     .default(40_000)
     .describe(
-      'Inline preview budget in serialized characters (about 10k tokens at the default); a larger result is staged as a dataframe.',
+      'Inline preview budget in serialized characters (about 10k tokens at the default). A larger query or comparison result is staged as a dataframe; a dataframe SQL result returns only the leading rows that fit.',
     ),
   cacheTtlSeconds: z.coerce
     .number()

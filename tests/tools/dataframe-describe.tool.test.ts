@@ -1,7 +1,10 @@
 /**
  * @fileoverview Tests for `ilostat_dataframe_describe` on a real in-memory DuckDB
  * canvas, over dataframes staged by `ilostat_query_indicator` and
- * `ilostat_compare_geographies`: the provenance listing (newest first), the name
+ * `ilostat_compare_geographies`: the provenance listing (newest first), each
+ * dataset's full unit (measure, type, multiplier) kept from staging, through a
+ * `register_as` that drops the unit_multiplier column, and absent when the unit
+ * did not resolve or the record predates it, the name
  * lookup and its miss notice, blank and padded names, the expiry sweep, tables
  * that are gone (a canvas re-minted after a restart, a table dropped off a live
  * canvas), the `DATAFRAME_NAME_PATTERN` schema rejections, `canvas_unavailable`
@@ -39,6 +42,7 @@ import {
   observationCatalogFixture,
   sharingState,
   stageObservations,
+  structureRoute,
   tocRow,
   type WireOptions,
   wireDataframes,
@@ -84,6 +88,16 @@ const UNE_DATASET = {
   unit: 'Percentage',
   last_update: '2026-09-24T07:10:19',
 };
+/** The structure fields of the recorded unit, kept beside `unit` in the provenance. */
+const UNE_UNIT = {
+  unit_measure: 'PT',
+  unit_type: 'RT',
+  unit_type_label: 'Rate',
+  unit_multiplier: 0,
+  unit_multiplier_label: 'Units',
+};
+/** The rendered dataset line of a staged `UNE_DEAP_SEX_AGE_RT_A` dataframe. */
+const UNIT_LINE = `- Dataset: ${UNE} — Unemployment rate by sex and age (%) · unit Percentage (PT) · type Rate (RT) · multiplier 0 (Units) · updated 2026-09-24T07:10:19`;
 /** The staged observation columns, as describe reports them. */
 const OBSERVATION_SCHEMA = [
   ...[
@@ -212,7 +226,7 @@ describe('listing', () => {
       created_at: FIXED_NOW.toISOString(),
       expires_at: '2026-09-27T12:00:00.000Z',
       row_count: 52,
-      datasets: [UNE_DATASET],
+      datasets: [{ ...UNE_DATASET, ...UNE_UNIT }],
       coverage: { ref_areas: 3, period_min: '1999', period_max: '2027' },
       basis_counts: { reported: 24, modelled_estimate: 25, projection: 3 },
       attribution: ATTRIBUTION,
@@ -236,7 +250,7 @@ describe('listing', () => {
       created_at: '2026-09-26T13:00:00.000Z',
       expires_at: '2026-09-27T13:00:00.000Z',
       row_count: 3,
-      datasets: [UNE_DATASET],
+      datasets: [{ ...UNE_DATASET, ...UNE_UNIT }],
       coverage: { ref_areas: 3, period_min: '2021', period_max: '2025' },
       basis_counts: { reported: 2, modelled_estimate: 1, projection: 0 },
       attribution: ATTRIBUTION,
@@ -572,6 +586,102 @@ describe('a canvas failure that names a path', () => {
   );
 });
 
+describe('unit provenance', () => {
+  const UNIT_FIELDS = { unit: 'Percentage', ...UNE_UNIT };
+  const UNIT_KEYS = Object.keys(UNE_UNIT);
+
+  /** Describes `name` on `source`'s tenant, through the output parse the framework applies. */
+  async function described(name: string, source: Context) {
+    const { result } = await describeFrames(name, sharingState(newContext(), source));
+    return {
+      frame: dataframeDescribeTool.output.parse(result).dataframes[0],
+      text: render(result),
+    };
+  }
+
+  it('keeps the full unit of a staged query, multiplier 0 included, on both surfaces', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const { frame, text } = await described(name, ctx);
+    expect(frame?.datasets).toEqual([{ ...UNE_DATASET, ...UNIT_FIELDS }]);
+    expect(text).toContain(UNIT_LINE);
+  });
+
+  it('keeps it for a staged comparison', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const name = await stageComparison(ctx);
+    const { frame, text } = await described(name, ctx);
+    expect(frame?.datasets).toEqual([{ ...UNE_DATASET, ...UNIT_FIELDS }]);
+    expect(text).toContain(UNIT_LINE);
+  });
+
+  it('carries it to a register_as dataframe whose SELECT drops unit_multiplier', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    await dataframeQueryTool.handler(
+      dataframeQueryTool.input.parse({
+        sql: `SELECT ref_area, avg(value) AS mean FROM ${name} GROUP BY ref_area`,
+        register_as: 'df_MEANS_AREA1',
+      }),
+      sharingState(
+        createMockContext({ tenantId: TENANT, errors: dataframeQueryTool.errors }),
+        ctx,
+      ) as Parameters<typeof dataframeQueryTool.handler>[1],
+    );
+    const { frame, text } = await described('df_MEANS_AREA1', ctx);
+    expect(frame?.column_schema.map((column) => column.name)).toEqual(['ref_area', 'mean']);
+    expect(frame?.datasets).toEqual([{ ...UNE_DATASET, ...UNIT_FIELDS }]);
+    expect(text).toContain(UNIT_LINE);
+  });
+
+  it('carries no unit fields for a dataset whose unit did not resolve', async () => {
+    wireCanvas({
+      routes: [
+        structureRoute('UNE_DEAP_SEX_AGE_RT', () => Promise.reject(new TypeError('fetch failed'))),
+      ],
+    });
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const { frame, text } = await described(name, ctx);
+    const [dataset] = frame?.datasets ?? [];
+    expect(dataset).toEqual({
+      dataset_id: UNE,
+      label: UNE_DATASET.label,
+      last_update: UNE_DATASET.last_update,
+    });
+    expect(text).toContain(
+      `- Dataset: ${UNE} — Unemployment rate by sex and age (%) · updated 2026-09-24T07:10:19`,
+    );
+  });
+
+  it('still describes a provenance record written before the unit fields, without them', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const key = `df-meta/${name}`;
+    const record = await ctx.state.get<{ datasets: Record<string, unknown>[] }>(key);
+    if (!record) throw new Error('expected a provenance record');
+    await ctx.state.set(key, {
+      ...record,
+      datasets: record.datasets.map(({ datasetId, label, lastUpdate, unit }) => ({
+        datasetId,
+        label,
+        lastUpdate,
+        unit,
+      })),
+    });
+    const { frame, text } = await described(name, ctx);
+    expect(frame?.datasets).toEqual([UNE_DATASET]);
+    for (const field of UNIT_KEYS) expect(frame?.datasets[0]).not.toHaveProperty(field);
+    expect(text).toContain(
+      `- Dataset: ${UNE} — Unemployment rate by sex and age (%) · unit Percentage · updated 2026-09-24T07:10:19`,
+    );
+  });
+});
+
 describe('format()', () => {
   it('renders every field of a staged dataframe', async () => {
     wireCanvas();
@@ -584,7 +694,7 @@ describe('format()', () => {
       `### ${name}`,
       `- Source: ilostat_query_indicator · 52 rows · created ${FIXED_NOW.toISOString()} · expires 2026-09-27T12:00:00.000Z`,
       '- Params: {"dataset_ids":["UNE_DEAP_SEX_AGE_RT_A"],"ref_areas":["USA","X01","KEN"],"ref_area_count":3,"latest_only":false,"source_selection":"best","best_source":"yes"}',
-      '- Dataset: UNE_DEAP_SEX_AGE_RT_A — Unemployment rate by sex and age (%) · unit Percentage · updated 2026-09-24T07:10:19',
+      UNIT_LINE,
       '- Coverage: 3 areas · 1999–2027',
       '- Basis: reported 24 · modelled_estimate 25 · projection 3',
       `- ${ATTRIBUTION}`,

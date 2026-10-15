@@ -6,13 +6,15 @@
  * the `df-meta` provenance record and its expiry, a `register_as` dataframe
  * recording its SQL and `derived_from` and inheriting its parents' datasets,
  * the per-tenant canvas and its re-mint, the lazy expiry sweep, the rewrap of
- * engine rejections, `initCanvasBridge`, and the failed-staging disclosure on
- * both producers and both consumption paths.
+ * engine rejections, `initCanvasBridge` (the `ILOSTAT_PREVIEW_CHARS` budget it
+ * carries), the per-call row cap from `CANVAS_DEFAULT_ROW_LIMIT`, and the
+ * failed-staging disclosure on both producers and both consumption paths.
  * @module tests/services/canvas-bridge/canvas-bridge.test
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { CanvasInstance, type ColumnSchema, type DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { resetConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   databaseError,
   JsonRpcErrorCode,
@@ -36,6 +38,7 @@ import {
   getCanvasBridge,
   initCanvasBridge,
   type Provenance,
+  queryRowCap,
   routeRows,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeIlostatServices } from '@/services/ilostat-services.js';
@@ -124,7 +127,13 @@ function clock() {
 }
 
 function newBridge(canvas: DataCanvas, now: () => Date = () => FIXED_NOW, dropEnabled = false) {
-  return new CanvasBridge(canvas, { tableTtlMs: TTL_MS, dropEnabled, listingEnabled: true, now });
+  return new CanvasBridge(canvas, {
+    tableTtlMs: TTL_MS,
+    dropEnabled,
+    listingEnabled: true,
+    now,
+    previewChars: 40_000,
+  });
 }
 
 function newContext() {
@@ -680,7 +689,7 @@ describe('engine rejections are rebuilt with the calling tool’s contract', () 
       data: {
         reason: 'denied_function',
         recovery: {
-          hint: 'Remove the file-reading function and query only df_<id> tables, by the names the producing tools returned.',
+          hint: 'Remove the denied function and query only df_<id> tables directly, by the names the producing tools returned.',
         },
       },
     });
@@ -781,6 +790,42 @@ describe('initCanvasBridge', () => {
       },
     });
   });
+
+  it('carries ILOSTAT_PREVIEW_CHARS to the dataframe query budget, through the services and with no options', async () => {
+    vi.resetModules();
+    vi.stubEnv('ILOSTAT_PREVIEW_CHARS', '1500');
+    try {
+      const services = await import('@/services/ilostat-services.js');
+      const bridgeModule = await import('@/services/canvas-bridge/canvas-bridge.js');
+      try {
+        const wired = services.initIlostatServices({ canvas: tracked(memoryCanvas()) });
+        expect(wired.bridge?.previewChars).toBe(1500);
+        expect(bridgeModule.initCanvasBridge(tracked(memoryCanvas()))?.previewChars).toBe(1500);
+      } finally {
+        services.disposeIlostatServices();
+        bridgeModule.initCanvasBridge(undefined);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe('queryRowCap', () => {
+  afterEach(() => {
+    resetConfig();
+  });
+
+  it.each([
+    ['unset', undefined, 10_000],
+    ['500', '500', 500],
+    ['20000', '20000', 10_000],
+    ['500.5', '500.5', 500],
+    ['1.9', '1.9', 1],
+  ])('applies CANVAS_DEFAULT_ROW_LIMIT %s as a whole row count', (_label, value, cap) => {
+    resetConfig(value === undefined ? {} : { CANVAS_DEFAULT_ROW_LIMIT: value });
+    expect(queryRowCap()).toBe(cap);
+  });
 });
 
 describe('a failed staging, as the producers disclose it', () => {
@@ -836,7 +881,11 @@ describe('a failed staging, as the producers disclose it', () => {
   it.each(FAULTS)(
     'compare: when %s, the inline rows are cut and say why on both surfaces',
     async (_label, fault) => {
-      wireDataframes({ canvas: tracked(faultyCanvas(fault)) });
+      // A staged comparison row with its change columns runs to ~800 characters: room for one inline
+      wireDataframes({
+        canvas: tracked(faultyCanvas(fault)),
+        observations: { previewChars: 1_200 },
+      });
       const result = await runToolContract(compareGeographiesTool, {
         dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
         ref_areas: ['USA', 'X01', 'KEN'],
@@ -851,7 +900,7 @@ describe('a failed staging, as the producers disclose it', () => {
       expect(shown).toBeGreaterThan(0);
       expect(shown).toBeLessThan(3);
       const notice = `Showing ${shown} of 3 areas inline: staging the full comparison as a dataframe failed. Ranks, missing, and comparability cover every area; narrow ref_areas or area_group to see the rest.`;
-      expect(structured).toMatchObject({ truncated: true, shown, cap: 600 });
+      expect(structured).toMatchObject({ truncated: true, shown, cap: 1_200 });
       expect(structured.notice).toContain(notice);
       expect(structured).not.toHaveProperty('dataframe');
       expect(structured.comparability.basis_counts).toEqual({

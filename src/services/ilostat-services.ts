@@ -72,6 +72,7 @@ export function initIlostatServices(options: InitIlostatServicesOptions = {}): I
     tableTtlMs: serverConfig.datasetTtlSeconds * 1000,
     dropEnabled: serverConfig.dataframeDropEnabled,
     listingEnabled: dataframeListingAllowed(),
+    previewChars: serverConfig.previewChars,
     now,
   });
   services = {

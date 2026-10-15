@@ -45,12 +45,22 @@ import { ATTRIBUTION } from '@/services/attribution.js';
 import type { Basis } from '@/services/basis/basis.js';
 import { mintedDataframeName, scanSql } from '@/services/canvas-bridge/scan-sql.js';
 
-/** One dataset a staged dataframe holds. */
+/**
+ * One dataset a staged dataframe holds. The unit fields are set together when
+ * the producer resolved the unit, and absent otherwise (and on records written
+ * before they existed); values stay in the published scale `unitMultiplier` names.
+ */
 export interface DataframeDataset {
   datasetId: string;
   label: string;
   lastUpdate: string;
+  /** The unit's measure label, else its code. */
   unit?: string;
+  unitMeasure?: string;
+  unitMultiplier?: number;
+  unitMultiplierLabel?: string;
+  unitType?: string;
+  unitTypeLabel?: string;
 }
 
 /** Row counts per basis. */
@@ -122,6 +132,8 @@ export interface BridgeQueryOptions {
 export const STAGING_ROW_BUDGET = 1_000_000;
 /** Dataframes one tenant may hold. */
 export const STAGING_DATAFRAME_CAP = 100;
+/** Rows one dataframe query materializes, unless the canvas's own row limit is lower. */
+const QUERY_ROW_CAP = 10_000;
 
 const META_PREFIX = 'df-meta/';
 const CANVAS_ID_KEY = 'canvas-id';
@@ -140,6 +152,7 @@ const DECLARED_CANVAS_REASONS = new Set([
   'non_select_statement',
   'multi_statement',
   'denied_function',
+  'sql_read_only',
   'plan_operator_not_allowed',
 ]);
 
@@ -203,6 +216,16 @@ function canvasUnavailable(ctx: Context, cause?: unknown): McpError {
 }
 
 /**
+ * The per-call row cap of a dataframe query: {@link QUERY_ROW_CAP}, or
+ * `CANVAS_DEFAULT_ROW_LIMIT` when lower, past which the engine refuses a query.
+ * The framework accepts a fractional limit, and the engine takes whole row
+ * counts only, so the cap is the whole number of rows within it.
+ */
+export function queryRowCap(): number {
+  return Math.min(QUERY_ROW_CAP, Math.floor(config.canvas.defaultRowLimit));
+}
+
+/**
  * Whether a caller may list every dataframe on its tenant's canvas, from the
  * framework config. False on HTTP with auth `none`: every caller resolves to
  * tenant `default` there, so all of them share one canvas, and a listing would
@@ -217,6 +240,8 @@ export interface CanvasBridgeOptions {
   /** Whether describe may list every dataframe; see {@link dataframeListingAllowed}. */
   listingEnabled: boolean;
   now?: () => Date;
+  /** Inline budget for a dataframe query's rows, in characters (`ILOSTAT_PREVIEW_CHARS`). */
+  previewChars: number;
   /** Per-table TTL for staged dataframes. */
   tableTtlMs: number;
 }
@@ -313,6 +338,11 @@ export class CanvasBridge {
 
   get tableTtlMs(): number {
     return this.options.tableTtlMs;
+  }
+
+  /** Inline budget for a dataframe query's rows, in characters. */
+  get previewChars(): number {
+    return this.options.previewChars;
   }
 
   /** Records a staged table's provenance; returns what producers report. */
@@ -790,6 +820,7 @@ export function initCanvasBridge(
           tableTtlMs: getServerConfig().datasetTtlSeconds * 1000,
           dropEnabled: getServerConfig().dataframeDropEnabled,
           listingEnabled: dataframeListingAllowed(),
+          previewChars: getServerConfig().previewChars,
         },
       )
     : undefined;

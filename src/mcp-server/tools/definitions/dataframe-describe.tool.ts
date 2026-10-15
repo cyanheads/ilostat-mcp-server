@@ -15,10 +15,33 @@ import { blankAsUnset, dataframeNameInput } from '@/mcp-server/tools/tool-helper
 import { requireCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { inlineText } from '@/services/catalog/text.js';
 
+interface DatasetUnit {
+  unit?: string | undefined;
+  unit_measure?: string | undefined;
+  unit_multiplier?: number | undefined;
+  unit_multiplier_label?: string | undefined;
+  unit_type?: string | undefined;
+  unit_type_label?: string | undefined;
+}
+
+/**
+ * A dataset's unit as the observation tools' dataset block renders it
+ * (`Persons (PS) · type Number (NB) · multiplier 3 (Thousands)`), its label alone
+ * on a record kept before the unit fields existed, nothing when unresolved.
+ */
+function renderUnit(dataset: DatasetUnit): string {
+  const { unit_measure: measure, unit_type: type, unit_multiplier: multiplier } = dataset;
+  if (measure === undefined || type === undefined || multiplier === undefined) {
+    return dataset.unit ? ` · unit ${inlineText(dataset.unit)}` : '';
+  }
+  const label = dataset.unit_multiplier_label ? ` (${dataset.unit_multiplier_label})` : '';
+  return ` · unit ${inlineText(`${dataset.unit ?? measure} (${measure}) · type ${dataset.unit_type_label ?? type} (${type}) · multiplier ${multiplier}${label}`)}`;
+}
+
 export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
   title: 'Describe staged ILOSTAT dataframes',
   description:
-    'Describe the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by ilostat_dataframe_query register_as: the tool and parameters that produced each, the datasets it holds (label, unit, last update), coverage, basis counts, attribution, creation and expiry times, row count, and column schema. Pass name for one dataframe. Without it, every staged dataframe is listed, except on a deployment whose callers share one canvas, where listing is off and only the exact name works. Read the schema here before writing SQL for ilostat_dataframe_query.',
+    'Describe the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by ilostat_dataframe_query register_as: the tool and parameters that produced each, the datasets it holds (label, last update, and the unit with its measure, type, and multiplier — values stay in the published scale the multiplier names), coverage, basis counts, attribution, creation and expiry times, row count, and column schema. Pass name for one dataframe. Without it, every staged dataframe is listed, except on a deployment whose callers share one canvas, where listing is off and only the exact name works. Read the schema here before writing SQL for ilostat_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -48,7 +71,26 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
                   .object({
                     dataset_id: z.string().describe('Dataset ID.'),
                     label: z.string().describe('Dataset label.'),
-                    unit: z.string().optional().describe('Unit label, when resolved.'),
+                    unit: z
+                      .string()
+                      .optional()
+                      .describe('Unit label (its code when unlabelled), when resolved.'),
+                    unit_measure: z
+                      .string()
+                      .optional()
+                      .describe('Unit code (PT percent, PS persons, …), when resolved.'),
+                    unit_type: z
+                      .string()
+                      .optional()
+                      .describe('Unit type code (RT rate, NB number, …), when resolved.'),
+                    unit_type_label: z.string().optional().describe('Unit type label.'),
+                    unit_multiplier: z
+                      .number()
+                      .optional()
+                      .describe(
+                        'Power of ten the values are published in (0 units, 3 thousands, 6 millions), as in the staged unit_multiplier column; values are never rescaled. Absent when the unit did not resolve.',
+                      ),
+                    unit_multiplier_label: z.string().optional().describe('Multiplier label.'),
                     last_update: z.string().describe('Last upstream update of the dataset.'),
                   })
                   .describe('One dataset the dataframe holds.'),
@@ -138,6 +180,15 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
           dataset_id: dataset.datasetId,
           label: dataset.label,
           ...(dataset.unit ? { unit: dataset.unit } : {}),
+          ...(dataset.unitMeasure ? { unit_measure: dataset.unitMeasure } : {}),
+          ...(dataset.unitType ? { unit_type: dataset.unitType } : {}),
+          ...(dataset.unitTypeLabel ? { unit_type_label: dataset.unitTypeLabel } : {}),
+          ...(dataset.unitMultiplier === undefined
+            ? {}
+            : { unit_multiplier: dataset.unitMultiplier }),
+          ...(dataset.unitMultiplierLabel
+            ? { unit_multiplier_label: dataset.unitMultiplierLabel }
+            : {}),
           last_update: dataset.lastUpdate,
         })),
         ...(meta.coverage
@@ -175,7 +226,7 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
       );
       for (const dataset of frame.datasets) {
         lines.push(
-          `- Dataset: ${dataset.dataset_id} — ${inlineText(dataset.label)}${dataset.unit ? ` · unit ${inlineText(dataset.unit)}` : ''} · updated ${inlineText(dataset.last_update)}`,
+          `- Dataset: ${dataset.dataset_id} — ${inlineText(dataset.label)}${renderUnit(dataset)} · updated ${inlineText(dataset.last_update)}`,
         );
       }
       if (frame.coverage) {

@@ -55,7 +55,7 @@
     },
     "ILOSTAT_PREVIEW_CHARS": {
       "title": "Inline preview budget (characters)",
-      "description": "Inline preview budget in serialized characters; a larger result is staged as a dataframe.",
+      "description": "Inline preview budget in serialized characters; a larger query or comparison result is staged as a dataframe, and a dataframe SQL result returns only the leading rows that fit.",
       "type": "number",
       "required": false,
       "default": 40000,
