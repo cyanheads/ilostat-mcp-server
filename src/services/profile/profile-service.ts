@@ -1,8 +1,10 @@
 /**
- * @fileoverview Headline labour-market profile for one reference area. Two
- * `/data/ref_area` calls in parallel — the latest reported values (countries
- * only) and the latest modelled values bounded by the modelled cutoff — sliced
- * locally, so one cached response per area serves every sex. The reported and
+ * @fileoverview Headline labour-market profile for one reference area. Three
+ * `/data/ref_area` calls in parallel — for a country, the reported full history
+ * of the age-broken indicators (`classif1` limited to the headline codes) and of
+ * the sex-only ones, and for every area the latest modelled values bounded by the
+ * modelled cutoff — each slice's latest value picked locally, so one cached
+ * response set per area serves every sex. The reported and
  * modelled slots stay separate: a missing reported value is never filled from
  * the model. `/data/ref_area` takes indicator codes without the frequency
  * suffix; a suffixed dataset ID silently returns an empty array.
@@ -166,7 +168,7 @@ export class ProfileService {
   constructor(private readonly options: ProfileServiceOptions) {}
 
   /**
-   * The profile of `area` for `sex`. Both upstream calls must succeed — a failed
+   * The profile of `area` for `sex`. Every upstream call must succeed — a failed
    * reported call fails the profile rather than reporting every key missing. With
    * no headline dataset left in the catalog it fails `ServiceUnavailable` before
    * any call: an empty profile would report nothing missing, and the modelled
@@ -195,12 +197,28 @@ export class ProfileService {
     const indicatorsOf = (datasets: (Dataset | undefined)[]) => [
       ...new Set(datasets.flatMap((dataset) => (dataset ? [dataset.indicator] : []))),
     ];
-    const reportedCodes =
-      area.kind === 'country' ? indicatorsOf(headlines.map((h) => h.reportedDataset)) : [];
-    const [reportedRows, modelledRows] = await Promise.all([
-      reportedCodes.length > 0
-        ? this.fetch({ area: area.code, indicators: reportedCodes, latestOnly: true }, ctx)
-        : Promise.resolve([]),
+    const reportedHeadlines =
+      area.kind === 'country' ? headlines.filter((h) => h.reportedDataset) : [];
+    const aged = reportedHeadlines.filter((h) => h.classif1);
+    const plain = reportedHeadlines.filter((h) => !h.classif1);
+    /**
+     * Reported full history: `latestyear` would give every slice of an indicator its
+     * newest period, dropping a slice that ends earlier. `classif1` keeps the history
+     * small, but on this endpoint it also drops indicators without one, so the
+     * sex-only indicators go in a call of their own.
+     */
+    const reportedCall = (slices: ActiveHeadline[], classif1?: string[]) => {
+      const indicators = indicatorsOf(slices.map((h) => h.reportedDataset));
+      return indicators.length > 0
+        ? this.fetch(
+            { area: area.code, indicators, latestOnly: false, ...(classif1 ? { classif1 } : {}) },
+            ctx,
+          )
+        : Promise.resolve([]);
+    };
+    const [agedRows, plainRows, modelledRows] = await Promise.all([
+      reportedCall(aged, [...new Set(aged.flatMap((h) => (h.classif1 ? [h.classif1] : [])))]),
+      reportedCall(plain),
       this.fetch(
         {
           area: area.code,
@@ -211,6 +229,7 @@ export class ProfileService {
         ctx,
       ),
     ]);
+    const reportedRows = [...agedRows, ...plainRows];
 
     const indicators = headlines.map((headline): ProfileIndicator => {
       const reported = headline.reportedDataset
@@ -279,7 +298,13 @@ export class ProfileService {
   }
 
   private async fetch(
-    params: { area: string; indicators: string[]; latestOnly: boolean; timeTo?: number },
+    params: {
+      area: string;
+      classif1?: string[];
+      indicators: string[];
+      latestOnly: boolean;
+      timeTo?: number;
+    },
     ctx: Context,
   ): Promise<readonly RawObservation[]> {
     const url = this.options.rplumber.refAreaDataUrl(params);

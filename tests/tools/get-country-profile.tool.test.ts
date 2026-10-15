@@ -1,10 +1,12 @@
 /**
  * @fileoverview Tests for `ilostat_get_country_profile` against the recorded
- * catalog and `/data/ref_area` JSON captures (rplumber fetch seam): the two
- * parallel calls for a country and the single modelled call for an aggregate, the
- * exact URLs (bare indicator codes, the frequency riding on `id`, `timeto` at the
- * cutoff on the modelled call), the local sex slice served from one cached
- * response, the reported-missing notice and its no-model tail, headlines whose
+ * catalog and `/data/ref_area` JSON captures (rplumber fetch seam, filtered by the
+ * upstream emulator): the three parallel calls for a country and the single
+ * modelled call for an aggregate, the exact URLs (bare indicator codes, the
+ * frequency riding on `id`, the reported full history split by `classif1`, `timeto`
+ * at the cutoff on the modelled call), each slice at its own latest year (CHN
+ * youth unemployment, CHN's female values), the local sex slice served from one cached
+ * response set, the reported-missing notice and its no-model tail, headlines whose
  * dataset left the catalog (one, and all of them), a failed reported call failing the profile, modelled
  * rows past the cutoff excluded, every declared error reason, and both
  * consumption paths (`structuredContent` and `content[]`).
@@ -25,6 +27,7 @@ import {
   CATALOG_UNAVAILABLE_RECOVERY,
   type CatalogFixture,
   callUrls,
+  filterRefAreaRows,
   isRefAreaData,
   isRplumber,
   observationCatalogFixture,
@@ -55,14 +58,14 @@ const UPSTREAM_BUSY_RECOVERY =
 const UNKNOWN_AREA_RECOVERY =
   'Call ilostat_list_reference with topic ref_areas and a name filter to find the ISO3 or X-coded area code.';
 
-const REPORTED_CODES = [
+/** The reported indicators with a headline age code, and the sex-only ones. */
+const AGED_CODES = [
   'EAP_DWAP_SEX_AGE_RT',
   'EMP_DWAP_SEX_AGE_RT',
   'UNE_DEAP_SEX_AGE_RT',
-  'EIP_NEET_SEX_RT',
-  'EMP_NIFL_SEX_RT',
   'EMP_TEMP_SEX_AGE_NB',
 ];
+const PLAIN_CODES = ['EIP_NEET_SEX_RT', 'EMP_NIFL_SEX_RT'];
 const MODELLED_CODES = [
   'EAP_2WAP_SEX_AGE_RT',
   'EMP_2WAP_SEX_AGE_RT',
@@ -89,18 +92,18 @@ type Body = RawRow[] | (() => Response | Promise<Response>);
 
 /**
  * `/data/ref_area`: the modelled call (the one carrying `timeto`) and the reported
- * call answered from their own bodies. A call with no body configured fails the test.
+ * calls answered from their own bodies, a recorded body filtered by the request as
+ * upstream filters it (`filterRefAreaRows`). A call with no body configured fails the test.
  */
 function refAreaRoute(bodies: { modelled: Body; reported?: Body }): FetchMockRoute {
   return {
     method: 'GET',
     match: (request) => isRefAreaData(request),
     respond: (request) => {
-      const body = new URL(request.url).searchParams.has('timeto')
-        ? bodies.modelled
-        : bodies.reported;
+      const url = new URL(request.url);
+      const body = url.searchParams.has('timeto') ? bodies.modelled : bodies.reported;
       if (body === undefined) throw new Error(`Unexpected /data/ref_area call: ${request.url}`);
-      return typeof body === 'function' ? body() : rplumberBody(body);
+      return typeof body === 'function' ? body() : rplumberBody(filterRefAreaRows(body, url));
     },
   };
 }
@@ -273,21 +276,25 @@ describe('country', () => {
       attribution: ATTRIBUTION,
     });
     expect(enrichment).toEqual({ notice: REPORTED_MISSING_NOTICE });
-    expect(refAreaCalls(wired)).toHaveLength(2);
+    expect(refAreaCalls(wired)).toHaveLength(3);
   });
 
-  it('sends bare indicator codes, the frequency on id, and timeto at the cutoff on the modelled call only', async () => {
+  it('sends bare indicator codes, the frequency on id, full reported history in two calls, and timeto at the cutoff on the modelled call only', async () => {
     const wired = wire();
     await profile({ ref_area: 'ken' });
     const calls = refAreaCalls(wired);
-    const reportedCall = calls.find((params) => !('timeto' in params));
+    const reportedCalls = calls.filter((params) => !('timeto' in params));
     const modelledCall = calls.find((params) => 'timeto' in params);
-    expect(reportedCall).toEqual({
-      id: 'KEN_A',
-      indicator: REPORTED_CODES.join('+'),
-      latestyear: 'TRUE',
-      format: '.json',
-    });
+    // classif1 on /data/ref_area drops indicators without one, so the sex-only pair goes alone
+    expect(reportedCalls).toEqual([
+      {
+        id: 'KEN_A',
+        indicator: AGED_CODES.join('+'),
+        classif1: 'AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24',
+        format: '.json',
+      },
+      { id: 'KEN_A', indicator: PLAIN_CODES.join('+'), format: '.json' },
+    ]);
     expect(modelledCall).toEqual({
       id: 'KEN_A',
       indicator: MODELLED_CODES.join('+'),
@@ -309,44 +316,47 @@ describe('country', () => {
     ).toEqual(
       [
         `?id=KEN_A&indicator=${MODELLED_CODES.join('+')}&timeto=2024&latestyear=TRUE&format=.json`,
-        `?id=KEN_A&indicator=${REPORTED_CODES.join('+')}&latestyear=TRUE&format=.json`,
+        `?id=KEN_A&indicator=${AGED_CODES.join('+')}&classif1=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24&format=.json`,
+        `?id=KEN_A&indicator=${PLAIN_CODES.join('+')}&format=.json`,
       ].sort(),
     );
   });
 
   it('sends the reported and modelled calls in parallel', async () => {
     let arrived = 0;
-    let releaseBoth: () => void = () => undefined;
-    const both = new Promise<void>((resolve) => {
-      releaseBoth = resolve;
+    let releaseAll: () => void = () => undefined;
+    const all = new Promise<void>((resolve) => {
+      releaseAll = resolve;
     });
     const barrier: FetchMockRoute = {
       method: 'GET',
       match: (request) => isRefAreaData(request),
       respond: async (request) => {
         arrived += 1;
-        if (arrived === 2) releaseBoth();
-        // a sequential pair would hold the first call here until the header timeout
-        await both;
+        if (arrived === 3) releaseAll();
+        // sequential calls would hold the first one here until the header timeout
+        await all;
+        const url = new URL(request.url);
         return rplumberBody(
-          refAreaRows(
-            new URL(request.url).searchParams.has('timeto') ? 'kenModelled' : 'kenReported',
+          filterRefAreaRows(
+            refAreaRows(url.searchParams.has('timeto') ? 'kenModelled' : 'kenReported'),
+            url,
           ),
         );
       },
     };
     wire({ routes: [barrier] });
     const { result } = await profile({ ref_area: 'KEN' });
-    expect(arrived).toBe(2);
+    expect(arrived).toBe(3);
     expect(result.reported_missing).toEqual(['labour_income_share', 'working_poverty_rate']);
   });
 
-  it('slices sex locally: one cached response pair serves SEX_M and SEX_F, sexless rows unaffected', async () => {
+  it('slices sex locally: one cached response set serves SEX_M and SEX_F, sexless rows unaffected', async () => {
     const wired = wire();
     await profile({ ref_area: 'KEN' });
     const male = await profile({ ref_area: 'KEN', sex: 'm' });
     const female = await profile({ ref_area: 'KEN', sex: 'female' });
-    expect(refAreaCalls(wired)).toHaveLength(2);
+    expect(refAreaCalls(wired)).toHaveLength(3);
 
     const valuesOf = (result: Output, key: string) => {
       const entry = result.indicators.find((indicator) => indicator.key === key);
@@ -359,6 +369,114 @@ describe('country', () => {
     // World and KEN working poverty is published for SEX_T only
     expect(valuesOf(male.result, 'working_poverty_rate')).toEqual([undefined, undefined]);
     expect(male.enrichment.notice).toBe(WORKING_POVERTY_UNMODELLED_NOTICE);
+  });
+
+  describe('a slice whose data ends before its indicator’s (CHN, recorded full history)', () => {
+    /**
+     * The observation catalog plus an annual ToC row for CHN (its counts are not under
+     * test), with the recorded history served as recorded (newest first) or reversed:
+     * a pick that keeps the first or the last row it meets fails one of the two orders.
+     */
+    function chnWire(order: 'recorded' | 'reversed' = 'recorded') {
+      const history = refAreaRows('chnReported');
+      const route = refAreaRoute({
+        reported: order === 'reversed' ? history.toReversed() : history,
+        modelled: refAreaRows('chnModelled'),
+      });
+      const fixture = observationCatalogFixture();
+      fixture.refAreaToc.push({
+        id: 'CHN_A',
+        ref_area: 'CHN',
+        'ref_area.label': 'China',
+        freq: 'A',
+        'freq.label': 'Annual',
+        'data.start': 1952,
+        'data.end': 2030,
+        'last.update': '16/09/2026 07:30:24',
+        'n.records': 100_000,
+        'n.records.all': 100_000,
+        'n.indicator': 300,
+      });
+      return wire({ fixture, routes: [route] });
+    }
+    const ORDERS = ['recorded', 'reversed'] as const;
+    const reportedOf = (result: Output) =>
+      Object.fromEntries(
+        result.indicators.map((entry) => [
+          entry.key,
+          entry.reported && [entry.reported.period, entry.reported.value, entry.reported.source],
+        ]),
+      );
+
+    it.each(ORDERS)(
+      'reports youth unemployment at its own latest year, 14.25 in 2021, beside 15+ at 2022, rows %s',
+      async (order) => {
+        chnWire(order);
+        const { result } = await profile({ ref_area: 'CHN' });
+        expect(reportedOf(result)).toEqual({
+          labour_force_participation_rate: ['2018', 70.255, 'EA:995'],
+          employment_to_population_ratio: ['2019', 67.35, 'EA:995'],
+          unemployment_rate: ['2022', 4.569, 'BA:16044'],
+          youth_unemployment_rate: ['2021', 14.25, 'BA:16044'],
+          youth_neet_rate: ['2000', 12.688, 'AA:992'],
+          informal_employment_rate: undefined,
+          employment: ['2023', 740410, 'BA:16044'],
+          labour_income_share: undefined,
+          working_poverty_rate: undefined,
+        });
+        expect(
+          result.indicators.find((entry) => entry.key === 'youth_unemployment_rate'),
+        ).toMatchObject({
+          reported: {
+            dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
+            source_label: 'LFS - National Labour Survey',
+          },
+        });
+        expect(result.reported_missing).toEqual([
+          'informal_employment_rate',
+          'labour_income_share',
+          'working_poverty_rate',
+        ]);
+      },
+    );
+
+    it.each(ORDERS)(
+      'reports the latest female values from the same cached responses, rows %s',
+      async (order) => {
+        const wired = chnWire(order);
+        await profile({ ref_area: 'CHN' });
+        const { result } = await profile({ ref_area: 'CHN', sex: 'SEX_F' });
+        expect(reportedOf(result)).toEqual({
+          labour_force_participation_rate: ['2010', 63.727, 'AA:992'],
+          employment_to_population_ratio: ['2000', 65.295, 'AA:992'],
+          unemployment_rate: ['2000', 3.841, 'AA:992'],
+          youth_unemployment_rate: ['2000', 8.611, 'AA:992'],
+          youth_neet_rate: ['2000', 14.492, 'AA:992'],
+          informal_employment_rate: undefined,
+          employment: ['2000', 291261, 'AA:992'],
+          labour_income_share: undefined,
+          working_poverty_rate: undefined,
+        });
+        expect(result.reported_missing).toEqual([
+          'informal_employment_rate',
+          'labour_income_share',
+          'working_poverty_rate',
+        ]);
+        // three calls served both sexes
+        expect(refAreaCalls(wired)).toHaveLength(3);
+      },
+    );
+
+    it('shows the youth value on both surfaces', async () => {
+      chnWire();
+      const result = await runToolContract(getCountryProfileTool, { ref_area: 'CHN' });
+      expect(result.isError).toBeFalsy();
+      const structured = result.structuredContent as Output;
+      expect(structured.reported_missing).not.toContain('youth_unemployment_rate');
+      expect(contentText(result)).toContain(
+        '| Unemployment rate, 15–24 (youth_unemployment_rate) | 14.25 (2021) |',
+      );
+    });
   });
 
   it('reads a blank or omitted sex as SEX_T', async () => {
@@ -406,7 +524,7 @@ describe('country', () => {
     );
   });
 
-  it('drops a headline whose dataset left the catalog, from the output and from both calls', async () => {
+  it('drops a headline whose dataset left the catalog, from the output and from every call', async () => {
     const fixture: CatalogFixture = observationCatalogFixture();
     fixture.indicatorToc = fixture.indicatorToc.filter((row) => row.id !== 'EMP_2IFL_SEX_RT_A');
     const wired = wire({ fixture });

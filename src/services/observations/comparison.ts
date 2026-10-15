@@ -2,9 +2,10 @@
  * @fileoverview The cross-area comparison behind `ilostat_compare_geographies`,
  * as pure functions over rows already fetched for one dataset and one slice:
  * each area's value at the requested period or its latest non-projected period,
- * the change over N years, a rank by value (ties share a rank), the areas with no
- * value and why, and the comparability flags. The staged comparison — one row
- * per area — has its own explicit column schema.
+ * the change over N years with the baseline's provenance and whether source,
+ * basis, or series changed across it, a rank by value (ties share a rank), the
+ * areas with no value and why, and the comparability flags. The staged
+ * comparison — one row per area — has its own explicit column schema.
  * @module services/observations/comparison
  */
 
@@ -35,9 +36,18 @@ export type CompareMode =
   | { kind: 'period'; period: string };
 
 export interface Change {
+  /** The baseline's basis differs from the current value's. */
+  basisChanged: boolean;
+  /**
+   * A break marker on the current value or on a row of its source after the
+   * baseline; `null` when only the two endpoints were read and the current value
+   * carries none, so a break between them is unknown.
+   */
+  breakInSeries: boolean | null;
   delta: number;
-  fromPeriod: string;
-  fromValue: number;
+  /** The baseline observation, decoded. */
+  from: ObservationRow & { value: number };
+  sourceChanged: boolean;
 }
 
 export interface ComparisonEntry {
@@ -61,6 +71,8 @@ export interface Comparison {
 export interface CompareInput {
   /** Every requested area, in request order. */
   areas: readonly string[];
+  /** False when only the two endpoints were read: a break between them is unknown. Defaults to true. */
+  betweenRead?: boolean;
   /** Rows with a value, per area. */
   candidates: ReadonlyMap<string, readonly Candidate[]>;
   changeYears?: number;
@@ -70,6 +82,13 @@ export interface CompareInput {
   mode: CompareMode;
   sort: CompareSort;
 }
+
+/**
+ * A `B` status or a "Break in series" (`I11:`) note: the observation was produced
+ * differently from the one before it in its source's series.
+ */
+export const marksBreak = (raw: RawObservation): boolean =>
+  raw.obsStatus === 'B' || raw.notes.some((code) => code.startsWith('I11:'));
 
 /** Rounds away binary noise from a difference of decimal values (4.022 − 6.168). */
 const roundDelta = (delta: number): number => Math.round(delta * 1e6) / 1e6;
@@ -83,6 +102,35 @@ function choose(candidates: readonly Candidate[], mode: CompareMode): Candidate 
     if (!latest || candidate.raw.period > latest.raw.period) latest = candidate;
   }
   return latest;
+}
+
+/**
+ * The change from `base` to `current`. A break counts when it is marked on the
+ * current value or on a fetched row of the current value's source after the
+ * baseline; a marker on the baseline itself records a break before the span.
+ */
+function changeOf(
+  current: Candidate,
+  base: Candidate,
+  candidates: readonly Candidate[],
+  decode: CompareInput['decode'],
+  betweenRead: boolean,
+): Change {
+  const from = { ...decode(base.raw), value: base.raw.value };
+  const marked = candidates.some(
+    (candidate) =>
+      candidate.raw.source === current.raw.source &&
+      candidate.raw.period > base.raw.period &&
+      candidate.raw.period <= current.raw.period &&
+      marksBreak(candidate.raw),
+  );
+  return {
+    from,
+    delta: roundDelta(current.raw.value - base.raw.value),
+    sourceChanged: base.raw.source !== current.raw.source,
+    basisChanged: base.basis !== current.basis,
+    breakInSeries: marked || betweenRead ? marked : null,
+  };
 }
 
 const ORDER: Record<CompareSort, (a: ComparisonEntry, b: ComparisonEntry) => number> = {
@@ -114,19 +162,13 @@ export function compareAreas(input: CompareInput): Comparison {
       input.changeYears === undefined
         ? undefined
         : periodYearsBefore(chosen.raw.period, input.changeYears);
-    const from = fromPeriod ? candidates.find((c) => c.raw.period === fromPeriod) : undefined;
+    const base = fromPeriod ? candidates.find((c) => c.raw.period === fromPeriod) : undefined;
     const row = { ...input.decode(chosen.raw), value: chosen.raw.value };
     entries.push({
       rank: 0,
       row,
-      ...(from && fromPeriod
-        ? {
-            change: {
-              fromPeriod,
-              fromValue: from.raw.value,
-              delta: roundDelta(chosen.raw.value - from.raw.value),
-            },
-          }
+      ...(base
+        ? { change: changeOf(chosen, base, candidates, input.decode, input.betweenRead ?? true) }
         : {}),
     });
   }
@@ -153,9 +195,19 @@ export function compareAreas(input: CompareInput): Comparison {
 /** One area of a staged comparison. */
 export interface ComparisonRow extends Record<string, unknown> {
   basis: Basis;
+  change_basis_changed: boolean | null;
+  change_break_in_series: boolean | null;
   change_delta: number | null;
+  change_from_basis: Basis | null;
+  change_from_note_codes: string | null;
+  change_from_note_labels: string | null;
+  change_from_obs_status: string | null;
+  change_from_obs_status_label: string | null;
   change_from_period: string | null;
+  change_from_source: string | null;
+  change_from_source_label: string | null;
   change_from_value: number | null;
+  change_source_changed: boolean | null;
   dataset_id: string;
   note_codes: string | null;
   note_labels: string | null;
@@ -198,6 +250,16 @@ export const COMPARISON_COLUMNS: ColumnSchema[] = [
   { name: 'change_from_period', type: 'VARCHAR' },
   { name: 'change_from_value', type: 'DOUBLE' },
   { name: 'change_delta', type: 'DOUBLE' },
+  { name: 'change_from_source', type: 'VARCHAR' },
+  { name: 'change_from_source_label', type: 'VARCHAR' },
+  { name: 'change_from_basis', type: 'VARCHAR' },
+  { name: 'change_from_obs_status', type: 'VARCHAR' },
+  { name: 'change_from_obs_status_label', type: 'VARCHAR' },
+  { name: 'change_from_note_codes', type: 'VARCHAR' },
+  { name: 'change_from_note_labels', type: 'VARCHAR' },
+  { name: 'change_source_changed', type: 'BOOLEAN' },
+  { name: 'change_basis_changed', type: 'BOOLEAN' },
+  { name: 'change_break_in_series', type: 'BOOLEAN' },
 ];
 
 export function toComparisonRow(entry: ComparisonEntry): ComparisonRow {
@@ -221,8 +283,18 @@ export function toComparisonRow(entry: ComparisonEntry): ComparisonRow {
     obs_status_label: row.obs_status_label,
     note_codes: row.note_codes,
     note_labels: row.note_labels,
-    change_from_period: change?.fromPeriod ?? null,
-    change_from_value: change?.fromValue ?? null,
+    change_from_period: change?.from.period ?? null,
+    change_from_value: change?.from.value ?? null,
     change_delta: change?.delta ?? null,
+    change_from_source: change?.from.source ?? null,
+    change_from_source_label: change?.from.source_label ?? null,
+    change_from_basis: change?.from.basis ?? null,
+    change_from_obs_status: change?.from.obs_status ?? null,
+    change_from_obs_status_label: change?.from.obs_status_label ?? null,
+    change_from_note_codes: change?.from.note_codes ?? null,
+    change_from_note_labels: change?.from.note_labels ?? null,
+    change_source_changed: change?.sourceChanged ?? null,
+    change_basis_changed: change?.basisChanged ?? null,
+    change_break_in_series: change?.breakInSeries ?? null,
   };
 }

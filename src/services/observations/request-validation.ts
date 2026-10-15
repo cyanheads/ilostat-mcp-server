@@ -38,8 +38,10 @@ export function nameCodes(codes: readonly string[]): string {
 }
 
 /**
- * Dataset IDs to catalog datasets, deduplicated. A bare indicator code resolves
- * when it has exactly one frequency; with several, the failure lists them.
+ * Dataset IDs to catalog datasets, deduplicated, in request order. Every ID is
+ * checked: an unknown one fails `unknown_dataset`, its message naming up to ten
+ * and counting the rest (`data.datasetIds` lists them all). A bare indicator code
+ * resolves when it has exactly one frequency; with several, the failure lists them.
  */
 export function resolveDatasets(
   snapshot: CatalogSnapshot,
@@ -58,14 +60,14 @@ export function resolveDatasets(
       resolved.set(found.id, found);
     } else if (indicator) {
       ambiguous.push({ code: id, variants: indicator.datasets.map((variant) => variant.id) });
-    } else {
+    } else if (!unknown.includes(id)) {
       unknown.push(id);
     }
   }
   if (unknown.length > 0) {
     throw ctx.fail(
       'unknown_dataset',
-      `No ILOSTAT dataset has the ID ${inlineText(unknown.join(', '))}.`,
+      `No ILOSTAT dataset has the ID ${inlineText(nameCodes(unknown))}.`,
       { datasetIds: unknown, ...ctx.recoveryFor('unknown_dataset') },
     );
   }

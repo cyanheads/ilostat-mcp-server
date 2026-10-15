@@ -1,9 +1,11 @@
 /**
  * @fileoverview `ilostat_query_indicator` — observations for up to three ILOSTAT
- * datasets, filtered by area or area group, sex, breakdown codes, source, and
- * period. Every code is checked against the catalog dictionaries before the
- * request is sent; rows keep their source, status, notes, and basis, and a result
- * larger than the inline preview is staged in full as a `df_<id>` dataframe.
+ * datasets per call (up to 100 IDs are validated; those past the first three
+ * distinct datasets are returned unfetched), filtered by area or area group, sex,
+ * breakdown codes, source, and period. Every code is checked against the catalog
+ * dictionaries before the request is sent; rows keep their source, status, notes,
+ * and basis, and a result larger than the inline preview is staged in full as a
+ * `df_<id>` dataframe.
  * @module mcp-server/tools/definitions/query-indicator
  */
 
@@ -41,16 +43,20 @@ import { getIlostatServices } from '@/services/ilostat-services.js';
 import { legendOf, toInlineRow } from '@/services/observations/observation-rows.js';
 import {
   checkPeriodCombination,
+  DATASETS_PER_CALL,
   type QueryAppliedFilters,
   type QueryRequest,
 } from '@/services/observations/observation-service.js';
+
+/** Hard ceiling on dataset_ids, counted after the + and , split. */
+const MAX_DATASET_IDS = 100;
 
 const CodeMapSchema = (what: string) =>
   z.record(z.string(), z.string()).describe(`${what} code → label, for every code in rows.`);
 
 const AppliedFiltersSchema = z
   .object({
-    dataset_ids: z.array(z.string()).describe('Datasets requested.'),
+    dataset_ids: z.array(z.string()).describe('Datasets queried — at most 3.'),
     ref_areas: z.array(z.string()).optional().describe('Reference areas given, normalized.'),
     area_group: AreaGroupEchoSchema,
     ref_area_count: z
@@ -64,7 +70,13 @@ const AppliedFiltersSchema = z
     time: z.string().optional().describe('Exact period sent.'),
     time_from: z.string().optional().describe('First year sent.'),
     time_to: z.string().optional().describe('Last year sent.'),
-    latest_only: z.boolean().describe('Whether only the latest period per area was requested.'),
+    latest_only: z.boolean().describe("Whether only each series' latest period was requested."),
+    latest_mode: z
+      .enum(['per_series', 'latest_year'])
+      .optional()
+      .describe(
+        "How latest_only was answered: per_series, each series' own latest period; latest_year, the fallback to the latest period per area and dataset, which can miss a series that ends earlier. Absent without latest_only.",
+      ),
     source_selection: z
       .enum(['best', 'all', 'secondary'])
       .describe('Source selection applied (all when sources were given without one).'),
@@ -87,19 +99,45 @@ function renderAppliedFilters(filters: QueryAppliedFilters): string {
   if (filters.time_from) parts.push(`time_from ${filters.time_from}`);
   if (filters.time_to) parts.push(`time_to ${filters.time_to}`);
   parts.push(`latest_only ${filters.latest_only}`);
+  if (filters.latest_mode) parts.push(`latest_mode ${filters.latest_mode}`);
   parts.push(`source_selection ${filters.source_selection} (best_source=${filters.best_source})`);
   return `**Applied filters:** ${parts.join(' · ')}`;
+}
+
+/**
+ * Why a page stopped at the inline preview. A per-series `latest_only` result was
+ * read in full to find each series' latest period, so only its reduced rows are cut.
+ */
+function previewNotice(cause: 'canvas_off' | 'canvas_failed', shown: number, perSeries: boolean) {
+  const lead = `Showing the first ${shown} rows`;
+  if (perSeries) {
+    const why =
+      cause === 'canvas_off'
+        ? 'dataframes are off in this deployment'
+        : 'staging the full result as a dataframe failed';
+    return `${lead}: ${why}, so the latest-period rows past the inline preview are not returned. The full history was read to find each series' latest period. Narrow the request — fewer areas or specific sex/classif1 codes — to see all of them.`;
+  }
+  return cause === 'canvas_off'
+    ? `${lead}: dataframes are off in this deployment, so reading stopped at the inline preview and the rest of the result was not fetched. Narrow the request — fewer areas, a shorter time window, or specific sex/classif1 codes — to see all of it.`
+    : `${lead}: staging the full result as a dataframe failed, so reading stopped at the inline preview. Call again, or narrow the request to see all of it.`;
 }
 
 export const queryIndicatorTool = tool('ilostat_query_indicator', {
   title: 'Query ILOSTAT observations',
   description:
-    "Fetch observations for up to 3 ILOSTAT datasets, filtered by reference area or area group, sex, breakdown codes (classif1, classif2), source, and period. Rows keep their source, observation status, decoded notes, and a basis — reported, modelled_estimate, or projection — and the response echoes every filter applied, including the best-source default. Codes are checked against ILOSTAT's dictionaries before the request is sent: ilostat_list_reference lists valid codes and ilostat_describe_indicator lists the codes a dataset actually uses. A result larger than the inline preview is staged in full as a df_<id> dataframe for SQL through ilostat_dataframe_describe and ilostat_dataframe_query when this deployment enables dataframes. A request with no filters at all is refused when the dataset exceeds the row ceiling, and a filtered request that still exceeds it is refused with guidance to narrow it.",
+    "Fetch observations for up to 3 ILOSTAT datasets per call, filtered by reference area or area group, sex, breakdown codes (classif1, classif2), source, and period; datasets past the first 3 come back as remaining_dataset_ids for another call. Rows keep their source, observation status, decoded notes, and a basis — reported, modelled_estimate, or projection — and the response echoes every filter applied, including the best-source default. Codes are checked against ILOSTAT's dictionaries before the request is sent: ilostat_list_reference lists valid codes and ilostat_describe_indicator lists the codes a dataset actually uses. A result larger than the inline preview is staged in full as a df_<id> dataframe for SQL through ilostat_dataframe_describe and ilostat_dataframe_query when this deployment enables dataframes. A request with no filters at all is refused when the dataset exceeds the row ceiling, and a filtered request that still exceeds it is refused with guidance to narrow it.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    dataset_ids: splitIdArray(z.array(datasetIdInput()).min(1).max(3)).describe(
-      'One to three dataset IDs — an indicator code plus _A, _Q, or _M (UNE_DEAP_SEX_AGE_RT_A), as ilostat_search_indicators returns them. Case-insensitive; a DF_ prefix (the SDMX dataflow form) is stripped, a bare indicator code resolves when it has one frequency, and an element holding + or , joined IDs is split.',
+    dataset_ids: splitIdArray(
+      z
+        .array(datasetIdInput())
+        .min(1)
+        .max(MAX_DATASET_IDS, {
+          message: `dataset_ids holds at most ${MAX_DATASET_IDS} IDs; each call queries the first ${DATASETS_PER_CALL} distinct datasets and returns the rest as remaining_dataset_ids.`,
+        }),
+    ).describe(
+      `Dataset IDs, up to ${MAX_DATASET_IDS} — an indicator code plus _A, _Q, or _M (UNE_DEAP_SEX_AGE_RT_A), as ilostat_search_indicators returns them. Case-insensitive; a DF_ prefix (the SDMX dataflow form) is stripped, a bare indicator code resolves when it has one frequency, an element holding + or , joined IDs is split, and duplicates are dropped. Every ID is checked; the first ${DATASETS_PER_CALL} distinct datasets are queried and the rest come back as remaining_dataset_ids for another call.`,
     ),
     ref_areas: blankFreeArray(
       z.array(areaCodeInput(REF_AREA_MESSAGE)).max(300).optional(),
@@ -130,7 +168,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
       .boolean()
       .default(false)
       .describe(
-        'Only the latest period per reference area and dataset (the latest quarter or month on sub-annual datasets); combines with time_from/time_to.',
+        "Only each series' latest period — a series is one dataset, reference area, sex, classif1, and classif2 code — with every row at that period (one per source under source_selection all or secondary; the latest quarter or month on sub-annual datasets); combines with time_from/time_to. When the request's full history is too large or too slow to read in one call, it falls back to the latest period per area and dataset, which can miss a series that ends earlier; applied_filters.latest_mode says which ran, and the notice says so. time_from or classif1 narrow it back under; sex or fewer ref_areas alone may still read too much and fall back.",
       ),
     source_selection: blankAsUnset(z.enum(['best', 'all', 'secondary']).optional()).describe(
       'best (default): the preferred source per area and period; all: secondary sources too, each row flagged best_source; secondary: secondary sources only. Defaults to all when sources is set.',
@@ -138,11 +176,17 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
   }),
 
   output: z.object({
-    datasets: z.array(DatasetMetaSchema).describe('The requested datasets, in request order.'),
+    datasets: z.array(DatasetMetaSchema).describe('The queried datasets, in request order.'),
+    remaining_dataset_ids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `Requested datasets past the first ${DATASETS_PER_CALL}, as canonical IDs in request order; not fetched in this call. Pass them as dataset_ids with the same filters to get them. Absent when every requested dataset was queried.`,
+      ),
     row_count: z
       .number()
       .describe(
-        'Rows the request returned — exact when the result is inline or staged; when reading stopped early (truncated), the rows read.',
+        'Rows the request returned — exact unless reading stopped early at the inline preview (summary.complete false), when it counts the rows read.',
       ),
     rows: z
       .array(
@@ -209,7 +253,9 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
         basis_counts: BasisCountsSchema,
         complete: z
           .boolean()
-          .describe('False when reading stopped early, so the counts cover only the rows read.'),
+          .describe(
+            'False when reading stopped early at the inline preview, so the counts cover only the rows read.',
+          ),
       })
       .describe('Summary over every row read, not just the preview.'),
     dataframe: DataframeSchema.optional(),
@@ -222,7 +268,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
       .string()
       .optional()
       .describe(
-        'Filters that could not narrow a dataset, a unit the structure service could not supply, why nothing matched, where the full result is staged, or why reading stopped early.',
+        'Datasets left for another call, a latest_only fallback to the latest period per area and dataset, filters that could not narrow a dataset, a unit the structure service could not supply, why nothing matched, where the full result is staged, or why reading stopped early.',
       ),
     truncated: z
       .boolean()
@@ -236,7 +282,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     {
       reason: 'unknown_dataset',
       code: JsonRpcErrorCode.NotFound,
-      when: 'A dataset ID is not in the catalog, or a bare indicator code has several frequencies.',
+      when: 'Any dataset ID in dataset_ids, queried or not, is not in the catalog, or a bare indicator code has several frequencies.',
       recovery:
         'Call ilostat_search_indicators to find a dataset ID — an indicator code plus _A, _Q, or _M, such as UNE_DEAP_SEX_AGE_RT_A.',
       severity: 'notice',
@@ -356,11 +402,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     const notices = [...result.notices];
     if (outcome.kind === 'staged') notices.push(dataframeNotice(outcome.table));
     if (outcome.kind === 'preview') {
-      notices.push(
-        outcome.cause === 'canvas_off'
-          ? `Showing the first ${shown} rows: dataframes are off in this deployment, so reading stopped at the inline preview and the rest of the result was not fetched. Narrow the request — fewer areas, a shorter time window, or specific sex/classif1 codes — to see all of it.`
-          : `Showing the first ${shown} rows: staging the full result as a dataframe failed, so reading stopped at the inline preview. Call again, or narrow the request to see all of it.`,
-      );
+      notices.push(previewNotice(outcome.cause, shown, result.perSeries));
       ctx.enrich.truncated({ shown, cap: result.previewChars, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
@@ -373,6 +415,9 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
 
     return {
       datasets: result.datasets.map(datasetMeta),
+      ...(result.remainingDatasetIds.length > 0
+        ? { remaining_dataset_ids: result.remainingDatasetIds }
+        : {}),
       row_count: summary.rows,
       rows: outcome.rows.map(toInlineRow),
       legend: legendOf(outcome.rows, snapshot),
@@ -381,7 +426,8 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
         ...(summary.periodMin ? { period_min: summary.periodMin } : {}),
         ...(summary.periodMax ? { period_max: summary.periodMax } : {}),
         basis_counts: { ...summary.basisCounts },
-        complete: outcome.kind !== 'preview',
+        // A per-series result was read whole, so its counts are complete even when the preview cut its rows.
+        complete: outcome.kind !== 'preview' || result.perSeries,
       },
       ...(outcome.kind === 'staged' ? { dataframe: stagedDataframe(outcome.table) } : {}),
       attribution: ATTRIBUTION,
@@ -391,6 +437,12 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
   format: (result) => {
     const lines: string[] = [];
     for (const meta of result.datasets) lines.push(...renderDatasetMeta(meta, '##'), '');
+    if (result.remaining_dataset_ids) {
+      lines.push(
+        `**Remaining dataset IDs (not queried):** ${inlineText(result.remaining_dataset_ids.join(', '))}`,
+        '',
+      );
+    }
 
     const groups = Map.groupBy(result.rows, (row) =>
       [row.dataset_id, row.ref_area, row.sex, row.classif1, row.classif2, row.source]

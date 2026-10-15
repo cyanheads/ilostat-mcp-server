@@ -3,7 +3,9 @@
  * `ilostat-upstream.ts`: the catalog extras load into a snapshot, the
  * `/data/indicator` emulator filters a recorded CSV by exactly the URL the client
  * builds (a code filter skipping rows without that cell, and `id` split on a
- * literal `+` only, a `%2B`-joined one answered `400`, as upstream does), the
+ * literal `+` only, a `%2B`-joined one answered `400`, as upstream does) and
+ * emulates `latestyear`, the `/data/ref_area` emulator reproduces the recorded
+ * latest-year and `classif1` captures from the recorded full history, the
  * pull-based CSV body counts what was read and sees a cancel, and the in-memory
  * DuckDB canvas stages and queries rows without touching the network.
  * @module tests/helpers/ilostat-upstream.test
@@ -12,18 +14,24 @@
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, describe, expect, it } from 'vitest';
 import { CatalogService } from '@/services/catalog/catalog-service.js';
-import { type IndicatorDataParams, RplumberClient } from '@/services/rplumber/rplumber-client.js';
+import {
+  type IndicatorDataParams,
+  type RefAreaDataParams,
+  RplumberClient,
+} from '@/services/rplumber/rplumber-client.js';
 import {
   catalogRoutes,
   clientOptions,
   FIXED_NOW,
   filterIndicatorCsv,
+  filterRefAreaRows,
   fixtureText,
   INDICATOR_CSV,
   indicatorDataRoute,
   loadCatalogFixture,
   memoryCanvas,
   observationCatalogFixture,
+  type RawRow,
   RPLUMBER_ORIGIN,
   refAreaRows,
   streamedCsv,
@@ -126,6 +134,66 @@ describe('filterIndicatorCsv', () => {
     const body = filterIndicatorCsv(fixtureText(INDICATOR_CSV.uneDeap), url);
     expect(body.startsWith('﻿"ref_area"')).toBe(true);
     expect(body.trimEnd().split('\n')).toHaveLength(1);
+  });
+
+  it('applies latestyear=TRUE per area and indicator, dropping the youth series that ends earlier, as the recorded CHN capture does', () => {
+    const url = new URL(
+      urlBuilder.indicatorDataUrl({
+        datasetIds: ['UNE_DEAP_SEX_AGE_RT_A'],
+        refAreas: ['CHN'],
+        sex: ['SEX_T'],
+        classif1: ['AGE_YTHADULT_Y15-24', 'AGE_YTHADULT_YGE15'],
+        latestOnly: true,
+      }),
+    );
+    expect(filterIndicatorCsv(fixtureText(INDICATOR_CSV.chnUneDeap), url)).toBe(
+      fixtureText(INDICATOR_CSV.chnLatestTwoSlices),
+    );
+  });
+});
+
+describe('filterRefAreaRows', () => {
+  const REPORTED = [
+    'EAP_DWAP_SEX_AGE_RT',
+    'EMP_DWAP_SEX_AGE_RT',
+    'UNE_DEAP_SEX_AGE_RT',
+    'EIP_NEET_SEX_RT',
+    'EMP_NIFL_SEX_RT',
+    'EMP_TEMP_SEX_AGE_NB',
+  ];
+  const filtered = (params: Partial<RefAreaDataParams>) =>
+    filterRefAreaRows(
+      refAreaRows('chnReported'),
+      new URL(
+        urlBuilder.refAreaDataUrl({
+          area: 'CHN',
+          indicators: REPORTED,
+          latestOnly: false,
+          ...params,
+        }),
+      ),
+    );
+  const sorted = (rows: RawRow[]) => rows.map((row) => JSON.stringify(row)).sort();
+
+  it('reproduces the recorded latestyear capture from the recorded full history', () => {
+    expect(sorted(filtered({ latestOnly: true }))).toEqual(
+      sorted(refAreaRows('chnReportedLatest')),
+    );
+  });
+
+  it('drops the indicators without classif1 under a classif1 filter, as the recorded capture does', () => {
+    expect(sorted(filtered({ classif1: ['AGE_YTHADULT_YGE15', 'AGE_YTHADULT_Y15-24'] }))).toEqual(
+      sorted(refAreaRows('chnReportedClassif1')),
+    );
+  });
+
+  it('keeps only the requested indicators', () => {
+    const rows = filtered({ indicators: ['EIP_NEET_SEX_RT', 'EMP_NIFL_SEX_RT'] });
+    expect(rows.map((row) => [row.indicator, row.sex, row.time])).toEqual([
+      ['EIP_NEET_SEX_RT', 'SEX_T', '2000'],
+      ['EIP_NEET_SEX_RT', 'SEX_M', '2000'],
+      ['EIP_NEET_SEX_RT', 'SEX_F', '2000'],
+    ]);
   });
 });
 

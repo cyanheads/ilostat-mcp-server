@@ -1,0 +1,36 @@
+{
+  "source": [
+    {
+      "source": "BA:13047",
+      "source.label": "LFS - National Labour Force Survey",
+      "ref_area": "UGA"
+    },
+    { "source": "BB:268", "source.label": "HIES - National Household Survey", "ref_area": "UGA" },
+    { "source": "AA:1745", "source.label": "PC - Population Census", "ref_area": "UGA" },
+    { "source": "XA:2168", "source.label": "ILO - Modelled Estimates", "ref_area": "UGA" },
+    { "source": "BA:716", "source.label": "LFS - Labour Force Survey", "ref_area": "ARE" },
+    { "source": "AA:858", "source.label": "PC - Population Census", "ref_area": "ARE" }
+  ],
+  "ref_area": [
+    { "ref_area": "UGA", "ref_area.label": "Uganda" },
+    { "ref_area": "ARE", "ref_area.label": "United Arab Emirates" }
+  ],
+  "note_indicator": [
+    {
+      "note_indicator": "T5:1429",
+      "note_indicator.label": "Unemployment definition: Two criteria (not in employment and seeking)"
+    }
+  ],
+  "note_classif": [
+    { "note_classif": "C6:1059", "note_classif.label": "Nonstandard age group: Including age 14" }
+  ],
+  "note_source": [
+    {
+      "note_source": "S5:38",
+      "note_source.label": "Population coverage: Excluding both institutional population and armed forces and/or conscripts"
+    },
+    { "note_source": "T2:83", "note_source.label": "Age coverage - minimum age: 14 years old" },
+    { "note_source": "T3:94", "note_source.label": "Age coverage - maximum age: 64 years old" },
+    { "note_source": "S3:23", "note_source.label": "Data reference period: December" }
+  ]
+}

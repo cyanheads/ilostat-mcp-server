@@ -58,7 +58,7 @@ const ALLOWLIST: Record<string, readonly string[]> = {
     'type',
     'format',
   ],
-  '/data/ref_area': ['id', 'indicator', 'timeto', 'latestyear', 'format'],
+  '/data/ref_area': ['id', 'indicator', 'classif1', 'timeto', 'latestyear', 'format'],
 };
 
 const HEADER =
@@ -303,6 +303,26 @@ describe('/data/ref_area request', () => {
     );
     expect([...url.searchParams.keys()]).toEqual(['id', 'indicator', 'format']);
     expect(url.searchParams.get('id')).toBe('X01_A');
+  });
+
+  it('sends classif1 codes joined by a literal +, between indicator and timeto', () => {
+    const client = rplumber(createFetchMock([]).fetch);
+    const url = new URL(
+      client.refAreaDataUrl({
+        area: 'CHN',
+        indicators: ['EAP_DWAP_SEX_AGE_RT', 'UNE_DEAP_SEX_AGE_RT'],
+        classif1: ['AGE_YTHADULT_YGE15', 'AGE_YTHADULT_Y15-24'],
+        latestOnly: false,
+      }),
+    );
+    expect(url.search).toBe(
+      '?id=CHN_A&indicator=EAP_DWAP_SEX_AGE_RT+UNE_DEAP_SEX_AGE_RT&classif1=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24&format=.json',
+    );
+    for (const [name] of url.searchParams) expect(ALLOWLIST['/data/ref_area']).toContain(name);
+    expect(upstreamParams(url).get('classif1')?.split('+')).toEqual([
+      'AGE_YTHADULT_YGE15',
+      'AGE_YTHADULT_Y15-24',
+    ]);
   });
 
   it('normalizes the recorded JSON rows, sparse fields left absent', async () => {

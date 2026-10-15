@@ -1,12 +1,17 @@
 /**
  * @fileoverview Tests for the process-wide response cache: least-recently-used
  * eviction (a read or a re-store refreshes recency), TTL expiry exactly at the
- * TTL, a TTL of 0 disabling the cache, and the 5,000-row storage ceiling.
+ * TTL, a TTL of 0 disabling the cache, the 5,000-row storage ceiling, and the
+ * total-row budget across entries.
  * @module tests/services/observations/response-cache.test
  */
 
 import { describe, expect, it } from 'vitest';
-import { CACHEABLE_ROWS, ResponseCache } from '@/services/observations/response-cache.js';
+import {
+  CACHE_ROW_BUDGET,
+  CACHEABLE_ROWS,
+  ResponseCache,
+} from '@/services/observations/response-cache.js';
 import type { RawObservation } from '@/services/rplumber/types.js';
 import { guardNetwork } from '../../helpers/network-guard.js';
 
@@ -25,7 +30,7 @@ const rows = (count: number): RawObservation[] =>
   Array.from({ length: count }, (_, index) => row(String(1_000 + index)));
 
 /** A cache over a clock the test moves by hand. */
-function cache(options: { maxEntries?: number; ttlMs: number }) {
+function cache(options: { maxEntries?: number; rowBudget?: number; ttlMs: number }) {
   let now = Date.parse('2026-09-26T12:00:00Z');
   const instance = new ResponseCache({ ...options, now: () => new Date(now) });
   return {
@@ -98,6 +103,45 @@ describe('ResponseCache', () => {
     c.set('over-ceiling', rows(CACHEABLE_ROWS + 1));
     expect(c.get('at-ceiling')).toHaveLength(CACHEABLE_ROWS);
     expect(c.get('over-ceiling')).toBeUndefined();
+  });
+
+  it('evicts the oldest entries until the rows held fit the row budget', () => {
+    const { cache: c } = cache({ ttlMs: 60_000, rowBudget: 10 });
+    c.set('a', rows(4));
+    c.set('b', rows(4));
+    c.set('c', rows(4));
+    expect(c.get('a')).toBeUndefined();
+    expect(c.get('b')).toHaveLength(4);
+    expect(c.get('c')).toHaveLength(4);
+    // one entry larger than what remains evicts as many of the oldest as it takes
+    c.set('d', rows(9));
+    expect(c.get('b')).toBeUndefined();
+    expect(c.get('c')).toBeUndefined();
+    expect(c.get('d')).toHaveLength(9);
+  });
+
+  it('counts a re-stored or expired entry once against the row budget', () => {
+    const { cache: c, advance } = cache({ ttlMs: 1_000, rowBudget: 10 });
+    c.set('a', rows(4));
+    c.set('a', rows(4));
+    c.set('b', rows(4));
+    expect(c.get('a')).toHaveLength(4);
+    advance(1_000);
+    expect(c.get('a')).toBeUndefined();
+    expect(c.get('b')).toBeUndefined();
+    c.set('c', rows(10));
+    expect(c.get('c')).toHaveLength(10);
+  });
+
+  it(`holds at most ${CACHE_ROW_BUDGET.toLocaleString('en-US')} rows by default, ${CACHE_ROW_BUDGET / CACHEABLE_ROWS} full entries`, () => {
+    expect(CACHE_ROW_BUDGET).toBe(200_000);
+    const { cache: c } = cache({ ttlMs: 60_000 });
+    const full = rows(CACHEABLE_ROWS);
+    const count = CACHE_ROW_BUDGET / CACHEABLE_ROWS;
+    for (let index = 0; index <= count; index++) c.set(`entry-${index}`, full);
+    expect(c.get('entry-0')).toBeUndefined();
+    expect(c.get('entry-1')).toBe(full);
+    expect(c.get(`entry-${count}`)).toBe(full);
   });
 
   it('caches a zero-row response', () => {

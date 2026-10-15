@@ -251,6 +251,32 @@
         "source": "BB:7021",
         "source.label": "HIES - Household Budget Survey",
         "ref_area": "KEN"
+      },
+      {
+        "source": "BA:16044",
+        "source.label": "LFS - National Labour Survey",
+        "ref_area": "CHN"
+      },
+      {
+        "source": "EA:995",
+        "source.label": "OE - Official Estimates",
+        "ref_area": "CHN"
+      },
+      {
+        "source": "AA:992",
+        "source.label": "PC - Population Census",
+        "ref_area": "CHN"
+      },
+      {
+        "source": "XA:2070",
+        "source.label": "ILO - Modelled Estimates",
+        "ref_area": "CHN"
+      }
+    ],
+    "ref_area": [
+      {
+        "ref_area": "CHN",
+        "ref_area.label": "China"
       }
     ],
     "note_source": [

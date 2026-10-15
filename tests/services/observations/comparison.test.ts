@@ -16,6 +16,7 @@ import { CatalogService } from '@/services/catalog/catalog-service.js';
 import type { CatalogSnapshot } from '@/services/catalog/types.js';
 import {
   type Candidate,
+  type Change,
   COMPARISON_COLUMNS,
   type CompareInput,
   compareAreas,
@@ -66,11 +67,12 @@ beforeAll(async () => {
 
 const decode = (raw: RawObservation) => decodeObservation(raw, snapshot, resolved);
 
-/** The compare slice (SEX_T, 15+) of the recorded CSV, read through the client as the service reads it. */
+/** The compare slice (SEX_T, 15+ unless `params` names another) of a recorded CSV, read through the client as the service reads it. */
 async function upstreamRows(
   params: Omit<IndicatorDataParams, 'datasetIds'>,
+  csv: string = INDICATOR_CSV.uneDeap,
 ): Promise<RawObservation[]> {
-  const http = createFetchMock([indicatorDataRoute(fixtureText(INDICATOR_CSV.uneDeap))]);
+  const http = createFetchMock([indicatorDataRoute(fixtureText(csv))]);
   const client = new RplumberClient(clientOptions(http.fetch));
   try {
     const url = client.indicatorDataUrl({
@@ -112,6 +114,7 @@ const raw = (
   period: string,
   value: number,
   source = 'BA:453',
+  marks: Pick<RawObservation, 'notes' | 'obsStatus'> = { notes: [] },
 ): RawObservation => ({
   refArea,
   source,
@@ -119,9 +122,12 @@ const raw = (
   sex: 'SEX_T',
   classif1: 'AGE_YTHADULT_YGE15',
   period,
-  notes: [],
   value,
+  ...marks,
 });
+
+/** The status `B` and `I11:264` note upstream sets together on a break year. */
+const BREAK = { obsStatus: 'B', notes: ['I11:264', 'R1:3513'] };
 
 function compare(overrides: Partial<CompareInput> & Pick<CompareInput, 'areas' | 'candidates'>) {
   return compareAreas({
@@ -133,6 +139,18 @@ function compare(overrides: Partial<CompareInput> & Pick<CompareInput, 'areas' |
   });
 }
 
+/** A change's period, value, and delta. */
+const delta = (change: Change | undefined) =>
+  change && { fromPeriod: change.from.period, fromValue: change.from.value, delta: change.delta };
+
+/** A change's provenance flags. */
+const flags = (change: Change | undefined) =>
+  change && {
+    sourceChanged: change.sourceChanged,
+    basisChanged: change.basisChanged,
+    breakInSeries: change.breakInSeries,
+  };
+
 const summary = (result: ReturnType<typeof compareAreas>) =>
   result.entries.map(({ rank, row, change }) => ({
     rank,
@@ -140,7 +158,7 @@ const summary = (result: ReturnType<typeof compareAreas>) =>
     period: row.period,
     value: row.value,
     basis: row.basis,
-    ...(change ? { change } : {}),
+    ...(change ? { change: delta(change) } : {}),
   }));
 
 describe('latest mode', () => {
@@ -262,7 +280,11 @@ describe('period mode', () => {
       mode: { kind: 'period', period: '2024Q2' },
       changeYears: 1,
     });
-    expect(result.entries[0]?.change).toEqual({ fromPeriod: '2023Q2', fromValue: 3.6, delta: 0.5 });
+    expect(delta(result.entries[0]?.change)).toEqual({
+      fromPeriod: '2023Q2',
+      fromValue: 3.6,
+      delta: 0.5,
+    });
   });
 
   it('omits the change when the base period has no value', () => {
@@ -272,6 +294,181 @@ describe('period mode', () => {
       changeYears: 10,
     });
     expect(result.entries[0]).not.toHaveProperty('change');
+  });
+});
+
+describe('change provenance and breaks', () => {
+  /** The recorded youth series of `areas` from `from` to `to`, as period mode reads them. */
+  const youth = (areas: string[], from: number, to: number) =>
+    upstreamRows(
+      { refAreas: areas, classif1: ['AGE_YTHADULT_Y15-24'], timeFrom: from, timeTo: to },
+      INDICATOR_CSV.youthBreaks,
+    );
+  const periodChange = (
+    candidates: Map<string, Candidate[]>,
+    area: string,
+    period: string,
+    changeYears: number,
+  ) =>
+    compare({ areas: [area], candidates, mode: { kind: 'period', period }, changeYears }).entries[0]
+      ?.change;
+
+  it("keeps the baseline's source and notes, and flags a source change with no break of the current source", async () => {
+    // UGA 2024 is the census AA:1745 and 2021 is BA:13047; no row lies between them
+    const change = periodChange(candidatesOf(await youth(['UGA'], 2021, 2024)), 'UGA', '2024', 3);
+    expect(delta(change)).toEqual({ fromPeriod: '2021', fromValue: 5.154, delta: 5.974 });
+    expect(change?.from).toMatchObject({
+      source: 'BA:13047',
+      basis: 'reported',
+      obs_status: null,
+      note_codes: 'R1:3513',
+    });
+    expect(flags(change)).toEqual({
+      sourceChanged: true,
+      basisChanged: false,
+      breakInSeries: false,
+    });
+  });
+
+  it('flags a break marked between the endpoints on the same source', async () => {
+    // ARE BA:716 marks its break in 2017, inside 2016–2019; neither endpoint carries it
+    const change = periodChange(candidatesOf(await youth(['ARE'], 2016, 2019)), 'ARE', '2019', 3);
+    expect(delta(change)).toEqual({ fromPeriod: '2016', fromValue: 6.042, delta: 1.539 });
+    expect(change?.from).toMatchObject({ obs_status: null, note_codes: null });
+    expect(flags(change)).toEqual({
+      sourceChanged: false,
+      basisChanged: false,
+      breakInSeries: true,
+    });
+  });
+
+  it('does not count a break marked on the baseline alone: it came before the span', async () => {
+    const change = periodChange(candidatesOf(await youth(['ARE'], 2017, 2020)), 'ARE', '2020', 3);
+    expect(change?.from).toMatchObject({
+      period: '2017',
+      obs_status: 'B',
+      obs_status_label: 'Break in series',
+      note_codes: 'I11:264;R1:3513',
+    });
+    expect(change?.breakInSeries).toBe(false);
+  });
+
+  it('flags a break marked on the current value', () => {
+    const change = periodChange(
+      candidatesOf([raw('USA', '2025', 4.282, 'BA:453', BREAK), raw('USA', '2023', 3.638)]),
+      'USA',
+      '2025',
+      2,
+    );
+    expect(change?.breakInSeries).toBe(true);
+  });
+
+  it('reads a B status alone and an I11 note alone each as a break', () => {
+    for (const marks of [{ obsStatus: 'B', notes: [] }, { notes: ['I11:3256'] }]) {
+      const change = periodChange(
+        candidatesOf([
+          raw('USA', '2025', 4),
+          raw('USA', '2024', 4.1, 'BA:453', marks),
+          raw('USA', '2023', 3.6),
+        ]),
+        'USA',
+        '2025',
+        2,
+      );
+      expect(change?.breakInSeries).toBe(true);
+    }
+  });
+
+  it('ignores a break on another source between the endpoints', () => {
+    const change = periodChange(
+      candidatesOf([
+        raw('USA', '2025', 4),
+        raw('USA', '2024', 4.1, 'BB:999', BREAK),
+        raw('USA', '2023', 3.6),
+      ]),
+      'USA',
+      '2025',
+      2,
+    );
+    expect(flags(change)).toEqual({
+      sourceChanged: false,
+      basisChanged: false,
+      breakInSeries: false,
+    });
+  });
+
+  it('on a monthly series scans only after the baseline month up to the period month', () => {
+    const months = (marked: string) =>
+      candidatesOf(
+        ['2024M06', '2024M09', '2023M06', '2023M03', '2023M07'].map((period) =>
+          raw('USA', period, 4, 'BA:453', period === marked ? BREAK : { notes: [] }),
+        ),
+      );
+    // 2023M03 precedes the baseline and 2024M09 follows the period, though both share their years
+    for (const marked of ['2023M03', '2024M09', '2023M06']) {
+      expect(periodChange(months(marked), 'USA', '2024M06', 1)?.breakInSeries).toBe(false);
+    }
+    expect(periodChange(months('2023M07'), 'USA', '2024M06', 1)?.breakInSeries).toBe(true);
+    expect(periodChange(months('2024M06'), 'USA', '2024M06', 1)?.breakInSeries).toBe(true);
+  });
+
+  it('flags a basis change: a modelled baseline against a projection', () => {
+    const change = periodChange(
+      candidatesOf([raw('X01', '2026', 12.304, 'XA:8405'), raw('X01', '2023', 12.272, 'XA:8405')]),
+      'X01',
+      '2026',
+      3,
+    );
+    expect(change?.from.basis).toBe('modelled_estimate');
+    expect(flags(change)).toEqual({
+      sourceChanged: false,
+      basisChanged: true,
+      breakInSeries: false,
+    });
+  });
+
+  it('with only the endpoints read, keeps a break the current value marks and leaves the rest unknown', () => {
+    const endpoints = (marks: Pick<RawObservation, 'notes' | 'obsStatus'>) =>
+      compare({
+        areas: ['USA'],
+        candidates: candidatesOf([raw('USA', '2025', 4, 'BA:453', marks), raw('USA', '2023', 3.6)]),
+        mode: { kind: 'period', period: '2025' },
+        changeYears: 2,
+        betweenRead: false,
+      }).entries[0];
+    expect(endpoints(BREAK)?.change?.breakInSeries).toBe(true);
+    const unmarked = endpoints({ notes: [] });
+    expect(unmarked?.change?.breakInSeries).toBeNull();
+    // The staged column carries the unknown as a null, beside the endpoint flags still set
+    expect(unmarked && toComparisonRow(unmarked)).toMatchObject({
+      change_source_changed: false,
+      change_basis_changed: false,
+      change_break_in_series: null,
+    });
+  });
+
+  it('applies the same scan in latest mode, over the rows the window fetched', () => {
+    const [entry] = compare({
+      areas: ['USA'],
+      candidates: candidatesOf([
+        raw('USA', '2025', 4),
+        raw('USA', '2024', 4.1, 'BA:453', BREAK),
+        raw('USA', '2022', 3.6),
+      ]),
+      changeYears: 3,
+    }).entries;
+    expect(entry?.change?.breakInSeries).toBe(true);
+  });
+
+  it('leaves comparability counting the current values only', async () => {
+    const result = compare({
+      areas: ['UGA'],
+      candidates: candidatesOf(await youth(['UGA'], 2021, 2024)),
+      mode: { kind: 'period', period: '2024' },
+      changeYears: 3,
+    });
+    expect(result.distinctSources).toBe(1);
+    expect(result.basisCounts).toEqual({ reported: 1, modelled_estimate: 0, projection: 0 });
   });
 });
 
@@ -360,6 +557,16 @@ describe('toComparisonRow', () => {
       change_from_period: null,
       change_from_value: null,
       change_delta: null,
+      change_from_source: null,
+      change_from_source_label: null,
+      change_from_basis: null,
+      change_from_obs_status: null,
+      change_from_obs_status_label: null,
+      change_from_note_codes: null,
+      change_from_note_labels: null,
+      change_source_changed: null,
+      change_basis_changed: null,
+      change_break_in_series: null,
     });
   });
 
@@ -380,6 +587,32 @@ describe('toComparisonRow', () => {
       change_from_period: '2014',
       change_from_value: 5.956,
       change_delta: -1.073,
+    });
+  });
+
+  it("carries the baseline's provenance as codes and labels, and the three flags", () => {
+    const [entry] = compare({
+      areas: ['USA'],
+      candidates: candidatesOf([
+        raw('USA', '2025', 4.282, 'BA:453', BREAK),
+        raw('USA', '2015', 5.3, 'XA:2174', { obsStatus: 'U', notes: ['T2:85', 'R1:3513'] }),
+      ]),
+      changeYears: 10,
+    }).entries;
+    if (!entry) throw new Error('expected an entry');
+    expect(toComparisonRow(entry)).toMatchObject({
+      change_from_period: '2015',
+      change_from_source: 'XA:2174',
+      change_from_source_label: 'ILO - Modelled Estimates',
+      change_from_basis: 'modelled_estimate',
+      change_from_obs_status: 'U',
+      change_from_obs_status_label: 'Unreliable',
+      change_from_note_codes: 'T2:85;R1:3513',
+      change_from_note_labels:
+        'Age coverage - minimum age: 16 years old | Repository: ILO-STATISTICS - Micro data processing',
+      change_source_changed: true,
+      change_basis_changed: true,
+      change_break_in_series: true,
     });
   });
 });

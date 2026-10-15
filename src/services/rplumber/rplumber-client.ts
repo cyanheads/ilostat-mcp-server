@@ -1,7 +1,7 @@
 /**
  * @fileoverview Client for rplumber.ilo.org, the ILOSTAT data path: the two tables
  * of contents, the code dictionaries, filtered observation downloads
- * (`/data/indicator`, streamed CSV), and per-area latest values (`/data/ref_area`,
+ * (`/data/indicator`, streamed CSV), and per-area headline values (`/data/ref_area`,
  * JSON). Upstream silently ignores unknown query parameters and reads a blank one
  * as "all", so each endpoint sends only its explicit parameter allowlist and never
  * a blank value. Every response arrives as `application/octet-stream` whatever
@@ -65,7 +65,7 @@ const ENDPOINT_PARAMS = {
     'type',
     'format',
   ],
-  '/data/ref_area': ['id', 'indicator', 'timeto', 'latestyear', 'format'],
+  '/data/ref_area': ['id', 'indicator', 'classif1', 'timeto', 'latestyear', 'format'],
 } as const satisfies Record<string, readonly string[]>;
 
 type Endpoint = keyof typeof ENDPOINT_PARAMS;
@@ -82,8 +82,9 @@ const MIB = 1024 * 1024;
 
 /**
  * Body caps, set well above the live sizes: the tables of contents and dictionaries
- * run to 1.4 MiB at most (the indicator dictionary), and `/data/ref_area` to 3.2 MiB
- * for the full history of the profile's headline indicators. A catalog body past
+ * run to 1.4 MiB at most (the indicator dictionary), and `/data/ref_area` to 0.35 MiB
+ * for the profile's reported full history with `classif1` limited to the headline
+ * codes (USA; 4.3 MiB unlimited). A catalog body past
  * its cap takes every catalog tool down until a release, so that cap is the
  * loosest. A `/data/indicator` row is 93–96 bytes live; the stream's cap is ten
  * times that for each row the caller may read.
@@ -117,6 +118,8 @@ export interface IndicatorDataParams {
 /** Filters for one `/data/ref_area` call. */
 export interface RefAreaDataParams {
   area: string;
+  /** Unlike `/data/indicator`, this endpoint drops every row without a `classif1` — whole indicators included — when set. */
+  classif1?: readonly string[];
   /** Indicator codes without the frequency suffix — a suffixed dataset ID silently returns `[]`. */
   indicators: readonly string[];
   latestOnly: boolean;
@@ -368,6 +371,7 @@ export class RplumberClient {
     return buildUrl('/data/ref_area', {
       id: `${params.area}_A`,
       indicator: params.indicators,
+      classif1: params.classif1,
       timeto: params.timeTo?.toString(),
       latestyear: params.latestOnly ? 'TRUE' : undefined,
       format: '.json',

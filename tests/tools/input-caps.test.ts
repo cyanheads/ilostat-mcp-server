@@ -1,8 +1,8 @@
 /**
- * @fileoverview Length caps on every free-text and code string input: each
- * field accepts a value at its cap and rejects one character more as invalid
- * arguments naming the field, before the handler runs, so no upstream call or
- * catalog load is made.
+ * @fileoverview Length caps on every free-text and code string input, and the
+ * hard ceilings on the page-size `limit` inputs: each field accepts a value at its
+ * cap and rejects one character (or one unit) more as invalid arguments naming the
+ * field, before the handler runs, so no upstream call or catalog load is made.
  * @module tests/tools/input-caps.test
  */
 
@@ -43,6 +43,7 @@ const CASES: CapCase[] = [
     max: 32,
     args: (breakdown) => ({ breakdown }),
   },
+  { tool: searchIndicatorsTool, path: ['measure'], max: 32, args: (measure) => ({ measure }) },
   { tool: searchIndicatorsTool, path: ['cursor'], max: 256, args: (cursor) => ({ cursor }) },
   { tool: listReferenceTool, path: ['filter'], max: 200, args: (filter) => ({ ...TOPIC, filter }) },
   {
@@ -131,6 +132,79 @@ describe.each(CASES.map((entry) => ({ ...entry, field: entry.path.join('.') })))
         .map((block) => (block.type === 'text' ? block.text : ''))
         .join('');
       expect(text).toContain(`${field}: Too big: expected string to have <=${max} characters`);
+    });
+  },
+);
+
+describe('ilostat_query_indicator dataset_ids (batch ceiling 100)', () => {
+  const ids = (count: number) => Array.from({ length: count }, () => UNE);
+
+  it('accepts 100 IDs, counted after the + and , split', () => {
+    expect(queryIndicatorTool.input.safeParse({ dataset_ids: ids(100) }).success).toBe(true);
+    const joined = Array.from({ length: 50 }, () => `${UNE}+${UNE}`);
+    expect(queryIndicatorTool.input.safeParse({ dataset_ids: joined }).success).toBe(true);
+  });
+
+  it.each([
+    ['101 IDs', ids(101)],
+    ['51 joined pairs (102 IDs)', Array.from({ length: 51 }, () => `${UNE},${UNE}`)],
+  ])(
+    'rejects %s as invalid arguments naming the field, on both surfaces',
+    async (_label, dataset_ids) => {
+      const result = await runToolContract(queryIndicatorTool, { dataset_ids } as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: {
+            reason: 'invalid_arguments',
+            issues: [{ code: 'too_big', maximum: 100, path: ['dataset_ids'] }],
+          },
+        },
+      });
+      const text = result.content
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('');
+      expect(text).toContain(
+        'dataset_ids: dataset_ids holds at most 100 IDs; each call queries the first 3 distinct datasets and returns the rest as remaining_dataset_ids.',
+      );
+    },
+  );
+});
+
+/** Page-size limits: a value past the page cap is applied as the cap, up to a hard ceiling. */
+const LIMIT_CEILINGS = [
+  { tool: searchIndicatorsTool, args: {}, cap: 50, ceiling: 1_000 },
+  { tool: listReferenceTool, args: TOPIC, cap: 500, ceiling: 10_000 },
+] as const;
+
+describe.each(LIMIT_CEILINGS)(
+  '$tool.name limit (page cap $cap, ceiling $ceiling)',
+  ({ tool, args, cap, ceiling }) => {
+    it('accepts the ceiling, to be applied as the page cap', () => {
+      const parsed = tool.input.safeParse({ ...args, limit: ceiling });
+      expect(parsed.success).toBe(true);
+      expect(tool.input.safeParse({ ...args, limit: cap + 1 }).success).toBe(true);
+    });
+
+    it('rejects one more than the ceiling as invalid arguments naming the field, on both surfaces', async () => {
+      const result = await runToolContract(tool, { ...args, limit: ceiling + 1 } as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: {
+            reason: 'invalid_arguments',
+            issues: [{ code: 'too_big', maximum: ceiling, path: ['limit'] }],
+          },
+        },
+      });
+      const text = result.content
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('');
+      expect(text).toContain(
+        `limit must be at most ${ceiling.toLocaleString('en-US')}; any value past the page cap (${cap}) is applied as that cap.`,
+      );
     });
   },
 );

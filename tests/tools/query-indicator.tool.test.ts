@@ -25,6 +25,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { queryIndicatorTool } from '@/mcp-server/tools/definitions/query-indicator.tool.js';
 import type { DataframeMeta } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeIlostatServices } from '@/services/ilostat-services.js';
+import type { FetchFn } from '@/services/upstream/upstream-http.js';
 import {
   CATALOG_UNAVAILABLE_RECOVERY,
   type CatalogFixture,
@@ -32,7 +33,10 @@ import {
   challengePage,
   csvResponse,
   FAST_PACING,
+  FAST_TIMEOUTS,
   FIXED_NOW,
+  faultyCanvas,
+  filterIndicatorCsv,
   fixtureText,
   INDICATOR_CSV,
   indicatorDataRoute,
@@ -41,6 +45,7 @@ import {
   memoryCanvas,
   observationCatalogFixture,
   probeRoute,
+  RPLUMBER_ORIGIN,
   retiredDatasetResponse,
   SDMX_422_SHORT_KEY,
   sdmxText,
@@ -514,11 +519,10 @@ describe('filters', () => {
       sex: ['total'],
       latest_only: true,
     });
-    expect(sentParams(wired)).toMatchObject({
-      ref_area: 'USA+KEN',
-      sex: 'SEX_T',
-      latestyear: 'TRUE',
-    });
+    const sent = sentParams(wired);
+    expect(sent).toMatchObject({ ref_area: 'USA+KEN', sex: 'SEX_T' });
+    // latest_only reduces the full history per series, so upstream's latest-year filter is not sent
+    expect(sent).not.toHaveProperty('latestyear');
     expect(enrichment.applied_filters).toMatchObject({
       ref_areas: ['USA'],
       area_group: { code: 'X06', label: 'Africa', member_count: 1 },
@@ -611,6 +615,657 @@ describe('filters', () => {
     const { enrichment } = await query({ dataset_ids: [dataset], ref_areas: ['USA'], time });
     expect(sentParams(wired).time).toBe(sent);
     expect(enrichment.applied_filters).toMatchObject({ time: sent });
+  });
+});
+
+describe('dataset batch', () => {
+  const EMP_TEMP = 'EMP_TEMP_SEX_AGE_NB_A';
+  const EAP_DWAP = 'EAP_DWAP_SEX_AGE_RT_A';
+  const EMP_DWAP = 'EMP_DWAP_SEX_AGE_RT_A';
+  const deferredNotice = (named: string, count: number) =>
+    `Queried the first 3 distinct datasets; ${count} more ${count === 1 ? 'was' : 'were'} not fetched: ${named}. Call ilostat_query_indicator again with dataset_ids set to remaining_dataset_ids and the same filters to get ${count === 1 ? 'it' : 'them'}.`;
+
+  it('queries the first three of four distinct datasets and names the fourth on both surfaces', async () => {
+    const wired = wire();
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE, EMP_TEMP, EAP_DWAP, EMP_DWAP],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      classif1: ['AGE_YTHADULT_YGE15'],
+      time: '2023',
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.remaining_dataset_ids).toEqual([EMP_DWAP]);
+    expect(structured.datasets.map((dataset) => dataset.dataset_id)).toEqual([
+      UNE,
+      EMP_TEMP,
+      EAP_DWAP,
+    ]);
+    expect(structured.applied_filters).toMatchObject({ dataset_ids: [UNE, EMP_TEMP, EAP_DWAP] });
+    expect(structured.rows.map((row) => [row.dataset_id, row.period, row.value])).toEqual([
+      [UNE, '2023', 3.638],
+    ]);
+    const notice = deferredNotice(EMP_DWAP, 1);
+    expect(structured.notice).toContain(notice);
+    // one request, for the queried three only
+    expect(sentParams(wired).id).toBe(`${UNE}+${EMP_TEMP}+${EAP_DWAP}`);
+    const text = contentText(result);
+    expect(text).toContain(`**Remaining dataset IDs (not queried):** ${EMP_DWAP}`);
+    expect(text).toContain(notice);
+    expect(text).toContain(`**Applied filters:** datasets ${UNE}, ${EMP_TEMP}, ${EAP_DWAP} ·`);
+  });
+
+  it('dedupes before counting, so four spellings of two datasets defer nothing', async () => {
+    const wired = wire();
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE, 'une_deap_sex_age_rt_a', `DF_${UNE}`, EMP_TEMP],
+      ref_areas: ['USA'],
+      time: '2023',
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured).not.toHaveProperty('remaining_dataset_ids');
+    expect(structured.applied_filters).toMatchObject({ dataset_ids: [UNE, EMP_TEMP] });
+    expect(structured.applied_filters).not.toHaveProperty('latest_mode');
+    expect(String(structured.notice ?? '')).not.toContain('not fetched');
+    expect(contentText(result)).not.toContain('Remaining dataset IDs');
+    expect(sentParams(wired).id).toBe(`${UNE}+${EMP_TEMP}`);
+  });
+
+  it('returns the remainder as canonical IDs in request order, deduplicated, across joined elements', async () => {
+    const wired = wire();
+    const { result, enrichment } = await query({
+      dataset_ids: [
+        `${UNE}+df_eap_dwap_sex_age_rt_a`,
+        'emp_dwap_sex_age_rt',
+        `lap_2gdp_noc_rt_a,${UNE}`,
+        'DF_EMP_TEMP_SEX_AGE_NB_A',
+        'lap_2gdp_noc_rt',
+      ],
+      ref_areas: ['KEN'],
+    });
+    expect(result.remaining_dataset_ids).toEqual(['LAP_2GDP_NOC_RT_A', EMP_TEMP]);
+    expect(enrichment.applied_filters).toMatchObject({ dataset_ids: [UNE, EAP_DWAP, EMP_DWAP] });
+    expect(enrichment.notice).toContain(deferredNotice(`LAP_2GDP_NOC_RT_A, ${EMP_TEMP}`, 2));
+    expect(sentParams(wired).id).toBe(`${UNE}+${EAP_DWAP}+${EMP_DWAP}`);
+  });
+
+  it('runs the unfiltered preflight over the queried datasets only', async () => {
+    // SDG_0552 1,830 + LAP_2GDP 6,329 + POP_2POP 34,440 = 42,599 rows; with UNE_DEAP it would be 364,827
+    const wired = wire({ observations: { maxRows: 50_000 } });
+    const { result } = await query({
+      dataset_ids: ['SDG_0552_NOC_RT_A', 'LAP_2GDP_NOC_RT_A', 'POP_2POP_SEX_NB_A', UNE],
+    });
+    expect(result.remaining_dataset_ids).toEqual([UNE]);
+    expect(sentParams(wired).id).toBe('SDG_0552_NOC_RT_A+LAP_2GDP_NOC_RT_A+POP_2POP_SEX_NB_A');
+  });
+
+  it('stages provenance for the queried datasets only', async () => {
+    const canvas = canvasOn();
+    wire({ canvas, observations: { previewChars: 1_000 } });
+    const ctx = newContext();
+    const { result } = await query(
+      { dataset_ids: [UNE, EMP_TEMP, EAP_DWAP, EMP_DWAP], ref_areas: ['USA', 'KEN'] },
+      ctx,
+    );
+    const name = result.dataframe?.name ?? '';
+    expect(name).toMatch(/^df_/);
+    const meta = await ctx.state.get<DataframeMeta>(`df-meta/${name}`);
+    expect(meta?.queryParams).toMatchObject({ dataset_ids: [UNE, EMP_TEMP, EAP_DWAP] });
+    expect(meta?.datasets.map((dataset) => dataset.datasetId)).toEqual([UNE, EMP_TEMP, EAP_DWAP]);
+    expect(result.remaining_dataset_ids).toEqual([EMP_DWAP]);
+  });
+
+  it('fails unknown_dataset for an unknown ID in fifth place, before any upstream request', async () => {
+    const wired = wire();
+    const error = await failure({
+      dataset_ids: [UNE, EMP_TEMP, EAP_DWAP, EMP_DWAP, 'NOPE_NOT_REAL_A'],
+    });
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'unknown_dataset',
+      datasetIds: ['NOPE_NOT_REAL_A'],
+    });
+    expect(dataUrls(wired)).toHaveLength(0);
+  });
+
+  it('fails a several-frequency bare code in fifth place as unknown_dataset', async () => {
+    const wired = wire();
+    const error = await failure({
+      dataset_ids: [UNE, EMP_TEMP, EAP_DWAP, EMP_DWAP, 'une_deap_sex_age_rt'],
+    });
+    expect(error.data).toMatchObject({
+      reason: 'unknown_dataset',
+      indicator: 'UNE_DEAP_SEX_AGE_RT',
+    });
+    expect(dataUrls(wired)).toHaveLength(0);
+  });
+
+  it('checks a sub-annual time against a deferred dataset too, before any upstream request', async () => {
+    const fixture = observationCatalogFixture();
+    fixture.indicatorToc.push({
+      ...tocRow(fixture, 'EMP_TEMP_SEX_INS_DSB_NB_Q'),
+      id: 'LUU_XLU2_SEX_RT_Q',
+      indicator: 'LUU_XLU2_SEX_RT',
+      'indicator.label':
+        'Combined rate of unemployment and time-related underemployment by sex (%)',
+    });
+    const wired = wire({ fixture });
+    const error = await failure({
+      dataset_ids: ['UNE_DEAP_SEX_AGE_RT_Q', 'EMP_TEMP_SEX_INS_DSB_NB_Q', 'LUU_XLU2_SEX_RT_Q', UNE],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      time: '2024Q1',
+    });
+    expect(error.data).toMatchObject({ reason: 'invalid_period' });
+    expect(error.message).toBe(
+      `time 2024Q1 is a quarterly period, but ${UNE} (A) is not at that frequency.`,
+    );
+    expect(dataUrls(wired)).toHaveLength(0);
+  });
+
+  it('checks an aggregate against a deferred dataset too, before any upstream request', async () => {
+    const wired = wire();
+    const error = await failure({
+      dataset_ids: [UNE, EMP_DWAP, EAP_DWAP, EMP_TEMP],
+      ref_areas: ['X01'],
+    });
+    expect(error.data).toMatchObject({ reason: 'aggregates_unavailable', datasetIds: [EMP_TEMP] });
+    expect(dataUrls(wired)).toHaveLength(0);
+  });
+
+  it('names at most ten unknown IDs in the message and counts the rest, every one kept in data', async () => {
+    wire();
+    const unknown = Array.from({ length: 12 }, (_, index) => `NOPE_${index}_A`);
+    const error = await failure({ dataset_ids: [UNE, ...unknown] });
+    expect(error.message).toBe(
+      `No ILOSTAT dataset has the ID ${unknown.slice(0, 10).join(', ')} and 2 more.`,
+    );
+    expect(error.data).toMatchObject({ reason: 'unknown_dataset', datasetIds: unknown });
+  });
+});
+
+describe('latest_only', () => {
+  /** CHN's recorded full history behind the emulator: 133 rows over 84 series ending in 2000, 2021, and 2022. */
+  const CHN_ROUTE = indicatorDataRoute(fixtureText(INDICATOR_CSV.chnUneDeap));
+  const LATEST_YEAR_NOTICE =
+    "latest_only fell back to ILOSTAT's latest period per area and dataset, because this request's full history is too large or too slow to read series by series in one call: a series (one sex, classif1, or classif2 code) whose data ends before its dataset's newest period in an area may be missing. Narrow with time_from or classif1 to get each series' own latest period; sex or fewer ref_areas alone may still read too much and fall back again.";
+  const LATEST_TIMEOUT_HINT =
+    'Narrow the request with time_from or classif1, then call again; sex or fewer ref_areas alone may still read too much.';
+  const PER_SERIES_PREVIEW_NOTICE = (shown: number, why: string) =>
+    `Showing the first ${shown} rows: ${why}, so the latest-period rows past the inline preview are not returned. The full history was read to find each series' latest period. Narrow the request — fewer areas or specific sex/classif1 codes — to see all of them.`;
+  const TWO_SLICES = {
+    dataset_ids: [UNE],
+    ref_areas: ['CHN'],
+    sex: ['SEX_T'],
+    classif1: ['AGE_YTHADULT_Y15-24', 'AGE_YTHADULT_YGE15'],
+    latest_only: true,
+  };
+  /** One USA SEX_T 15+ row per year from 1000, the shape of the recorded bodies. */
+  const usaYear = (index: number) =>
+    `"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","${1000 + index}",${index % 10},`;
+  const isLatestYear = (request: Request) =>
+    upstreamParams(new URL(request.url)).get('latestyear') === 'TRUE';
+  /** `/data/indicator`: the recorded USA rows behind the emulator under `latestyear=TRUE`, `full` otherwise. */
+  const fullOrLatest = (full: () => Response): FetchMockRoute => ({
+    method: 'GET',
+    match: (request) => isIndicatorData(request),
+    respond: (request) =>
+      isLatestYear(request)
+        ? csvResponse(filterIndicatorCsv(UNE_CSV, new URL(request.url)))
+        : full(),
+  });
+
+  /**
+   * {@link wire} with every `/data/indicator` request answered by `respond`, which is
+   * handed the request's own abort signal — a body built on it fails with the abort
+   * reason, as a real fetch body does. Other requests go to the fixture routes.
+   */
+  function wireIndicatorFetch(
+    respond: (url: URL, signal: AbortSignal) => Response,
+    options: WireOptions = {},
+  ) {
+    const urls: URL[] = [];
+    let fixtures: FetchFn | undefined;
+    const fetch: FetchFn = (input, init) => {
+      const url = new URL(input);
+      if (url.origin !== RPLUMBER_ORIGIN || url.pathname !== '/data/indicator') {
+        if (!fixtures) throw new Error('fetch before wiring');
+        return fixtures(input, init);
+      }
+      urls.push(url);
+      return Promise.resolve(respond(url, init?.signal ?? new AbortController().signal));
+    };
+    const wired = wire({ ...options, rplumber: { ...options.rplumber, fetch } });
+    fixtures = wired.http.fetch;
+    return urls;
+  }
+
+  /** A 200 whose body sends the CSV header, then nothing until its request is aborted. */
+  function hangingBody(signal: AbortSignal): Response {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`${CSV_HEADER}\n`));
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+  }
+
+  const latestYearSent = (url: URL) => upstreamParams(url).get('latestyear') === 'TRUE';
+  /** Stall and body timeouts past the test timeout, so they never end a hanging read in a timer's place. */
+  const SLOW_BODY_TIMEOUTS = { ...FAST_TIMEOUTS, stallMs: 60_000, bodyMs: 60_000 };
+
+  it("keeps each slice's own latest period — youth 2021 beside 15+ 2022 — in one request, on both surfaces", async () => {
+    const wired = wire({ routes: [CHN_ROUTE] });
+    const result = await runToolContract(queryIndicatorTool, TWO_SLICES);
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(
+      structured.rows.map(({ classif1, period, value, source, basis }) => ({
+        classif1,
+        period,
+        value,
+        source,
+        basis,
+      })),
+    ).toEqual([
+      {
+        classif1: 'AGE_YTHADULT_YGE15',
+        period: '2022',
+        value: 4.569,
+        source: 'BA:16044',
+        basis: 'reported',
+      },
+      {
+        classif1: 'AGE_YTHADULT_Y15-24',
+        period: '2021',
+        value: 14.25,
+        source: 'BA:16044',
+        basis: 'reported',
+      },
+    ]);
+    expect(structured).toMatchObject({
+      row_count: 2,
+      summary: { period_min: '2021', period_max: '2022', complete: true },
+    });
+    expect(structured).not.toHaveProperty('notice');
+    expect(structured.applied_filters).toMatchObject({
+      latest_only: true,
+      latest_mode: 'per_series',
+    });
+    const sent = sentParams(wired);
+    expect(sent).not.toHaveProperty('latestyear');
+    expect(sent).toMatchObject({ ref_area: 'CHN', sex: 'SEX_T' });
+    const text = contentText(result);
+    expect(text).toContain('latest_only true · latest_mode per_series ·');
+    expect(text).toContain(
+      '#### UNE_DEAP_SEX_AGE_RT_A · CHN · SEX_T · AGE_YTHADULT_Y15-24 · BA:16044',
+    );
+    expect(text).toContain('- 2021: 14.25');
+    expect(text).toContain('- 2022: 4.569');
+    expect(text).not.toContain(LATEST_YEAR_NOTICE);
+  });
+
+  it('returns one row per series with no breakdown filter: all 84 of CHN, each at its own latest year', async () => {
+    // a preview large enough to hold all 84 rows inline
+    const wired = wire({ routes: [CHN_ROUTE], observations: { previewChars: 200_000 } });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['CHN'],
+      latest_only: true,
+    });
+    const seriesOf = (row: { sex?: string | undefined; classif1?: string | undefined }) =>
+      `${row.sex}|${row.classif1}`;
+    expect(result.row_count).toBe(84);
+    expect(new Set(result.rows.map(seriesOf)).size).toBe(84);
+    // the recorded history: 82 series end in 2000, youth total in 2021, 15+ total in 2022
+    const byYear = Map.groupBy(result.rows, (row) => row.period);
+    expect(byYear.get('2000')).toHaveLength(82);
+    expect(byYear.get('2021')?.map(seriesOf)).toEqual(['SEX_T|AGE_YTHADULT_Y15-24']);
+    expect(byYear.get('2022')?.map(seriesOf)).toEqual(['SEX_T|AGE_YTHADULT_YGE15']);
+    expect(result.rows.find((row) => seriesOf(row) === 'SEX_F|AGE_YTHADULT_YGE15')).toMatchObject({
+      period: '2000',
+      value: 3.841,
+      source: 'AA:992',
+    });
+    expect(enrichment.notice).toBeUndefined();
+    expect(sentParams(wired)).not.toHaveProperty('latestyear');
+  });
+
+  it('keeps every source at the latest period under source_selection all, bounded by time_to', async () => {
+    const wired = wire({ routes: [indicatorDataRoute(fixtureText(INDICATOR_CSV.bestSourceAll))] });
+    const { result } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['KEN'],
+      sex: ['SEX_T'],
+      source_selection: 'all',
+      time_to: '2019',
+      latest_only: true,
+    });
+    expect(
+      result.rows.map(({ period, source, best_source }) => ({ period, source, best_source })),
+    ).toEqual([
+      { period: '2019', source: 'BX:3465', best_source: true },
+      { period: '2019', source: 'AA:1311', best_source: false },
+    ]);
+    expect(sentParams(wired)).toMatchObject({ best_source: 'all', timeto: '2019' });
+  });
+
+  it('returns an empty result whole when no series has a row in the window', async () => {
+    wire({ routes: [CHN_ROUTE] });
+    const { result } = await query({ ...TWO_SLICES, time_from: '2023' });
+    expect(result).toMatchObject({ rows: [], row_count: 0, summary: { complete: true } });
+  });
+
+  it('falls back to the latest period per area when the full-history estimate passes the ceiling, disclosed on both surfaces', async () => {
+    const wired = wire({ observations: { maxRows: 100_000 } });
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      latest_only: true,
+    });
+    expect(result.isError).toBeFalsy();
+    const urls = dataUrls(wired);
+    expect(urls).toHaveLength(1);
+    expect(urls[0] && latestYearSent(urls[0])).toBe(true);
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.notice).toBe(LATEST_YEAR_NOTICE);
+    expect(structured.applied_filters).toMatchObject({ latest_mode: 'latest_year' });
+    expect(contentText(result)).toContain('latest_only true · latest_mode latest_year ·');
+    // the emulated latestyear: one period per area — KEN 2021, USA 2025, X01 2027
+    expect(new Set(structured.rows.map((row) => `${row.ref_area} ${row.period}`))).toEqual(
+      new Set(['KEN 2021', 'USA 2025', 'X01 2027']),
+    );
+    expect(contentText(result)).toContain(LATEST_YEAR_NOTICE);
+  });
+
+  it('reads per series once ref_areas and time_from bring the estimate under the ceiling', async () => {
+    // UNE_DEAP holds 322,228 rows over 312 areas and 1947–2027: one area is about 1,033 rows, from 2000 about 357
+    const one = wire({ observations: { maxRows: 1_000 } });
+    const area = await query({ dataset_ids: [UNE], ref_areas: ['USA'], latest_only: true });
+    expect(area.enrichment.notice).toBe(LATEST_YEAR_NOTICE);
+    expect(dataUrls(one).map(latestYearSent)).toEqual([true]);
+
+    disposeIlostatServices();
+    const narrowed = wire({ observations: { maxRows: 1_000 } });
+    const windowed = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      time_from: '2000',
+      latest_only: true,
+    });
+    expect(windowed.enrichment.notice).toBeUndefined();
+    expect(dataUrls(narrowed).map(latestYearSent)).toEqual([false]);
+  });
+
+  it('falls back with a second request once the per-series read passes the row ceiling, cancelling the first', async () => {
+    const stream = streamedCsv(CSV_HEADER, 1_001, usaYear);
+    const wired = wire({
+      routes: [fullOrLatest(() => stream.response())],
+      observations: { maxRows: 1_000 },
+    });
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      latest_only: true,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true]);
+    expect(stream.cancelled).toBe(true);
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.notice).toBe(LATEST_YEAR_NOTICE);
+    expect(structured.applied_filters).toMatchObject({ latest_mode: 'latest_year' });
+    // the recorded USA SEX_T rows at upstream's latest period
+    expect(new Set(structured.rows.map((row) => row.period))).toEqual(new Set(['2025']));
+    expect(contentText(result)).toContain(LATEST_YEAR_NOTICE);
+  });
+
+  it('stays per series when the full history holds exactly the row ceiling', async () => {
+    const stream = streamedCsv(CSV_HEADER, 1_000, usaYear);
+    const wired = wire({
+      routes: [fullOrLatest(() => stream.response())],
+      observations: { maxRows: 1_000 },
+    });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      latest_only: true,
+    });
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false]);
+    expect(enrichment.notice).toBeUndefined();
+    expect(result.rows.map(({ period, value }) => ({ period, value }))).toEqual([
+      { period: '1999', value: 9 },
+    ]);
+  });
+
+  it('falls back when the full-history body passes its byte cap before the row ceiling', async () => {
+    // 700 rows of about 2 KiB each pass the body cap of 1 KiB per allowed row long before the last
+    const padded = (index: number) => `${usaYear(index)},"${'n'.repeat(2_000)}"`;
+    const stream = streamedCsv(`${CSV_HEADER},"note_source"`, 700, padded);
+    const wired = wire({
+      routes: [fullOrLatest(() => stream.response())],
+      observations: { maxRows: 1_000 },
+    });
+    const { enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      latest_only: true,
+    });
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true]);
+    expect(stream.pulled).toBeLessThan(700);
+    expect(enrichment.notice).toBe(LATEST_YEAR_NOTICE);
+  });
+
+  it('falls back when the per-series read outlasts its share of the time budget', async () => {
+    const urls = wireIndicatorFetch(
+      (url, signal) =>
+        latestYearSent(url) ? csvResponse(filterIndicatorCsv(UNE_CSV, url)) : hangingBody(signal),
+      { observations: { perSeriesReadMs: 50 }, rplumber: { timeouts: SLOW_BODY_TIMEOUTS } },
+    );
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      sex: ['SEX_T'],
+      latest_only: true,
+    });
+    expect(urls.map(latestYearSent)).toEqual([false, true]);
+    expect(enrichment.notice).toBe(LATEST_YEAR_NOTICE);
+    expect(result.rows.length).toBeGreaterThan(0);
+  });
+
+  it('fails Timeout with a narrowing hint when the whole call outlasts its deadline, on both surfaces', async () => {
+    // The deadline sits well past the per-series budget, so the fallback request is sent before it fires even under load
+    const urls = wireIndicatorFetch((_url, signal) => hangingBody(signal), {
+      observations: { perSeriesReadMs: 50, latestDeadlineMs: 600 },
+      rplumber: { timeouts: SLOW_BODY_TIMEOUTS },
+    });
+    const args = { dataset_ids: [UNE], ref_areas: ['USA'], sex: ['SEX_T'], latest_only: true };
+    const error = await failure(args);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.message).toBe("latest_only did not finish within this call's 0.6 s time budget.");
+    expect(error.data).toMatchObject({ recovery: { hint: LATEST_TIMEOUT_HINT } });
+    expect(urls.map(latestYearSent)).toEqual([false, true]);
+
+    const result = await runToolContract(queryIndicatorTool, args);
+    expect(result.isError).toBe(true);
+    expect(contentText(result)).toContain(LATEST_TIMEOUT_HINT);
+  });
+
+  it("propagates the caller's cancellation of the per-series read, with no fallback request", async () => {
+    const controller = new AbortController();
+    const urls = wireIndicatorFetch((_url, signal) => {
+      setTimeout(() => controller.abort(new Error('caller went away')), 20);
+      return hangingBody(signal);
+    });
+    const ctx = createMockContext({ errors: queryIndicatorTool.errors, signal: controller.signal });
+    await expect(
+      query({ dataset_ids: [UNE], ref_areas: ['USA'], sex: ['SEX_T'], latest_only: true }, ctx),
+    ).rejects.toThrow('caller went away');
+    expect(urls.map(latestYearSent)).toEqual([false]);
+  });
+
+  /** A 200 whose body sends the CSV header and one row, then fails as a dropped connection does. */
+  function droppedBody(): Response {
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) {
+          controller.error(new TypeError('terminated'));
+          return;
+        }
+        sent = true;
+        controller.enqueue(new TextEncoder().encode(`${CSV_HEADER}\n${usaYear(0)}\n`));
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+  }
+
+  const USA_SEX_T = { dataset_ids: [UNE], ref_areas: ['USA'], sex: ['SEX_T'], latest_only: true };
+
+  it('falls back when the per-series body stalls mid-response', async () => {
+    const urls = wireIndicatorFetch(
+      (url, signal) =>
+        latestYearSent(url) ? csvResponse(filterIndicatorCsv(UNE_CSV, url)) : hangingBody(signal),
+      { rplumber: { timeouts: { ...SLOW_BODY_TIMEOUTS, stallMs: 50 } } },
+    );
+    const { result, enrichment } = await query(USA_SEX_T);
+    expect(urls.map(latestYearSent)).toEqual([false, true]);
+    expect(enrichment.notice).toBe(LATEST_YEAR_NOTICE);
+    expect(enrichment.applied_filters).toMatchObject({ latest_mode: 'latest_year' });
+    expect(new Set(result.rows.map((row) => row.period))).toEqual(new Set(['2025']));
+  });
+
+  it('falls back when the per-series body drops mid-response', async () => {
+    const urls = wireIndicatorFetch((url) =>
+      latestYearSent(url) ? csvResponse(filterIndicatorCsv(UNE_CSV, url)) : droppedBody(),
+    );
+    const { result, enrichment } = await query(USA_SEX_T);
+    expect(urls.map(latestYearSent)).toEqual([false, true]);
+    expect(enrichment.notice).toBe(LATEST_YEAR_NOTICE);
+    expect(new Set(result.rows.map((row) => row.period))).toEqual(new Set(['2025']));
+  });
+
+  it('propagates a failure before the per-series body, with no fallback request', async () => {
+    const urls = wireIndicatorFetch((url) =>
+      latestYearSent(url)
+        ? csvResponse(filterIndicatorCsv(UNE_CSV, url))
+        : new Response('unavailable', { status: 503 }),
+    );
+    const error = await failure(USA_SEX_T);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(urls.map(latestYearSent)).toEqual([false]);
+  });
+
+  it('fails Timeout when the deadline passes during a retry backoff, with no fallback request', async () => {
+    // A backoff of 22.5 s or more that the deadline failed to cut would outlast the test timeout
+    const urls = wireIndicatorFetch(() => new Response('unavailable', { status: 503 }), {
+      rplumber: { retry: { maxRetries: 2, baseDelayMs: 30_000, deadlineMs: 600_000 } },
+      observations: { latestDeadlineMs: 150 },
+    });
+    const error = await failure(USA_SEX_T);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.message).toBe("latest_only did not finish within this call's 0.15 s time budget.");
+    expect(error.data).toMatchObject({ recovery: { hint: LATEST_TIMEOUT_HINT } });
+    expect(urls.map(latestYearSent)).toEqual([false]);
+  });
+
+  it('fails Timeout with no fallback when the deadline passes before the per-series read budget', async () => {
+    const urls = wireIndicatorFetch((_url, signal) => hangingBody(signal), {
+      observations: { perSeriesReadMs: 10_000, latestDeadlineMs: 100 },
+    });
+    const error = await failure(USA_SEX_T);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.message).toBe("latest_only did not finish within this call's 0.1 s time budget.");
+    expect(urls.map(latestYearSent)).toEqual([false]);
+  });
+
+  it.each([
+    ['best', false],
+    ['all', true],
+  ] as const)(
+    'sizes the upfront estimate from n.records under best, n.records.all beyond it: %s',
+    async (source_selection, fallsBack) => {
+      // UNE_DEAP_SEX_AGE_RT_A: n.records 322,228 and n.records.all 365,493, either side of the ceiling
+      const wired = wire({ observations: { maxRows: 340_000 } });
+      const { enrichment } = await query({
+        dataset_ids: [UNE],
+        source_selection,
+        latest_only: true,
+      });
+      expect(dataUrls(wired).map(latestYearSent)).toEqual([fallsBack]);
+      expect(enrichment.applied_filters).toMatchObject({
+        latest_mode: fallsBack ? 'latest_year' : 'per_series',
+      });
+    },
+  );
+
+  it('serves a repeat per-series call from the cache', async () => {
+    const wired = wire({ routes: [CHN_ROUTE] });
+    const first = await query(TWO_SLICES);
+    const second = await query(TWO_SLICES);
+    expect(second.result).toEqual(first.result);
+    expect(dataUrls(wired)).toHaveLength(1);
+  });
+
+  it('with dataframes off, says the full history was read and only the latest rows were cut', async () => {
+    wire({ routes: [CHN_ROUTE], observations: { previewChars: 2_000 } });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['CHN'],
+      latest_only: true,
+    });
+    const shown = result.rows.length;
+    expect(shown).toBeGreaterThan(0);
+    expect(shown).toBeLessThan(84);
+    // every held row is counted, not only the preview's
+    expect(result.row_count).toBe(84);
+    expect(Object.values(result.summary.basis_counts).reduce((sum, n) => sum + n, 0)).toBe(84);
+    expect(result.summary).toMatchObject({
+      period_min: '2000',
+      period_max: '2022',
+      complete: true,
+    });
+    expect(render(result)).toContain('**Summary:** 84 rows ·');
+    expect(enrichment).toMatchObject({
+      truncated: true,
+      shown,
+      notice: PER_SERIES_PREVIEW_NOTICE(shown, 'dataframes are off in this deployment'),
+    });
+  });
+
+  it('when staging fails, says the same of the per-series rows', async () => {
+    const canvas = faultyCanvas({ at: 'acquire', error: new Error('engine down') });
+    canvases.push(canvas);
+    wire({ canvas, routes: [CHN_ROUTE], observations: { previewChars: 2_000 } });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['CHN'],
+      latest_only: true,
+    });
+    expect(enrichment.notice).toBe(
+      PER_SERIES_PREVIEW_NOTICE(
+        result.rows.length,
+        'staging the full result as a dataframe failed',
+      ),
+    );
+  });
+
+  it('keeps the not-fetched wording after a fallback, where reading did stop at the preview', async () => {
+    wire({ observations: { maxRows: 100_000, previewChars: 1_000 } });
+    const { result, enrichment } = await query({ dataset_ids: [UNE], latest_only: true });
+    expect(enrichment.notice).toBe(
+      `${LATEST_YEAR_NOTICE} ${CANVAS_OFF_NOTICE(result.rows.length)}`,
+    );
   });
 });
 
@@ -1289,8 +1944,8 @@ describe('errors', () => {
   it.each([
     ['a dataset ID with a space', { dataset_ids: ['UNE DEAP'] }],
     [
-      'four dataset IDs after splitting',
-      { dataset_ids: [`${UNE}+UNE_DEAP_SEX_AGE_RT_Q`, 'A_A,B_A'] },
+      '102 dataset IDs after splitting',
+      { dataset_ids: [...Array.from({ length: 50 }, () => `${UNE}+${UNE}`), 'A_A,B_A'] },
     ],
     ['a malformed area code', { dataset_ids: [UNE], ref_areas: ['U\nS'] }],
     ['a malformed area group', { dataset_ids: [UNE], area_group: 'AFRICA' }],

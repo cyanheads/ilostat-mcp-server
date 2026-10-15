@@ -1,0 +1,87 @@
+[
+  {
+    "ref_area": "CHN",
+    "source": "EA:995",
+    "indicator": "EAP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2018",
+    "obs_value": 70.255,
+    "note_classif": "C6:1058",
+    "note_source": "S3:24_T2:85"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "BA:16044",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2023",
+    "obs_value": 740410,
+    "note_classif": "C6:2362",
+    "note_indicator": "I20:4077",
+    "note_source": "S3:24_S4:34_S5:41_T2:85"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "BA:16044",
+    "indicator": "EMP_TEMP_SEX_AGE_NB",
+    "sex": "SEX_T",
+    "classif1": "AGE_5YRBANDS_YGE15",
+    "time": "2023",
+    "obs_value": 740410,
+    "note_classif": "C6:2362",
+    "note_indicator": "I20:4077",
+    "note_source": "S3:24_S4:34_S5:41_T2:85"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "EA:995",
+    "indicator": "EMP_DWAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2019",
+    "obs_value": 67.35,
+    "note_classif": "C6:2362",
+    "note_source": "S3:24_T2:85"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "BA:16044",
+    "indicator": "UNE_DEAP_SEX_AGE_RT",
+    "sex": "SEX_T",
+    "classif1": "AGE_YTHADULT_YGE15",
+    "time": "2022",
+    "obs_value": 4.569,
+    "note_classif": "C6:2362",
+    "note_indicator": "I20:4077",
+    "note_source": "S3:24_S4:34_S5:41_T2:85"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "AA:992",
+    "indicator": "EIP_NEET_SEX_RT",
+    "sex": "SEX_T",
+    "time": "2000",
+    "obs_value": 12.688,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "AA:992",
+    "indicator": "EIP_NEET_SEX_RT",
+    "sex": "SEX_M",
+    "time": "2000",
+    "obs_value": 10.948,
+    "note_source": "R1:3513"
+  },
+  {
+    "ref_area": "CHN",
+    "source": "AA:992",
+    "indicator": "EIP_NEET_SEX_RT",
+    "sex": "SEX_F",
+    "time": "2000",
+    "obs_value": 14.492,
+    "note_source": "R1:3513"
+  }
+]

@@ -1,14 +1,17 @@
 /**
  * @fileoverview Observation requests for `ilostat_query_indicator` and
  * `ilostat_compare_geographies`: validation against the catalog, the unfiltered
- * size preflight, the allowlisted `/data/indicator` request, row decoding and
- * basis classification, running summaries, the response cache, and routing rows
- * inline or onto the canvas. The upstream stream is always aborted once reading
- * stops, so a refusal or an early stop costs one bounded transfer.
+ * size preflight, the allowlisted `/data/indicator` request, the `latest_only`
+ * reduction per series (falling back to upstream's latest year per area when the
+ * full history is too large), row decoding and basis classification, running
+ * summaries, the response cache, and routing rows inline or onto the canvas. The
+ * upstream stream is always aborted once reading stops, so a refusal or an early
+ * stop costs one bounded transfer.
  * @module services/observations/observation-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
 import { ATTRIBUTION } from '@/services/attribution.js';
 import { classifyRow } from '@/services/basis/basis.js';
 import {
@@ -37,8 +40,10 @@ import {
   type Comparison,
   type ComparisonRow,
   compareAreas,
+  marksBreak,
   toComparisonRow,
 } from './comparison.js';
+import { LatestBySeries } from './latest-series.js';
 import {
   DatasetIndex,
   decodeObservation,
@@ -104,6 +109,11 @@ export interface QueryAppliedFilters {
   classif1?: string[];
   classif2?: string[];
   dataset_ids: string[];
+  /**
+   * How `latest_only` was answered: each series' own latest period, or the
+   * fallback to upstream's latest period per area and dataset. Absent without it.
+   */
+  latest_mode?: 'per_series' | 'latest_year';
   latest_only: boolean;
   /** Areas sent upstream: `ref_areas` plus the `area_group` members. */
   ref_area_count?: number;
@@ -128,13 +138,20 @@ export type QueryFailReason =
 export interface QueryResult {
   appliedFilters: QueryAppliedFilters;
   datasets: ResolvedDataset[];
-  /** Not-applicable filter disclosures, units left unresolved, and, on zero rows, the zero-row fragments. */
+  /** The deferred datasets, not-applicable filter disclosures, units left unresolved, and, on zero rows, the zero-row fragments. */
   notices: string[];
   outcome: Exclude<RouteOutcome<ObservationRow>, { kind: 'too_large' }>;
+  /** True when the `latest_only` rows were reduced per series from the full history, read whole before routing. */
+  perSeries: boolean;
   /** The inline preview budget applied, in serialized characters. */
   previewChars: number;
+  /** Distinct datasets past the first {@link DATASETS_PER_CALL}, in request order; never fetched in this call. */
+  remainingDatasetIds: string[];
   summary: ObservationSummary;
 }
+
+/** Distinct datasets one query sends upstream — the ILOSTAT API's documented `id` ceiling. */
+export const DATASETS_PER_CALL = 3;
 
 /** `ilostat_compare_geographies` inputs after schema validation; codes not yet normalized. */
 export interface CompareRequest {
@@ -179,11 +196,16 @@ export interface CompareAppliedFilters {
   ref_area_count: number;
   ref_areas?: string[];
   sex?: string;
-  /** Exact periods requested (period mode). */
+  /** Exact periods requested: period mode without change_years, or its endpoint-only fallback. */
   time?: string[];
-  /** First year requested (latest mode); no end year is sent. */
+  /** First year requested: latest mode's window start, or period mode's change base year. */
   time_from?: number;
+  /** Last year requested: the period's year, in period mode with change_years. */
+  time_to?: number;
 }
+
+/** The time parameters of a comparison's request. */
+type CompareTime = Pick<CompareAppliedFilters, 'time' | 'time_from' | 'time_to'>;
 
 export interface CompareResult {
   appliedFilters: CompareAppliedFilters;
@@ -204,9 +226,20 @@ export interface ObservationServiceOptions {
   bridge?: CanvasBridge;
   cache: ResponseCache;
   catalog: CatalogService;
+  /**
+   * The time budget across every request one `latest_only` query, or one period
+   * comparison with a change, chains. Defaults to {@link LATEST_DEADLINE_MS}.
+   */
+  latestDeadlineMs?: number;
   /** `ILOSTAT_MAX_ROWS`. */
   maxRows: number;
   now?: () => Date;
+  /**
+   * The share of that budget the wide first read may take: the per-series
+   * full-history read, or a comparison's read of the years between. Defaults to
+   * {@link PER_SERIES_READ_MS}.
+   */
+  perSeriesReadMs?: number;
   /** `ILOSTAT_PREVIEW_CHARS`. */
   previewChars: number;
   rplumber: RplumberClient;
@@ -225,6 +258,7 @@ interface RowSource {
   rows: AsyncIterable<RawObservation> | Iterable<RawObservation>;
 }
 
+/** Provenance datasets, each with the full unit its structure resolved; values are never rescaled. */
 const fromCatalog = (datasets: ResolvedDataset[]): Provenance['datasets'] =>
   datasets.map(({ dataset, unit }) => {
     const label = unitLabel(unit);
@@ -233,26 +267,132 @@ const fromCatalog = (datasets: ResolvedDataset[]): Provenance['datasets'] =>
       label: dataset.label,
       lastUpdate: dataset.lastUpdate,
       ...(label ? { unit: label } : {}),
+      ...(unit
+        ? {
+            unitMeasure: unit.measure,
+            unitType: unit.type,
+            ...(unit.typeLabel ? { unitTypeLabel: unit.typeLabel } : {}),
+            unitMultiplier: unit.multiplier,
+            ...(unit.multiplierLabel ? { unitMultiplierLabel: unit.multiplierLabel } : {}),
+          }
+        : {}),
     };
   });
 
+/**
+ * The time budget of a call that chains a fallback, under the 60 s request timeout
+ * of MCP SDK clients: the wide first read — a `latest_only` query's per-series
+ * read, or a period comparison's read of the years between — gets the first 35 s,
+ * and the fallback (the latest year per area, or the two periods alone) what
+ * remains of 55 s.
+ */
+const LATEST_DEADLINE_MS = 55_000;
+const PER_SERIES_READ_MS = 35_000;
+
+/**
+ * `time_from` and `classif1` reliably shrink the history; `sex` turns off the
+ * upfront estimate, and one area can hold several times the per-area average, so
+ * either alone can still read too much and fall back.
+ */
+const LATEST_YEAR_NOTICE =
+  "latest_only fell back to ILOSTAT's latest period per area and dataset, because this request's full history is too large or too slow to read series by series in one call: a series (one sex, classif1, or classif2 code) whose data ends before its dataset's newest period in an area may be missing. Narrow with time_from or classif1 to get each series' own latest period; sex or fewer ref_areas alone may still read too much and fall back again.";
+const LATEST_TIMEOUT_HINT =
+  'Narrow the request with time_from or classif1, then call again; sex or fewer ref_areas alone may still read too much.';
+
+/**
+ * One deadline across every request a call chains — a `latest_only` query's, or a
+ * period comparison's read of the years between and its fallback; at expiry each
+ * fails `Timeout`, naming `what` and carrying `hint`.
+ */
+class CallDeadline {
+  private readonly controller = new AbortController();
+  private readonly timer: ReturnType<typeof setTimeout>;
+
+  constructor(ms: number, what: string, hint: string) {
+    this.timer = setTimeout(() => {
+      this.controller.abort(
+        timeout(`${what} did not finish within this call's ${ms / 1000} s time budget.`, {
+          recovery: { hint },
+        }),
+      );
+    }, ms);
+  }
+
+  get expired(): boolean {
+    return this.controller.signal.aborted;
+  }
+
+  /** `ctx` for an upstream request bound by the deadline, the caller's signal, and `extra`. */
+  scope(ctx: Context, ...extra: AbortSignal[]): Context {
+    return { ...ctx, signal: AbortSignal.any([ctx.signal, this.controller.signal, ...extra]) };
+  }
+
+  clear(): void {
+    clearTimeout(this.timer);
+  }
+}
+
+const isUpstreamTooLarge = (error: unknown): boolean =>
+  error instanceof McpError && error.data?.reason === 'upstream_too_large';
+
+const isTimeoutOrUnavailable = (error: unknown): boolean =>
+  error instanceof McpError &&
+  (error.code === JsonRpcErrorCode.Timeout || error.code === JsonRpcErrorCode.ServiceUnavailable);
+
+/**
+ * Rows a `latest_only` request's full history holds, estimated from the ToC:
+ * `n.records` (`n.records.all` beyond the best source) per dataset, scaled by the
+ * share of its areas requested and of its years the window keeps. `undefined`
+ * when a sex, breakdown, or source filter is set: the ToC cannot size those, so
+ * the per-series read itself decides.
+ */
+function fullHistoryEstimate(
+  datasets: readonly Dataset[],
+  request: QueryRequest,
+  codes: ValidCodes,
+  areas: readonly string[],
+  bestSource: BestSource,
+): number | undefined {
+  const sized = [codes.sex, codes.classif1, codes.classif2, codes.sources].every(
+    (list) => list.length === 0,
+  );
+  if (!sized) return;
+  return datasets.reduce((sum, dataset) => {
+    const rows = bestSource === 'yes' ? dataset.nRecords : dataset.nRecordsAll;
+    const areaShare = areas.length > 0 ? Math.min(1, areas.length / dataset.nRefArea) : 1;
+    const from = Math.max(dataset.dataStart, Number(request.timeFrom ?? dataset.dataStart));
+    const to = Math.min(dataset.dataEnd, Number(request.timeTo ?? dataset.dataEnd));
+    const yearShare = Math.max(0, to - from + 1) / (dataset.dataEnd - dataset.dataStart + 1);
+    return sum + rows * areaShare * yearShare;
+  }, 0);
+}
+
 export class ObservationService {
+  private readonly latestDeadlineMs: number;
   private readonly now: () => Date;
+  private readonly perSeriesReadMs: number;
 
   constructor(private readonly options: ObservationServiceOptions) {
     this.now = options.now ?? (() => new Date());
+    this.latestDeadlineMs = options.latestDeadlineMs ?? LATEST_DEADLINE_MS;
+    this.perSeriesReadMs = options.perSeriesReadMs ?? PER_SERIES_READ_MS;
   }
 
   /**
    * Validates and runs one observation query, routing its rows inline or onto
-   * the canvas. Raises the calling tool's declared reasons through `ctx.fail`.
+   * the canvas. Every dataset ID is validated; the first
+   * {@link DATASETS_PER_CALL} distinct datasets are queried in one request and
+   * the rest are returned unfetched. Raises the calling tool's declared reasons
+   * through `ctx.fail`.
    */
   async query(
     snapshot: CatalogSnapshot,
     request: QueryRequest,
     ctx: FailingContext<QueryFailReason>,
   ): Promise<QueryResult> {
-    const datasets = resolveDatasets(snapshot, request.datasetIds, ctx);
+    const requested = resolveDatasets(snapshot, request.datasetIds, ctx);
+    const datasets = requested.slice(0, DATASETS_PER_CALL);
+    const remainingDatasetIds = requested.slice(DATASETS_PER_CALL).map((dataset) => dataset.id);
     const group = request.areaGroup
       ? resolveAreaGroup(snapshot, request.areaGroup, ctx)
       : undefined;
@@ -267,8 +407,9 @@ export class ObservationService {
       },
       ctx,
     );
-    assertAggregatesAvailable(snapshot, codes.refAreas, datasets, ctx);
-    checkPeriodFrequency(request, datasets, ctx);
+    // Deferred datasets too, so remaining_dataset_ids always works with the same filters.
+    assertAggregatesAvailable(snapshot, codes.refAreas, requested, ctx);
+    checkPeriodFrequency(request, requested, ctx);
 
     const sourceSelection = request.sourceSelection ?? (codes.sources.length > 0 ? 'all' : 'best');
     const bestSource = BEST_SOURCE[sourceSelection];
@@ -318,39 +459,65 @@ export class ObservationService {
       best_source: bestSource,
     };
 
-    const url = this.options.rplumber.indicatorDataUrl({
-      datasetIds: appliedFilters.dataset_ids,
-      refAreas: areas,
-      sex: codes.sex,
-      classif1: codes.classif1,
-      classif2: codes.classif2,
-      sources: codes.sources,
-      ...(request.time ? { time: [request.time] } : {}),
-      ...(request.timeFrom ? { timeFrom: Number(request.timeFrom) } : {}),
-      ...(request.timeTo ? { timeTo: Number(request.timeTo) } : {}),
-      latestOnly: request.latestOnly,
-      bestSource,
-    });
+    /** The request URL; `latestYear` sends upstream's latest-period-per-area filter. */
+    const urlFor = (latestYear: boolean) =>
+      this.options.rplumber.indicatorDataUrl({
+        datasetIds: appliedFilters.dataset_ids,
+        refAreas: areas,
+        sex: codes.sex,
+        classif1: codes.classif1,
+        classif2: codes.classif2,
+        sources: codes.sources,
+        ...(request.time ? { time: [request.time] } : {}),
+        ...(request.timeFrom ? { timeFrom: Number(request.timeFrom) } : {}),
+        ...(request.timeTo ? { timeTo: Number(request.timeTo) } : {}),
+        latestOnly: latestYear,
+        bestSource,
+      });
+    // latest_only reduces the full history per series, unless the ToC already sizes that history past the ceiling.
+    let latestYear =
+      request.latestOnly &&
+      (fullHistoryEstimate(datasets, request, codes, areas, bestSource) ?? 0) >
+        this.options.maxRows;
 
     const resolving = this.resolveDatasets(snapshot, datasets, ctx);
     // Awaited once the rows open, so a rows failure reports first; handled now so an earlier lookup rejection never goes unhandled.
     resolving.catch(() => undefined);
-    const opening = this.openRows(url, ctx);
-    let source: RowSource | undefined;
+    const deadline = request.latestOnly
+      ? new CallDeadline(this.latestDeadlineMs, 'latest_only', LATEST_TIMEOUT_HINT)
+      : undefined;
+    const sources: RowSource[] = [];
     try {
-      source = await opening;
+      let rows: AsyncIterable<RawObservation> | Iterable<RawObservation> | undefined;
+      if (deadline && !latestYear) {
+        rows = await this.latestPerSeries(urlFor(false), ctx, deadline, sources);
+        latestYear = rows === undefined;
+      }
+      if (!rows) {
+        const source = await this.openRows(urlFor(latestYear), deadline?.scope(ctx) ?? ctx);
+        sources.push(source);
+        rows = source.rows;
+      }
+      if (request.latestOnly)
+        appliedFilters.latest_mode = latestYear ? 'latest_year' : 'per_series';
       const lookedUp = await resolving;
       const resolved = lookedUp.map((entry) => entry.resolved);
       const index = new DatasetIndex(resolved);
       const summary = new ObservationSummary();
-      const rows = source.rows;
-      const decoded = (async function* () {
-        for await (const raw of rows) {
-          const row = decodeObservation(raw, snapshot, index.find(raw));
-          summary.add(row);
-          yield row;
-        }
-      })();
+      const raws = rows;
+      const decode = (raw: RawObservation) => {
+        const row = decodeObservation(raw, snapshot, index.find(raw));
+        summary.add(row);
+        return row;
+      };
+      // Per-series rows are already held whole, so row_count and the summary count every one past a preview cut.
+      const perSeries = request.latestOnly && !latestYear;
+      const decoded =
+        perSeries && Array.isArray(raws)
+          ? raws.map(decode)
+          : (async function* () {
+              for await (const raw of raws) yield decode(raw);
+            })();
 
       const outcome = await routeRows(this.options.bridge, {
         ctx,
@@ -379,7 +546,12 @@ export class ObservationService {
         );
       }
 
-      const notices = [...notApplicableNotices(datasets, codes), ...unitNotices(resolved)];
+      const notices = [
+        ...deferredNotices(remainingDatasetIds),
+        ...(latestYear ? [LATEST_YEAR_NOTICE] : []),
+        ...notApplicableNotices(datasets, codes),
+        ...unitNotices(resolved),
+      ];
       if (summary.rows === 0) {
         notices.push(...zeroRowFragments(lookedUp, codes, request, areas, sourceSelection));
       }
@@ -388,11 +560,52 @@ export class ObservationService {
         datasets: resolved,
         notices,
         outcome,
+        perSeries,
         previewChars: this.options.previewChars,
+        remainingDatasetIds,
         summary,
       };
     } finally {
+      for (const source of sources) source.close();
+      deadline?.clear();
+    }
+  }
+
+  /**
+   * The `latest_only` rows of `url`'s full history, reduced per series. Gives up
+   * — `undefined`, and the caller falls back to upstream's latest year per area —
+   * when more than `ILOSTAT_MAX_ROWS` rows arrive, the body passes its byte cap,
+   * stalls or drops mid-response, or the read outlasts its share of the call's
+   * time budget. The call deadline, the caller's cancellation, and every failure
+   * before the body propagate.
+   */
+  private async latestPerSeries(
+    url: string,
+    ctx: Context,
+    deadline: CallDeadline,
+    sources: RowSource[],
+  ): Promise<RawObservation[] | undefined> {
+    const budget = AbortSignal.timeout(this.perSeriesReadMs);
+    let source: RowSource | undefined;
+    try {
+      source = await this.openRows(url, deadline.scope(ctx, budget));
+      sources.push(source);
+      const latest = new LatestBySeries();
+      for await (const raw of source.rows) {
+        latest.add(raw);
+        if (latest.read > this.options.maxRows) {
+          source.close();
+          return;
+        }
+      }
+      return latest.rows();
+    } catch (error) {
+      if (deadline.expired || ctx.signal.aborted) throw error;
+      // A body that stalls or drops is far more exposed on a full history than on the latestyear body.
+      const failedMidBody = source !== undefined && isTimeoutOrUnavailable(error);
+      if (!budget.aborted && !isUpstreamTooLarge(error) && !failedMidBody) throw error;
       source?.close();
+      return;
     }
   }
 
@@ -440,17 +653,66 @@ export class ObservationService {
     const areas = [...new Set([...codes.refAreas, ...(group?.members ?? [])])];
 
     const latestFrom = this.now().getUTCFullYear() - request.lookbackYears;
-    const mode: CompareMode = request.period
-      ? { kind: 'period', period: request.period }
+    const { period } = request;
+    const mode: CompareMode = period
+      ? { kind: 'period', period }
       : { kind: 'latest', includeProjections: request.includeProjections, fromYear: latestFrom };
-    // The request reaches change_years further back for the change base; the latest value stays within fromYear.
-    const windowFrom = request.period ? undefined : latestFrom - (request.changeYears ?? 0);
-    const time = request.period
-      ? [
-          request.period,
-          ...(request.changeYears ? [periodYearsBefore(request.period, request.changeYears)] : []),
-        ]
+    const changeBase =
+      period && request.changeYears ? periodYearsBefore(period, request.changeYears) : undefined;
+    // Latest mode reaches change_years further back for the change base; the latest value stays within fromYear.
+    // Period mode with a change reads the years from the change base to the period, so breaks between them show.
+    let time: CompareTime = !period
+      ? { time_from: latestFrom - (request.changeYears ?? 0) }
+      : changeBase
+        ? { time_from: periodYear(changeBase), time_to: periodYear(period) }
+        : { time: [period] };
+    const windowFrom = period ? undefined : time.time_from;
+    const urlFor = (filters: CompareTime) =>
+      this.options.rplumber.indicatorDataUrl({
+        datasetIds: [dataset.id],
+        refAreas: areas,
+        ...(slice.sex ? { sex: [slice.sex] } : {}),
+        ...(slice.classif1 ? { classif1: [slice.classif1] } : {}),
+        ...(slice.classif2 ? { classif2: [slice.classif2] } : {}),
+        ...(filters.time ? { time: filters.time } : {}),
+        ...(filters.time_from === undefined ? {} : { timeFrom: filters.time_from }),
+        ...(filters.time_to === undefined ? {} : { timeTo: filters.time_to }),
+      });
+
+    const resolved = this.resolve(snapshot, dataset, lookup);
+    // Period mode reads only the two endpoints and the break-marked rows between them.
+    const keep = period
+      ? (raw: RawObservation) =>
+          raw.period === period || raw.period === changeBase || marksBreak(raw)
       : undefined;
+    const read = (scope: Context) =>
+      this.readCandidates(urlFor(time), snapshot, resolved, scope, keep);
+    let candidates: Map<string, Candidate[]>;
+    let endpointsOnly = false;
+    if (changeBase && period) {
+      // The years between get the first share of one deadline; the two periods alone, what remains.
+      const deadline = new CallDeadline(
+        this.latestDeadlineMs,
+        'The comparison',
+        'Narrow ref_areas or area_group, or lower change_years, then call again.',
+      );
+      try {
+        const budget = AbortSignal.timeout(this.perSeriesReadMs);
+        try {
+          candidates = await read(deadline.scope(ctx, budget));
+        } catch (error) {
+          const outlasted = budget.aborted && !deadline.expired && !ctx.signal.aborted;
+          if (!outlasted && !isUpstreamTooLarge(error)) throw error;
+          time = { time: [period, changeBase] };
+          endpointsOnly = true;
+          candidates = await read(deadline.scope(ctx));
+        }
+      } finally {
+        deadline.clear();
+      }
+    } else {
+      candidates = await read(ctx);
+    }
     const appliedFilters: CompareAppliedFilters = {
       dataset_id: dataset.id,
       ...(codes.refAreas.length > 0 ? { ref_areas: codes.refAreas } : {}),
@@ -459,38 +721,9 @@ export class ObservationService {
       ...(slice.sex ? { sex: slice.sex } : {}),
       ...(slice.classif1 ? { classif1: slice.classif1 } : {}),
       ...(slice.classif2 ? { classif2: slice.classif2 } : {}),
-      ...(time ? { time } : {}),
-      ...(windowFrom === undefined ? {} : { time_from: windowFrom }),
+      ...time,
       best_source: 'upstream default (yes)',
     };
-    const url = this.options.rplumber.indicatorDataUrl({
-      datasetIds: [dataset.id],
-      refAreas: areas,
-      ...(slice.sex ? { sex: [slice.sex] } : {}),
-      ...(slice.classif1 ? { classif1: [slice.classif1] } : {}),
-      ...(slice.classif2 ? { classif2: [slice.classif2] } : {}),
-      ...(time ? { time } : {}),
-      ...(windowFrom === undefined ? {} : { timeFrom: windowFrom }),
-    });
-
-    const resolved = this.resolve(snapshot, dataset, lookup);
-
-    const candidates = new Map<string, Candidate[]>();
-    const source = await this.openRows(url, ctx);
-    try {
-      for await (const raw of source.rows) {
-        if (raw.value === undefined) continue;
-        const basis = classifyRow(
-          { sourceLabel: snapshot.sources.get(raw.source)?.label, year: periodYear(raw.period) },
-          resolved.cutoff.projectionAfterYear,
-        );
-        const list = candidates.get(raw.refArea) ?? [];
-        list.push({ basis, raw: { ...raw, value: raw.value } });
-        candidates.set(raw.refArea, list);
-      }
-    } finally {
-      source.close();
-    }
 
     const coveredAreas =
       lookup.status === 'complete' && lookup.structure
@@ -502,10 +735,16 @@ export class ObservationService {
       mode,
       sort: request.sort,
       decode: (raw) => decodeObservation(raw, snapshot, resolved),
+      ...(endpointsOnly ? { betweenRead: false } : {}),
       ...(request.changeYears === undefined ? {} : { changeYears: request.changeYears }),
       ...(coveredAreas ? { coveredAreas } : {}),
     });
     const notices = comparisonNotices(comparison);
+    if (endpointsOnly) {
+      notices.push(
+        `The periods from ${changeBase} to ${period} were too many to read within this call's size and time limits, so only ${changeBase} and ${period} were read: break_in_series is true where the current value marks a break and null elsewhere, since a break between them is unknown. Narrow ref_areas or area_group, or lower change_years, to check the periods between.`,
+      );
+    }
     if (!coveredAreas) {
       notices.push(
         `The area list of ${dataset.id} is unavailable from the ILOSTAT structure service, so no missing area is marked not_covered, even one ${dataset.id} does not cover.`,
@@ -553,6 +792,33 @@ export class ObservationService {
       slice,
       ...(windowFrom === undefined ? {} : { windowFrom }),
     };
+  }
+
+  /** A comparison's rows with a value, per area, classed by basis; `keep` drops rows it never reads. */
+  private async readCandidates(
+    url: string,
+    snapshot: CatalogSnapshot,
+    resolved: ResolvedDataset,
+    ctx: Context,
+    keep?: (raw: RawObservation) => boolean,
+  ): Promise<Map<string, Candidate[]>> {
+    const candidates = new Map<string, Candidate[]>();
+    const source = await this.openRows(url, ctx);
+    try {
+      for await (const raw of source.rows) {
+        if (raw.value === undefined || (keep && !keep(raw))) continue;
+        const basis = classifyRow(
+          { sourceLabel: snapshot.sources.get(raw.source)?.label, year: periodYear(raw.period) },
+          resolved.cutoff.projectionAfterYear,
+        );
+        const list = candidates.get(raw.refArea) ?? [];
+        list.push({ basis, raw: { ...raw, value: raw.value } });
+        candidates.set(raw.refArea, list);
+      }
+    } finally {
+      source.close();
+    }
+    return candidates;
   }
 
   /**
@@ -760,6 +1026,15 @@ function echoGroup(group: AreaGroup): AreaGroupEcho {
   return { code: group.code, label: group.label, member_count: group.members.length };
 }
 
+/** Names the datasets left for another call, up to ten and then a count. */
+function deferredNotices(remaining: readonly string[]): string[] {
+  const count = remaining.length;
+  if (count === 0) return [];
+  return [
+    `Queried the first ${DATASETS_PER_CALL} distinct datasets; ${count} more ${count === 1 ? 'was' : 'were'} not fetched: ${nameCodes(remaining)}. Call ilostat_query_indicator again with dataset_ids set to remaining_dataset_ids and the same filters to get ${count === 1 ? 'it' : 'them'}.`,
+  ];
+}
+
 /** Discloses each breakdown filter a requested dataset cannot apply — upstream returns its rows unfiltered. */
 function notApplicableNotices(datasets: readonly Dataset[], codes: BreakdownCodes): string[] {
   const notices: string[] = [];
@@ -875,7 +1150,7 @@ function zeroRowFragments(
   return fragments;
 }
 
-/** Mixed periods, mixed bases, and missing areas — flagged, not hidden. */
+/** Mixed periods, mixed bases, changes across a source, basis, or series change, and missing areas — flagged, not hidden. */
 function comparisonNotices(comparison: Comparison): string[] {
   const notices: string[] = [];
   if (comparison.mixedPeriods) {
@@ -890,6 +1165,17 @@ function comparisonNotices(comparison: Comparison): string[] {
   if (modelled > 0 && reported > 0) {
     notices.push(
       `${modelled} ${modelled === 1 ? 'value is an ILO modelled estimate' : 'values are ILO modelled estimates'} and ${reported} ${reported === 1 ? 'is' : 'are'} reported; they are not directly comparable.`,
+    );
+  }
+  const changes = comparison.entries.flatMap((entry) => (entry.change ? [entry.change] : []));
+  const flagged = changes.filter(
+    (change) => change.sourceChanged || change.basisChanged || change.breakInSeries,
+  );
+  if (flagged.length > 0) {
+    const count = (flag: 'sourceChanged' | 'basisChanged' | 'breakInSeries') =>
+      flagged.filter((change) => change[flag]).length;
+    notices.push(
+      `${flagged.length} of ${changes.length} ${changes.length === 1 ? 'change' : 'changes'} ${flagged.length === 1 ? 'is' : 'are'} not like-for-like (source changed ${count('sourceChanged')}, basis changed ${count('basisChanged')}, break in series ${count('breakInSeries')}); each row's change says which.`,
     );
   }
   const missing = comparison.missing.length;
