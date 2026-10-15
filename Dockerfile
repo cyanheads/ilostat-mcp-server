@@ -15,7 +15,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
 
 WORKDIR /usr/src/app
 
@@ -53,7 +53,7 @@ RUN bun run build
 # from the build stage for the same reason: its tree holds the build host's
 # binding alone, plus every devDependency.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
 
 WORKDIR /usr/src/app
 
@@ -109,7 +109,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # It runs on the target platform and copies its dependencies in rather than
 # installing them, so no instruction here runs JavaScript during the build.
 # ==============================================================================
-FROM oven/bun:1.4.2-slim AS production
+FROM oven/bun:1.4.3-slim AS production
 
 WORKDIR /usr/src/app
 

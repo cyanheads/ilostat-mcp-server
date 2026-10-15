@@ -2,10 +2,10 @@
 
 **Server:** ilostat-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.11`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.6
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -64,9 +64,9 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
   input: z.object({
     query: blankAsUnset(z.string().optional()).describe('Plain-language terms, e.g. "youth unemployment" …'),
     database: blankAsUnset(z.string().optional()).describe('Source database code, e.g. LFS or ILOEST; case-insensitive. …'),
-    limit: z.number().int().min(1).max(50).default(10).describe('Hits per page (1–50).'),
+    limit: z.number().int().min(1).max(LIMIT_CEILING, { message: '…' }).default(10).describe(`Hits per page, at most ${PAGE_CAP}; a larger value, up to 1,000, is applied as ${PAGE_CAP} …`),
     cursor: blankAsUnset(z.string().optional()).describe("Opaque continuation token: the previous page's next_cursor, passed unchanged."),
-    // … frequency, subject, breakdown, aggregates_only
+    // … frequency, subject, breakdown, measure, aggregates_only
   }),
 
   output: z.object({ /* hits, total, facets, next_cursor, catalog_as_of */ }),
@@ -76,8 +76,8 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
     {
       reason: 'unknown_filter_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'database, subject, or breakdown is not an ILOSTAT code.',
-      recovery: 'Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes.',
+      when: 'database, subject, breakdown, or measure is not an ILOSTAT code.',
+      recovery: "Call ilostat_list_reference with topic databases, subjects, or classification_types to see the valid codes; a measure code is ilostat_describe_indicator's measure.code …",
       severity: 'notice',
     },
     // … invalid_cursor and catalog_unavailable, both thrownBy: 'service'
@@ -92,8 +92,9 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
         ...ctx.recoveryFor('unknown_filter_code'),
       });
     }
-    const result = searchIndicators(snapshot, { limit: input.limit, offset /* , … */ });
-    ctx.enrich({ truncated: false, shown: result.hits.length, cap: input.limit });
+    const limit = Math.min(input.limit, PAGE_CAP); // a larger limit is applied as the cap, and the notice says so
+    const result = searchIndicators(snapshot, { limit, offset /* , … */ });
+    ctx.enrich({ truncated: false, shown: result.hits.length, cap: limit });
     // … ctx.enrich.truncated() with next-page guidance when result.nextCursor is set
     return { /* … */ };
   },
@@ -309,7 +310,7 @@ tests/                                  # Vitest suite mirroring src/, with reco
 | Tool names | snake_case, `ilostat_` prefix | `ilostat_search_indicators` |
 | Input/output fields | snake_case | `dataset_id`, `ref_areas`, `latest_only` |
 | Directories | kebab-case | `src/services/canvas-bridge/` |
-| Descriptions | Single string or template literal, no `+` concatenation | `'Hits per page (1–50).'` |
+| Descriptions | Single string or template literal, no `+` concatenation | `'Indicators matched after all filters.'` |
 
 ---
 
@@ -435,7 +436,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 
