@@ -23,10 +23,13 @@ import {
 import { afterEach, describe, expect, it } from 'vitest';
 import { compareGeographiesTool } from '@/mcp-server/tools/definitions/compare-geographies.tool.js';
 import { disposeIlostatServices } from '@/services/ilostat-services.js';
+import type { FetchFn } from '@/services/upstream/upstream-http.js';
 import {
   CATALOG_UNAVAILABLE_RECOVERY,
   callUrls,
   csvResponse,
+  FAST_TIMEOUTS,
+  filterIndicatorCsv,
   fixtureText,
   INDICATOR_CSV,
   indicatorDataRoute,
@@ -35,6 +38,7 @@ import {
   memoryCanvas,
   observationCatalogFixture,
   probeRoute,
+  RPLUMBER_ORIGIN,
   retiredDatasetResponse,
   SDMX_422_SHORT_KEY,
   sdmxText,
@@ -43,6 +47,7 @@ import {
   upstreamParams,
   type WireOptions,
   wireServices,
+  youthSeriesCatalogFixture,
 } from '../helpers/ilostat-upstream.js';
 import { guardNetwork } from '../helpers/network-guard.js';
 
@@ -148,6 +153,24 @@ const USA_2025_LEGEND = {
   },
 };
 
+/** A USA 15+ change base: BA:453 like the current value, reported, with its two notes. */
+const USA_BASE = {
+  from_source: 'BA:453',
+  from_source_label: 'LFS - Current Population Survey',
+  from_basis: 'reported',
+  from_notes: ['R1:3513', 'T2:85'],
+  source_changed: false,
+  basis_changed: false,
+};
+/** An X01 15+ change base through 2024: the same modelled-estimates source, modelled. */
+const X01_BASE = {
+  from_source: 'XA:8405',
+  from_source_label: 'ILO - Modelled Estimates',
+  from_basis: 'modelled_estimate',
+  from_notes: [],
+  source_changed: false,
+};
+
 /** The recorded catalog with the extras and the recorded UNE_DEAP CSV behind the emulator; extra routes win. */
 function wire(options: WireOptions = {}) {
   return wireServices({
@@ -156,6 +179,17 @@ function wire(options: WireOptions = {}) {
     routes: [...(options.routes ?? []), indicatorDataRoute(fixtureText(INDICATOR_CSV.uneDeap))],
   });
 }
+
+/** The youth-series catalog with the recorded `csv` behind the emulator. */
+function wireYouth(csv: string = INDICATOR_CSV.youthBreaks, options: WireOptions = {}) {
+  return wireServices({
+    ...options,
+    fixture: youthSeriesCatalogFixture(),
+    routes: [...(options.routes ?? []), indicatorDataRoute(fixtureText(csv))],
+  });
+}
+
+const YOUTH = 'AGE_YTHADULT_Y15-24';
 
 function dataRoute(respond: () => Response | Promise<Response>): FetchMockRoute {
   return { method: 'GET', match: (request) => isIndicatorData(request), respond };
@@ -325,7 +359,18 @@ describe('latest mode', () => {
     expect(sentParams(wired).timefrom).toBe('2024');
     expect(result.window_from).toBe(2024);
     expect(result.rows).toEqual([
-      { rank: 1, ...USA_2025, change: { from_period: '2024', from_value: 4.022, delta: 0.26 } },
+      {
+        rank: 1,
+        ...USA_2025,
+        // USA 2025 carries status B, so the change from 2024 crosses a break
+        change: {
+          from_period: '2024',
+          from_value: 4.022,
+          delta: 0.26,
+          ...USA_BASE,
+          break_in_series: true,
+        },
+      },
     ]);
     // X01's 2024 modelled value is inside timefrom but outside lookback_years
     expect(result.missing).toEqual([
@@ -353,8 +398,21 @@ describe('latest mode', () => {
     const byArea = Object.fromEntries(result.rows.map((row) => [row.ref_area, row.change]));
     expect(byArea).toEqual({
       // 4.282 − 4.022 and 4.883 − 4.896 carry binary noise before rounding
-      USA: { from_period: '2024', from_value: 4.022, delta: 0.26 },
-      X01: { from_period: '2023', from_value: 4.896, delta: -0.013 },
+      USA: {
+        from_period: '2024',
+        from_value: 4.022,
+        delta: 0.26,
+        ...USA_BASE,
+        break_in_series: true,
+      },
+      X01: {
+        from_period: '2023',
+        from_value: 4.896,
+        delta: -0.013,
+        ...X01_BASE,
+        basis_changed: false,
+        break_in_series: false,
+      },
       // KEN has no 2020 value, so no change
       KEN: undefined,
     });
@@ -456,7 +514,27 @@ describe('latest mode', () => {
 });
 
 describe('period mode', () => {
-  it('sends the period and its change base in one time value, with no timefrom', async () => {
+  it('without change_years sends the one period as time, with no timefrom or timeto', async () => {
+    const wired = wire();
+    const { result, enrichment } = await compare({
+      dataset_id: UNE,
+      ref_areas: ['USA', 'X01'],
+      period: 2025,
+    });
+    const sent = sentParams(wired);
+    expect(sent.time).toBe('2025');
+    expect(sent).not.toHaveProperty('timefrom');
+    expect(sent).not.toHaveProperty('timeto');
+    expect(enrichment.applied_filters).toMatchObject({ time: ['2025'] });
+    expect(enrichment.applied_filters).not.toHaveProperty('time_from');
+    expect(enrichment.applied_filters).not.toHaveProperty('time_to');
+    expect(result.rows.map((row) => [row.ref_area, row.change])).toEqual([
+      ['X01', undefined],
+      ['USA', undefined],
+    ]);
+  });
+
+  it('sends the years from the change base to the period as timefrom and timeto, in one request with no time', async () => {
     const wired = wire();
     const { result, enrichment } = await compare({
       dataset_id: UNE,
@@ -465,9 +543,8 @@ describe('period mode', () => {
       change_years: 2,
     });
     const sent = sentParams(wired);
-    expect(sent.time).toBe('2025+2023');
-    expect(sent).not.toHaveProperty('timefrom');
-    expect(sent).not.toHaveProperty('timeto');
+    expect(sent).toMatchObject({ timefrom: '2023', timeto: '2025' });
+    expect(sent).not.toHaveProperty('time');
     expect(result).toMatchObject({ mode: 'period', period: '2025', change_years: 2 });
     expect(result).not.toHaveProperty('window_from');
     expect(result.rows).toEqual([
@@ -478,26 +555,45 @@ describe('period mode', () => {
         value: 4.869,
         period: '2025',
         basis: 'projection',
-        change: { from_period: '2023', from_value: 4.896, delta: -0.027 },
+        change: {
+          from_period: '2023',
+          from_value: 4.896,
+          delta: -0.027,
+          ...X01_BASE,
+          basis_changed: true,
+          break_in_series: false,
+        },
       },
       {
         rank: 2,
         ...USA_2025,
-        change: { from_period: '2023', from_value: 3.638, delta: 0.644 },
+        change: {
+          from_period: '2023',
+          from_value: 3.638,
+          delta: 0.644,
+          ...USA_BASE,
+          break_in_series: true,
+        },
       },
     ]);
     expect(result.missing).toEqual([
       { ref_area: 'KEN', label: 'Kenya', reason: 'no_value_for_period' },
     ]);
-    expect(result.comparability).toMatchObject({ periods: ['2025'], mixed_periods: false });
-    expect(enrichment.applied_filters).toMatchObject({ time: ['2025', '2023'] });
-    expect(enrichment.applied_filters).not.toHaveProperty('time_from');
+    // comparability still describes the current values: one projection, one reported
+    expect(result.comparability).toEqual({
+      periods: ['2025'],
+      mixed_periods: false,
+      basis_counts: { reported: 1, modelled_estimate: 0, projection: 1 },
+      distinct_sources: 2,
+    });
+    expect(enrichment.applied_filters).toMatchObject({ time_from: 2023, time_to: 2025 });
+    expect(enrichment.applied_filters).not.toHaveProperty('time');
     expect(enrichment.notice).toBe(
-      '1 value is an ILO modelled estimate and 1 is reported; they are not directly comparable. 1 area has no value; see missing.',
+      "1 value is an ILO modelled estimate and 1 is reported; they are not directly comparable. 2 of 2 changes are not like-for-like (source changed 0, basis changed 1, break in series 1); each row's change says which. 1 area has no value; see missing.",
     );
   });
 
-  it('joins the two periods and the areas with a literal + on the wire, change on both surfaces', async () => {
+  it('joins the areas with a literal + on the wire and carries the change on both surfaces', async () => {
     const wired = wire();
     const result = await runToolContract(compareGeographiesTool, {
       dataset_id: UNE,
@@ -507,15 +603,23 @@ describe('period mode', () => {
     });
     expect(result.isError).toBeFalsy();
     const search = dataUrls(wired)[0]?.search ?? '';
-    expect(search).toMatch(/[?&]time=2025\+2023(&|$)/);
+    expect(search).toMatch(/[?&]timefrom=2023&timeto=2025(&|$)/);
     expect(search).toMatch(/[?&]ref_area=USA\+X01&/);
     const structured = result.structuredContent as Output & Record<string, unknown>;
-    expect(structured.rows.map((row) => [row.ref_area, row.change])).toEqual([
-      ['X01', { from_period: '2023', from_value: 4.896, delta: -0.027 }],
-      ['USA', { from_period: '2023', from_value: 3.638, delta: 0.644 }],
+    expect(
+      structured.rows.map((row) => [row.ref_area, row.change?.from_value, row.change?.delta]),
+    ).toEqual([
+      ['X01', 4.896, -0.027],
+      ['USA', 3.638, 0.644],
     ]);
     const text = contentText(result);
-    for (const fragment of ['4.896', '3.638', '0.644']) expect(text).toContain(fragment);
+    for (const fragment of [
+      '| -0.027 since 2023 (4.896; XA:8405 — ILO - Modelled Estimates; modelled_estimate) — basis changed |',
+      '| 0.644 since 2023 (3.638; BA:453 — LFS - Current Population Survey; reported; notes R1:3513, T2:85) — break in series |',
+      '· time_from 2023 · time_to 2025 ·',
+    ]) {
+      expect(text).toContain(fragment);
+    }
   });
 
   it('normalizes a period and fails invalid_period on a frequency mismatch', async () => {
@@ -532,6 +636,444 @@ describe('period mode', () => {
     });
     expect(error.message).toBe(`period 2024Q2 does not match ${UNE}, whose frequency is A.`);
     expect(dataUrls(wired)).toHaveLength(0);
+  });
+});
+
+describe('change provenance and breaks', () => {
+  it("keeps the baseline's source across a source change, flags it on both surfaces, and counts it in the notice", async () => {
+    const wired = wireYouth();
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['UGA'],
+      classif1: YOUTH,
+      period: '2024',
+      change_years: 3,
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    // The 2024 census value against the 2021 LFS value; no row lies between them
+    expect(structured.rows).toEqual([
+      {
+        rank: 1,
+        ref_area: 'UGA',
+        label: 'Uganda',
+        kind: 'country',
+        value: 11.128,
+        period: '2024',
+        basis: 'reported',
+        source: 'AA:1745',
+        source_label: 'PC - Population Census',
+        notes: ['R1:3513'],
+        change: {
+          from_period: '2021',
+          from_value: 5.154,
+          delta: 5.974,
+          from_source: 'BA:13047',
+          from_source_label: 'LFS - National Labour Force Survey',
+          from_basis: 'reported',
+          from_notes: ['R1:3513'],
+          source_changed: true,
+          basis_changed: false,
+          break_in_series: false,
+        },
+      },
+    ]);
+    expect(structured.rows[0]?.change).not.toHaveProperty('from_obs_status');
+    expect(structured.comparability).toMatchObject({
+      distinct_sources: 1,
+      basis_counts: { reported: 1, modelled_estimate: 0, projection: 0 },
+    });
+    const notice =
+      "1 of 1 change is not like-for-like (source changed 1, basis changed 0, break in series 0); each row's change says which.";
+    expect(structured.notice).toBe(notice);
+    expect(structured.applied_filters).toMatchObject({ time_from: 2021, time_to: 2024 });
+    expect(structured.applied_filters).not.toHaveProperty('time');
+    expect(sentParams(wired)).toMatchObject({ timefrom: '2021', timeto: '2024' });
+    const text = contentText(result);
+    expect(text).toContain(
+      '| 5.974 since 2021 (5.154; BA:13047 — LFS - National Labour Force Survey; reported; notes R1:3513) — source changed |',
+    );
+    expect(text).toContain(notice);
+    expect(text).toContain('· time_from 2021 · time_to 2024 ·');
+  });
+
+  it('flags a break the source marks between the endpoints, which the two-period request never fetched', async () => {
+    const wired = wireYouth();
+    const { result, enrichment } = await compare({
+      dataset_id: UNE,
+      ref_areas: ['ARE'],
+      classif1: YOUTH,
+      period: '2019',
+      change_years: 3,
+    });
+    // ARE's BA:716 marks a methodology break (B, I11:264) in 2017; neither 2016 nor 2019 carries it
+    expect(result.rows[0]?.change).toEqual({
+      from_period: '2016',
+      from_value: 6.042,
+      delta: 1.539,
+      from_source: 'BA:716',
+      from_source_label: 'LFS - Labour Force Survey',
+      from_basis: 'reported',
+      from_notes: [],
+      source_changed: false,
+      basis_changed: false,
+      break_in_series: true,
+    });
+    expect(enrichment.applied_filters).toMatchObject({ time_from: 2016, time_to: 2019 });
+    expect(enrichment.applied_filters).not.toHaveProperty('time');
+    expect(sentParams(wired)).toMatchObject({ timefrom: '2016', timeto: '2019' });
+    expect(enrichment.notice).toBe(
+      "1 of 1 change is not like-for-like (source changed 0, basis changed 0, break in series 1); each row's change says which.",
+    );
+  });
+
+  it("does not count a break marked on the baseline alone, and the legend decodes the baseline's codes", async () => {
+    wireYouth();
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['ARE'],
+      classif1: YOUTH,
+      period: '2020',
+      change_years: 3,
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.rows[0]).toMatchObject({ notes: ['R1:3513'] });
+    expect(structured.rows[0]).not.toHaveProperty('obs_status');
+    expect(structured.rows[0]?.change).toMatchObject({
+      from_period: '2017',
+      from_obs_status: 'B',
+      from_notes: ['I11:264', 'R1:3513'],
+      break_in_series: false,
+    });
+    // B and I11:264 appear on the baseline only
+    expect(structured.legend).toEqual({
+      obs_status: { B: 'Break in series' },
+      notes: {
+        'R1:3513': 'Repository: ILO-STATISTICS - Micro data processing',
+        'I11:264': 'Break in series: Methodology revised',
+      },
+    });
+    expect(structured).not.toHaveProperty('notice');
+    const lines = contentText(result).split('\n');
+    expect(lines.find((line) => line.startsWith('| 1 | ARE'))).toContain(
+      '| 6.312 since 2017 (7.668; BA:716 — LFS - Labour Force Survey; reported; status B; notes I11:264, R1:3513) — same source and basis, no break in series |',
+    );
+    expect(lines).toContain('- B — Break in series');
+    expect(lines).toContain('- I11:264 — Break in series: Methodology revised');
+  });
+
+  it('flags a basis change: a modelled baseline against a projection', async () => {
+    wireYouth(INDICATOR_CSV.une2eapUga);
+    const { result, enrichment } = await compare({
+      dataset_id: 'UNE_2EAP_SEX_AGE_RT_A',
+      ref_areas: ['UGA', 'X01'],
+      classif1: YOUTH,
+      period: '2026',
+      change_years: 3,
+    });
+    expect(result.rows.map((row) => [row.ref_area, row.basis, row.change])).toEqual([
+      [
+        'X01',
+        'projection',
+        {
+          from_period: '2023',
+          from_value: 12.272,
+          delta: 0.032,
+          ...X01_BASE,
+          basis_changed: true,
+          break_in_series: false,
+        },
+      ],
+      [
+        'UGA',
+        'projection',
+        {
+          from_period: '2023',
+          from_value: 4.208,
+          delta: -0.021,
+          from_source: 'XA:2168',
+          from_source_label: 'ILO - Modelled Estimates',
+          from_basis: 'modelled_estimate',
+          from_notes: [],
+          source_changed: false,
+          basis_changed: true,
+          break_in_series: false,
+        },
+      ],
+    ]);
+    expect(result.comparability.basis_counts).toEqual({
+      reported: 0,
+      modelled_estimate: 0,
+      projection: 2,
+    });
+    expect(enrichment.notice).toContain(
+      "2 of 2 changes are not like-for-like (source changed 0, basis changed 2, break in series 0); each row's change says which.",
+    );
+  });
+
+  it('on a monthly dataset reads whole years, picks the exact months, and scans only after the base month up to the period', async () => {
+    const header =
+      '"ref_area","source","indicator","sex","classif1","time","obs_value","obs_status","note_classif","note_indicator","note_source"';
+    const row = (area: string, time: string, value: number, marked = false) =>
+      `"${area}","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","${time}",${value},${marked ? '"B",,"I11:264",' : ',,,'}`;
+    const csv = [
+      `﻿${header}`,
+      // USA: breaks before the base month and after the period month only
+      row('USA', '2024M09', 4.4, true),
+      row('USA', '2024M06', 4.1),
+      row('USA', '2023M06', 3.6),
+      row('USA', '2023M03', 3.5, true),
+      // KEN: a break inside the span
+      row('KEN', '2024M06', 5.0),
+      row('KEN', '2023M07', 5.4, true),
+      row('KEN', '2023M06', 5.5),
+      '',
+    ].join('\n');
+    const wired = wire({ routes: [indicatorDataRoute(csv)] });
+    const { result, enrichment } = await compare({
+      dataset_id: 'UNE_DEAP_SEX_AGE_RT_M',
+      ref_areas: ['USA', 'KEN'],
+      period: '2024-06',
+      change_years: 1,
+    });
+    expect(sentParams(wired)).toMatchObject({ timefrom: '2023', timeto: '2024' });
+    expect(sentParams(wired)).not.toHaveProperty('time');
+    expect(enrichment.applied_filters).toMatchObject({ time_from: 2023, time_to: 2024 });
+    expect(
+      result.rows.map((row) => [
+        row.ref_area,
+        row.period,
+        row.value,
+        row.change?.from_period,
+        row.change?.break_in_series,
+      ]),
+    ).toEqual([
+      ['KEN', '2024M06', 5.0, '2023M06', true],
+      ['USA', '2024M06', 4.1, '2023M06', false],
+    ]);
+    expect(result.comparability.periods).toEqual(['2024M06']);
+  });
+
+  it('falls back to the two periods with a notice when the years between are too many to read, still one comparison', async () => {
+    // maxRows 1 caps the body at 1 KiB: the 2016–2025 range of ARE and UGA runs past it, the two periods do not
+    const wired = wireYouth(INDICATOR_CSV.youthBreaks, { observations: { maxRows: 1 } });
+    const { result, enrichment } = await compare({
+      dataset_id: UNE,
+      ref_areas: ['ARE', 'UGA'],
+      classif1: YOUTH,
+      period: '2025',
+      change_years: 9,
+    });
+    const urls = dataUrls(wired).map((url) => Object.fromEntries(upstreamParams(url)));
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toMatchObject({ timefrom: '2016', timeto: '2025' });
+    expect(urls[1]).toMatchObject({ time: '2025+2016' });
+    expect(urls[1]).not.toHaveProperty('timefrom');
+    expect(enrichment.applied_filters).toMatchObject({ time: ['2025', '2016'] });
+    expect(enrichment.applied_filters).not.toHaveProperty('time_from');
+    // The 2017 break lies between the endpoints, so the endpoint read cannot see it: unknown, not false
+    expect(result.rows.map((row) => [row.ref_area, row.change?.break_in_series])).toEqual([
+      ['ARE', null],
+    ]);
+    // The recorded structure's area list stops at the fixture's original areas
+    expect(result.missing).toEqual([{ ref_area: 'UGA', label: 'Uganda', reason: 'not_covered' }]);
+    expect(enrichment.notice).toContain(
+      "The periods from 2016 to 2025 were too many to read within this call's size and time limits, so only 2016 and 2025 were read: break_in_series is true where the current value marks a break and null elsewhere, since a break between them is unknown. Narrow ref_areas or area_group, or lower change_years, to check the periods between.",
+    );
+  });
+
+  it('renders an unread span as unknown in the change cell, never as no break', async () => {
+    wireYouth(INDICATOR_CSV.youthBreaks, { observations: { maxRows: 1 } });
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['ARE', 'UGA'],
+      classif1: YOUTH,
+      period: '2025',
+      change_years: 9,
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output;
+    expect(structured.rows[0]?.change?.break_in_series).toBeNull();
+    const text = contentText(result);
+    expect(text).toContain(
+      '| -1.106 since 2016 (6.042; BA:716 — LFS - Labour Force Survey; reported) — breaks between the periods not read |',
+    );
+    expect(text).not.toContain('no break in series');
+  });
+
+  describe('time budget', () => {
+    const YOUTH_CSV = fixtureText(INDICATOR_CSV.youthBreaks);
+    const ARE_2019 = {
+      dataset_id: UNE,
+      ref_areas: ['ARE'],
+      classif1: YOUTH,
+      period: '2019',
+      change_years: 3,
+    };
+    const COMPARISON_TIMEOUT_HINT =
+      'Narrow ref_areas or area_group, or lower change_years, then call again.';
+    const isRange = (url: URL) => upstreamParams(url).has('timefrom');
+    /** Stall and body timeouts past the test timeout, so they never end a hanging read in a timer's place. */
+    const SLOW_BODY_TIMEOUTS = { ...FAST_TIMEOUTS, stallMs: 60_000, bodyMs: 60_000 };
+
+    /** The youth-series catalog, with `/data/indicator` answered by `respond`; returns the data URLs requested. */
+    function wireDataFetch(
+      respond: (url: URL, signal: AbortSignal) => Response,
+      options: WireOptions = {},
+    ) {
+      const urls: URL[] = [];
+      let fixtures: FetchFn | undefined;
+      const fetch: FetchFn = (input, init) => {
+        const url = new URL(input);
+        if (url.origin !== RPLUMBER_ORIGIN || url.pathname !== '/data/indicator') {
+          if (!fixtures) throw new Error('fetch before wiring');
+          return fixtures(input, init);
+        }
+        urls.push(url);
+        return Promise.resolve(respond(url, init?.signal ?? new AbortController().signal));
+      };
+      const wired = wireServices({
+        ...options,
+        fixture: youthSeriesCatalogFixture(),
+        rplumber: { ...options.rplumber, fetch },
+      });
+      fixtures = wired.http.fetch;
+      return urls;
+    }
+
+    /** A 200 whose body sends the CSV header, then nothing until its request is aborted. */
+    function hangingBody(signal: AbortSignal): Response {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`${CSV_HEADER}\n`));
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }
+
+    it('falls back to the two periods when the read of the years between outlasts its share of the budget', async () => {
+      const urls = wireDataFetch(
+        (url, signal) =>
+          isRange(url) ? hangingBody(signal) : csvResponse(filterIndicatorCsv(YOUTH_CSV, url)),
+        { observations: { perSeriesReadMs: 50 }, rplumber: { timeouts: SLOW_BODY_TIMEOUTS } },
+      );
+      const { result, enrichment } = await compare(ARE_2019);
+      expect(urls.map(isRange)).toEqual([true, false]);
+      expect(upstreamParams(urls[1] ?? new URL(RPLUMBER_ORIGIN)).get('time')).toBe('2019+2016');
+      expect(result.rows[0]?.change).toMatchObject({
+        from_period: '2016',
+        delta: 1.539,
+        break_in_series: null,
+      });
+      expect(enrichment.notice).toContain(
+        "The periods from 2016 to 2019 were too many to read within this call's size and time limits, so only 2016 and 2019 were read:",
+      );
+    });
+
+    it('fails Timeout with a narrowing hint when the fallback outlasts the deadline too, on both surfaces', async () => {
+      // The deadline sits well past the read budget, so the fallback request is sent before it fires even under load
+      const urls = wireDataFetch((_url, signal) => hangingBody(signal), {
+        observations: { perSeriesReadMs: 50, latestDeadlineMs: 600 },
+        rplumber: { timeouts: SLOW_BODY_TIMEOUTS },
+      });
+      const error = await failure(ARE_2019);
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.message).toBe(
+        "The comparison did not finish within this call's 0.6 s time budget.",
+      );
+      expect(error.data).toMatchObject({ recovery: { hint: COMPARISON_TIMEOUT_HINT } });
+      expect(urls.map(isRange)).toEqual([true, false]);
+
+      const result = await runToolContract(compareGeographiesTool, ARE_2019);
+      expect(result.isError).toBe(true);
+      expect(contentText(result)).toContain(COMPARISON_TIMEOUT_HINT);
+    });
+
+    it("propagates the caller's cancellation of the read of the years between, with no fallback request", async () => {
+      const controller = new AbortController();
+      const urls = wireDataFetch((_url, signal) => {
+        setTimeout(() => controller.abort(new Error('caller went away')), 20);
+        return hangingBody(signal);
+      });
+      const ctx = createMockContext({
+        errors: compareGeographiesTool.errors,
+        signal: controller.signal,
+      });
+      await expect(compare(ARE_2019, ctx)).rejects.toThrow('caller went away');
+      expect(urls.map(isRange)).toEqual([true]);
+    });
+  });
+
+  it('a too-large period read without change_years still fails upstream_too_large: there is nothing to fall back to', async () => {
+    const csv = `${fixtureText(INDICATOR_CSV.youthBreaks)}${'"ARE","BA:716","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_Y15-24","2025",4.936,,,,"R1:3513"\n'.repeat(20)}`;
+    wireYouth(INDICATOR_CSV.youthBreaks, {
+      observations: { maxRows: 1 },
+      routes: [dataRoute(() => csvResponse(csv))],
+    });
+    const error = await failure({
+      dataset_id: UNE,
+      ref_areas: ['ARE'],
+      classif1: YOUTH,
+      period: '2025',
+    });
+    expect(error.data).toMatchObject({ reason: 'upstream_too_large' });
+  });
+
+  it('stages every new change column, codes and labels, null for an area without a change', async () => {
+    const canvas = canvasOn();
+    wireYouth(INDICATOR_CSV.youthBreaks, { canvas, observations: { previewChars: 600 } });
+    const ctx = newContext();
+    const { result } = await compare(
+      {
+        dataset_id: UNE,
+        ref_areas: ['UGA', 'ARE'],
+        classif1: YOUTH,
+        period: '2024',
+        change_years: 10,
+      },
+      ctx,
+    );
+    const name = result.dataframe?.name ?? '';
+    expect(name).toMatch(/^df_/);
+    const canvasId = await ctx.state.get<string>('canvas-id');
+    const instance = await canvas.acquire(canvasId ?? undefined, ctx);
+    const staged = await instance.query(
+      `SELECT ref_area, change_from_period, change_from_source, change_from_source_label, change_from_basis, change_from_obs_status, change_from_obs_status_label, change_from_note_codes, change_from_note_labels, change_source_changed, change_basis_changed, change_break_in_series FROM ${name} ORDER BY ref_area`,
+    );
+    expect(staged.rows).toEqual([
+      // ARE has no 2014 value
+      {
+        ref_area: 'ARE',
+        change_from_period: null,
+        change_from_source: null,
+        change_from_source_label: null,
+        change_from_basis: null,
+        change_from_obs_status: null,
+        change_from_obs_status_label: null,
+        change_from_note_codes: null,
+        change_from_note_labels: null,
+        change_source_changed: null,
+        change_basis_changed: null,
+        change_break_in_series: null,
+      },
+      {
+        ref_area: 'UGA',
+        change_from_period: '2014',
+        change_from_source: 'BB:268',
+        change_from_source_label: 'HIES - National Household Survey',
+        change_from_basis: 'reported',
+        change_from_obs_status: null,
+        change_from_obs_status_label: null,
+        change_from_note_codes: 'T5:1429;R1:3513',
+        change_from_note_labels:
+          'Unemployment definition: Two criteria (not in employment and seeking) | Repository: ILO-STATISTICS - Micro data processing',
+        change_source_changed: true,
+        change_basis_changed: false,
+        change_break_in_series: false,
+      },
+    ]);
   });
 });
 
@@ -699,7 +1241,8 @@ describe('slice', () => {
 describe('routing', () => {
   it('stages a comparison larger than the preview; ranks, missing, and comparability cover every area', async () => {
     const canvas = canvasOn();
-    wire({ canvas, observations: { previewChars: 600 } });
+    // A staged row with its change columns runs to ~800 characters: room for one area inline
+    wire({ canvas, observations: { previewChars: 1_200 } });
     const ctx = newContext();
     const { result, enrichment } = await compare(
       { dataset_id: UNE, ref_areas: ['USA', 'X01', 'KEN', 'JOR'], change_years: 1 },
@@ -721,7 +1264,7 @@ describe('routing', () => {
       projection: 0,
     });
     // The inline rows stop before the last area, so truncated is true; the dataframe holds the rest
-    expect(enrichment).toMatchObject({ truncated: true, shown: result.rows.length, cap: 600 });
+    expect(enrichment).toMatchObject({ truncated: true, shown: result.rows.length, cap: 1_200 });
     expect(enrichment.notice).toContain(
       `Showing ${result.rows.length} of 3 areas inline; ranks, missing, and comparability cover every area. Full result staged as ${name} (3 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL.`,
     );
@@ -763,7 +1306,7 @@ describe('routing', () => {
   });
 
   it('with dataframes off, cuts the inline rows at the preview and says so', async () => {
-    wire({ observations: { previewChars: 600 } });
+    wire({ observations: { previewChars: 1_200 } });
     const { result, enrichment } = await compare({
       dataset_id: UNE,
       ref_areas: ['USA', 'X01', 'KEN'],
@@ -777,7 +1320,7 @@ describe('routing', () => {
       modelled_estimate: 1,
       projection: 0,
     });
-    expect(enrichment).toMatchObject({ truncated: true, shown, cap: 600 });
+    expect(enrichment).toMatchObject({ truncated: true, shown, cap: 1_200 });
     expect(enrichment.notice).toContain(
       `Showing ${shown} of 3 areas inline: dataframes are off in this deployment. Ranks, missing, and comparability cover every area; narrow ref_areas or area_group to see the rest.`,
     );
@@ -1044,7 +1587,7 @@ describe('format()', () => {
       'Mode: period · period 2025 · change over 2 years · include_projections: false',
     );
     expect(lines).toContain(
-      '| 1 | USA — United States of America (country) | 4.282 | 2025 | reported | B | BA:453 — LFS - Current Population Survey | I11:264, R1:3513, R1:2803, T2:85 | 0.644 since 2023 (3.638) |',
+      '| 1 | USA — United States of America (country) | 4.282 | 2025 | reported | B | BA:453 — LFS - Current Population Survey | I11:264, R1:3513, R1:2803, T2:85 | 0.644 since 2023 (3.638; BA:453 — LFS - Current Population Survey; reported; notes R1:3513, T2:85) — break in series |',
     );
   });
 
@@ -1082,7 +1625,7 @@ describe('format() with hostile upstream codes', () => {
     });
     const lines = contentText(result).split('\n');
     expect(lines).toContain(
-      '| 1 | USA — United States of America (country) | 5 | 2024 ## p\\|q | reported | B ## s\\|t | BA:453 — LFS - Current Population Survey | R1:3513 ## n\\|m | 1 since 2023 ## p\\|q (4) |',
+      '| 1 | USA — United States of America (country) | 5 | 2024 ## p\\|q | reported | B ## s\\|t | BA:453 — LFS - Current Population Survey | R1:3513 ## n\\|m | 1 since 2023 ## p\\|q (4; BA:453 — LFS - Current Population Survey; reported) — same source and basis, no break in series |',
     );
     expect(lines.some((line) => line.startsWith('**Comparability:** periods 2024 ## p|q ·'))).toBe(
       true,
@@ -1188,7 +1731,7 @@ describe('contract envelope (runToolContract)', () => {
       change_years: 2,
     });
     const notice =
-      '1 value is an ILO modelled estimate and 1 is reported; they are not directly comparable. 1 area has no value; see missing.';
+      "1 value is an ILO modelled estimate and 1 is reported; they are not directly comparable. 2 of 2 changes are not like-for-like (source changed 0, basis changed 1, break in series 1); each row's change says which. 1 area has no value; see missing.";
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({ notice });
     expect(contentText(result)).toContain(notice);
@@ -1221,14 +1764,15 @@ describe('contract envelope (runToolContract)', () => {
   });
 
   it('a partial page validates as truncated, the disclosure on both surfaces', async () => {
-    wire({ observations: { previewChars: 600 } });
+    wire({ observations: { previewChars: 1_200 } });
     const result = await runToolContract(compareGeographiesTool, {
       dataset_id: UNE,
       ref_areas: ['USA', 'X01', 'KEN'],
     });
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as Output & { shown: number };
-    expect(structured).toMatchObject({ truncated: true, cap: 600 });
+    expect(structured).toMatchObject({ truncated: true, cap: 1_200 });
+    expect(structured.shown).toBeGreaterThan(0);
     expect(structured.rows).toHaveLength(structured.shown);
     expect(contentText(result)).toContain(
       `Showing ${structured.shown} of 3 areas inline: dataframes are off in this deployment.`,
@@ -1237,7 +1781,7 @@ describe('contract envelope (runToolContract)', () => {
 
   it('a staged page validates as truncated and names the dataframe on both surfaces', async () => {
     const canvas = canvasOn();
-    wire({ canvas, observations: { previewChars: 600 } });
+    wire({ canvas, observations: { previewChars: 1_200 } });
     const result = await runToolContract(compareGeographiesTool, {
       dataset_id: UNE,
       ref_areas: ['USA', 'X01', 'KEN'],
@@ -1246,8 +1790,9 @@ describe('contract envelope (runToolContract)', () => {
     const structured = result.structuredContent as Output & { notice: string; shown: number };
     const name = structured.dataframe?.name ?? '';
     expect(name).toMatch(/^df_/);
-    expect(structured).toMatchObject({ truncated: true, cap: 600 });
+    expect(structured).toMatchObject({ truncated: true, cap: 1_200 });
     expect(structured.rows).toHaveLength(structured.shown);
+    expect(structured.shown).toBeGreaterThan(0);
     expect(structured.shown).toBeLessThan(3);
     const disclosure = `Showing ${structured.shown} of 3 areas inline; ranks, missing, and comparability cover every area. Full result staged as ${name} (3 rows)`;
     expect(structured.notice).toContain(disclosure);

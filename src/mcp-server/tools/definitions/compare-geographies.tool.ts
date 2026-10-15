@@ -1,8 +1,9 @@
 /**
  * @fileoverview `ilostat_compare_geographies` — line reference areas up on one
  * slice of one ILOSTAT dataset: each area's value at a common period or at its
- * latest non-projected period, an optional change over N years, a rank by value,
- * the areas without a value and why, and flags for mixed periods and mixed bases.
+ * latest non-projected period, an optional change over N years with the earlier
+ * value's provenance and source, basis, and break flags, a rank by value, the
+ * areas without a value and why, and flags for mixed periods and mixed bases.
  * The slice defaults to the dataset's totals.
  * @module mcp-server/tools/definitions/compare-geographies
  */
@@ -51,29 +52,132 @@ const AppliedFiltersSchema = z
     sex: z.string().optional().describe('Sex code sent.'),
     classif1: z.string().optional().describe('classif1 code sent.'),
     classif2: z.string().optional().describe('classif2 code sent.'),
-    time: z.array(z.string()).optional().describe('Exact periods sent (period mode).'),
+    time: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Exact periods sent: period mode without change_years, or the period and its change base when the years between could not be read within the call's size and time limits.",
+      ),
     time_from: z
       .number()
       .optional()
-      .describe('First year sent (latest mode); no end year is sent.'),
+      .describe(
+        "First year sent: latest mode's window start (no end year is sent), or period mode's change base year.",
+      ),
+    time_to: z
+      .number()
+      .optional()
+      .describe("Last year sent: the period's year, in period mode with change_years."),
     best_source: z
       .literal('upstream default (yes)')
       .describe('best_source is never sent, so upstream returns the preferred source.'),
   })
   .describe('Every parameter sent upstream.');
 
-/** Labels for the status flags and note codes the inline comparison rows carry. */
+/** A row's change, with the earlier value's provenance and what differs across it. */
+const ChangeSchema = z.object({
+  from_period: z.string().describe('The earlier period.'),
+  from_value: z.number().describe('The value at the earlier period.'),
+  delta: z.number().describe('value − from_value, in the dataset unit.'),
+  from_source: z.string().describe('Source code of the earlier value.'),
+  from_source_label: z.string().optional().describe('Source label of the earlier value.'),
+  from_basis: z
+    .enum(BASES)
+    .describe('Basis of the earlier value: reported, modelled_estimate, or projection.'),
+  from_obs_status: z
+    .string()
+    .optional()
+    .describe('Status flag of the earlier value (legend.obs_status decodes it).'),
+  from_notes: z
+    .array(z.string())
+    .describe('Note codes of the earlier value (legend.notes decodes them).'),
+  source_changed: z.boolean().describe('True when the earlier value comes from another source.'),
+  basis_changed: z.boolean().describe('True when the earlier value has another basis.'),
+  break_in_series: z
+    .boolean()
+    .nullable()
+    .describe(
+      "True when a break in series (status B or an I11 note) is marked on the value or on an observation of its source after from_period: the series' method changed within the span. A break marked on the earlier value alone came before the span and does not count. null when only the two periods were read (notice says so) and the value marks no break: a break between them is unknown.",
+    ),
+});
+
+/** Labels for the status flags and note codes the inline comparison rows carry, their change bases' included. */
 function comparisonLegend(rows: readonly ComparisonRow[], snapshot: CatalogSnapshot) {
   const legend = { obs_status: codeLabels(), notes: codeLabels() };
   for (const row of rows) {
-    if (row.obs_status !== null) {
-      legend.obs_status[row.obs_status] = row.obs_status_label ?? UNLABELLED;
+    for (const [code, label] of [
+      [row.obs_status, row.obs_status_label],
+      [row.change_from_obs_status, row.change_from_obs_status_label],
+    ] as const) {
+      if (code !== null) legend.obs_status[code] = label ?? UNLABELLED;
     }
-    for (const code of noteCodesOf(row)) {
+    for (const code of [
+      ...noteCodesOf(row),
+      ...noteCodesOf({ note_codes: row.change_from_note_codes }),
+    ]) {
       legend.notes[code] = snapshot.notes.get(code)?.label ?? UNLABELLED;
     }
   }
   return legend;
+}
+
+/** The change of a staged comparison row, or `undefined` when the area has none. */
+function changeOf(row: ComparisonRow): z.infer<typeof ChangeSchema> | undefined {
+  const {
+    change_from_period: fromPeriod,
+    change_from_value: fromValue,
+    change_delta: delta,
+    change_from_source: fromSource,
+    change_from_basis: fromBasis,
+    change_source_changed: sourceChanged,
+    change_basis_changed: basisChanged,
+    change_break_in_series: breakInSeries,
+  } = row;
+  if (
+    fromPeriod === null ||
+    fromValue === null ||
+    delta === null ||
+    fromSource === null ||
+    fromBasis === null ||
+    sourceChanged === null ||
+    basisChanged === null
+  ) {
+    return;
+  }
+  return {
+    from_period: fromPeriod,
+    from_value: fromValue,
+    delta,
+    from_source: fromSource,
+    ...(row.change_from_source_label ? { from_source_label: row.change_from_source_label } : {}),
+    from_basis: fromBasis,
+    ...(row.change_from_obs_status ? { from_obs_status: row.change_from_obs_status } : {}),
+    from_notes: noteCodesOf({ note_codes: row.change_from_note_codes }),
+    source_changed: sourceChanged,
+    basis_changed: basisChanged,
+    break_in_series: breakInSeries,
+  };
+}
+
+/** The change cell: delta, the baseline's provenance, and which flags are set. */
+function renderChange(change: z.infer<typeof ChangeSchema>): string {
+  const source = `${change.from_source}${change.from_source_label ? ` — ${change.from_source_label}` : ''}`;
+  const baseline = [
+    source,
+    change.from_basis,
+    ...(change.from_obs_status ? [`status ${change.from_obs_status}`] : []),
+    ...(change.from_notes.length > 0 ? [`notes ${change.from_notes.join(', ')}`] : []),
+  ].join('; ');
+  const flags = [
+    change.source_changed ? 'source changed' : undefined,
+    change.basis_changed ? 'basis changed' : undefined,
+    change.break_in_series === null
+      ? 'breaks between the periods not read'
+      : change.break_in_series
+        ? 'break in series'
+        : undefined,
+  ].filter(Boolean);
+  return `${change.delta} since ${change.from_period} (${change.from_value}; ${baseline}) — ${flags.length > 0 ? flags.join(', ') : 'same source and basis, no break in series'}`;
 }
 
 function renderAppliedFilters(filters: CompareAppliedFilters): string {
@@ -86,6 +190,7 @@ function renderAppliedFilters(filters: CompareAppliedFilters): string {
   if (filters.classif2) parts.push(`classif2 ${filters.classif2}`);
   if (filters.time) parts.push(`time ${filters.time.join(', ')}`);
   if (filters.time_from !== undefined) parts.push(`time_from ${filters.time_from}`);
+  if (filters.time_to !== undefined) parts.push(`time_to ${filters.time_to}`);
   parts.push(`best_source ${filters.best_source}`);
   return `**Applied filters:** ${parts.join(' · ')}`;
 }
@@ -93,7 +198,7 @@ function renderAppliedFilters(filters: CompareAppliedFilters): string {
 export const compareGeographiesTool = tool('ilostat_compare_geographies', {
   title: 'Compare areas on an ILOSTAT dataset',
   description:
-    "Compare reference areas on one ILOSTAT dataset and one slice — a sex code plus breakdown codes, defaulting to the dataset's totals — giving each area's value at a common period or at its latest non-projected period, optional change over N years, and a rank, with each value's period, source, status, and basis (reported, modelled_estimate, or projection). Areas without a value are listed separately with the reason, and the response flags mixed periods and mixed bases rather than hiding them. Select areas by code list, by group (X01 for every country, an ILO region or subregion, or a World Bank income group), or both; X-coded aggregates require a dataset with aggregates.",
+    "Compare reference areas on one ILOSTAT dataset and one slice — a sex code plus breakdown codes, defaulting to the dataset's totals — giving each area's value at a common period or at its latest non-projected period, optional change over N years, and a rank, with each value's period, source, status, and basis (reported, modelled_estimate, or projection). A change carries the earlier value's source, basis, status, and notes, and flags whether the source or basis differs or the series breaks between the two values. Areas without a value are listed separately with the reason, and the response flags mixed periods and mixed bases rather than hiding them. Select areas by code list, by group (X01 for every country, an ILO region or subregion, or a World Bank income group), or both; X-coded aggregates require a dataset with aggregates.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -192,14 +297,9 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
               .optional()
               .describe('Observation status flag (legend.obs_status decodes it).'),
             notes: z.array(z.string()).describe('Note codes (legend.notes decodes them).'),
-            change: z
-              .object({
-                from_period: z.string().describe('The earlier period.'),
-                from_value: z.number().describe('The value at the earlier period.'),
-                delta: z.number().describe('value − from_value, in the dataset unit.'),
-              })
-              .optional()
-              .describe('Change over change_years; absent when the earlier value is missing.'),
+            change: ChangeSchema.optional().describe(
+              "Change over change_years with the earlier value's provenance; absent when the earlier value is missing. delta is like-for-like only when source_changed, basis_changed, and break_in_series are all false.",
+            ),
           })
           .describe('One area with a value.'),
       )
@@ -238,7 +338,9 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
         basis_counts: BasisCountsSchema,
         distinct_sources: z.number().describe('Distinct sources behind the values.'),
       })
-      .describe('What makes the values more or less comparable, over every area.'),
+      .describe(
+        "What makes the current values more or less comparable, over every area; each change's baseline is compared by its own source_changed, basis_changed, and break_in_series.",
+      ),
     dataframe: DataframeSchema.optional(),
     attribution: z.string().describe('Citation to keep with any use of the data.'),
   }),
@@ -249,7 +351,7 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       .string()
       .optional()
       .describe(
-        'Mixed periods, mixed bases, missing areas, a unit or area list the structure service could not supply, where the full comparison is staged, or why the inline rows stop early.',
+        'Mixed periods, mixed bases, changes that are not like-for-like, missing areas, a unit or area list the structure service could not supply, where the full comparison is staged, or why the inline rows stop early.',
       ),
     truncated: z
       .boolean()
@@ -432,30 +534,23 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       ...(result.windowFrom === undefined ? {} : { window_from: result.windowFrom }),
       ...(input.change_years === undefined ? {} : { change_years: input.change_years }),
       include_projections: input.include_projections,
-      rows: outcome.rows.map((row) => ({
-        rank: row.rank,
-        ref_area: row.ref_area,
-        ...(row.ref_area_label ? { label: row.ref_area_label } : {}),
-        kind: row.ref_area_kind,
-        value: row.value,
-        period: row.period,
-        basis: row.basis,
-        source: row.source,
-        ...(row.source_label ? { source_label: row.source_label } : {}),
-        ...(row.obs_status ? { obs_status: row.obs_status } : {}),
-        notes: noteCodesOf(row),
-        ...(row.change_from_period !== null &&
-        row.change_from_value !== null &&
-        row.change_delta !== null
-          ? {
-              change: {
-                from_period: row.change_from_period,
-                from_value: row.change_from_value,
-                delta: row.change_delta,
-              },
-            }
-          : {}),
-      })),
+      rows: outcome.rows.map((row) => {
+        const change = changeOf(row);
+        return {
+          rank: row.rank,
+          ref_area: row.ref_area,
+          ...(row.ref_area_label ? { label: row.ref_area_label } : {}),
+          kind: row.ref_area_kind,
+          value: row.value,
+          period: row.period,
+          basis: row.basis,
+          source: row.source,
+          ...(row.source_label ? { source_label: row.source_label } : {}),
+          ...(row.obs_status ? { obs_status: row.obs_status } : {}),
+          notes: noteCodesOf(row),
+          ...(change ? { change } : {}),
+        };
+      }),
       legend: comparisonLegend(outcome.rows, snapshot),
       missing: comparison.missing.map(({ refArea, reason }) => {
         const label = snapshot.refAreas.get(refArea)?.label;
@@ -489,9 +584,7 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
     for (const row of result.rows) {
       const area = `${row.ref_area}${row.label ? ` — ${row.label}` : ''} (${row.kind})`;
       const source = `${row.source}${row.source_label ? ` — ${row.source_label}` : ''}`;
-      const change = row.change
-        ? `${row.change.delta} since ${row.change.from_period} (${row.change.from_value})`
-        : '';
+      const change = row.change ? renderChange(row.change) : '';
       lines.push(
         `| ${row.rank} | ${tableCell(area)} | ${row.value} | ${tableCell(row.period)} | ${row.basis} | ${tableCell(row.obs_status ?? '')} | ${tableCell(source)} | ${tableCell(row.notes.join(', '))} | ${tableCell(change)} |`,
       );
