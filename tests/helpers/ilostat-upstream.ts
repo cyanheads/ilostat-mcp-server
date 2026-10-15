@@ -1,6 +1,7 @@
 /**
  * @fileoverview Recorded-shape ILOSTAT upstream for the test suite: the trimmed
- * rplumber tables of contents and dictionaries, the `/data/indicator` CSV and
+ * rplumber tables of contents and dictionaries, the whole live indicator catalog
+ * for catalog-wide search tests, the `/data/indicator` CSV and
  * `/data/ref_area` JSON bodies, and the SDMX structure documents and unit probes
  * under `tests/fixtures/`, served through the framework's strict fetch fake; an
  * emulator that filters a recorded CSV by the request's parameters, read as
@@ -18,6 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   CanvasRegistry,
@@ -100,11 +102,24 @@ export function loadCatalogFixture(): CatalogFixture {
 }
 
 /**
+ * The whole live indicator catalog as fetched 2026-10-15 (1,213 indicators, 1,964
+ * datasets): the indicator table of contents and the indicator, classification
+ * type, database, and subject dictionaries, every other list empty. For
+ * catalog-wide search behavior the trimmed fixture is too small to show.
+ */
+export function loadFullCatalogFixture(): CatalogFixture {
+  const { indicatorToc, refAreaToc, dictionaries } = JSON.parse(
+    gunzipSync(readFileSync(new URL('rplumber/catalog-full.json.gz', FIXTURES))).toString('utf8'),
+  ) as CatalogFixture;
+  return { indicatorToc, refAreaToc, dictionaries };
+}
+
+/**
  * The recorded catalog plus `observation-catalog-extras.json`: the headline
  * datasets the country profile reads (reported and modelled), the ILO modelled
- * estimates sources for KEN, USA, X01, and X06 (the only source label that
- * classifies a row as modelled), KEN's national survey sources, and the note codes
- * the data fixtures carry. Kept apart from `loadCatalogFixture()` because the
+ * estimates sources for KEN, USA, X01, X06, and CHN (the only source label that
+ * classifies a row as modelled), KEN's and CHN's national sources, CHN in the
+ * ref_area dictionary, and the note codes the data fixtures carry. Kept apart from `loadCatalogFixture()` because the
  * catalog tests assert its exact counts.
  */
 export function observationCatalogFixture(): CatalogFixture {
@@ -115,6 +130,24 @@ export function observationCatalogFixture(): CatalogFixture {
   };
   fixture.indicatorToc.push(...extras.indicatorToc);
   for (const [name, rows] of Object.entries(extras.dictionaries)) {
+    fixture.dictionaries[name] = [...(fixture.dictionaries[name] ?? []), ...rows];
+  }
+  return fixture;
+}
+
+/**
+ * {@link observationCatalogFixture} plus `youth-series-dictionaries.json`: UGA and
+ * ARE in the ref_area dictionary, the sources behind {@link INDICATOR_CSV}'s
+ * `youthBreaks` and `une2eapUga` rows (XA:2168 classifies as modelled), and the
+ * note codes those rows carry, labels as the live dictionaries give them.
+ */
+export function youthSeriesCatalogFixture(): CatalogFixture {
+  const fixture = observationCatalogFixture();
+  const extras = JSON.parse(fixtureText('rplumber/youth-series-dictionaries.json')) as Record<
+    string,
+    RawRow[]
+  >;
+  for (const [name, rows] of Object.entries(extras)) {
     fixture.dictionaries[name] = [...(fixture.dictionaries[name] ?? []), ...rows];
   }
   return fixture;
@@ -139,26 +172,60 @@ export const INDICATOR_CSV = {
   multiDatasetUnion: 'rplumber/multi-dataset-union.csv',
   /** A valid dataset with an unknown `ref_area`: `200` with the header row only. */
   headerOnly: 'rplumber/header-only.csv',
+  /**
+   * `id=UNE_DEAP_SEX_AGE_RT_A&ref_area=CHN`, the full history (2026-10-15): 133 rows
+   * over 84 series that end in different years — 15+ total in 2022, youth total in
+   * 2021, most other age bands and both sexes long before.
+   */
+  chnUneDeap: 'rplumber/une-deap-chn.csv',
+  /** The same with `sex=SEX_T`, both headline age codes, and `latestyear=TRUE`: the 15+ row alone. */
+  chnLatestTwoSlices: 'rplumber/une-deap-chn-latest-two-slices.csv',
+  /**
+   * `id=UNE_DEAP_SEX_AGE_RT_A&sex=SEX_T&classif1=AGE_YTHADULT_Y15-24&timefrom=2000`
+   * (2026-10-15), the UGA and ARE rows: UGA's best source alternates between
+   * BA:13047 (status `B` and note `I11:264` in 2012 and 2017), BB:268, and the 2024
+   * census AA:1745; ARE's BA:716 runs 2016–2025 with its break marked in 2017.
+   */
+  youthBreaks: 'rplumber/une-deap-youth-breaks.csv',
+  /**
+   * `id=UNE_2EAP_SEX_AGE_RT_A&ref_area=UGA+X01&sex=SEX_T&classif1=AGE_YTHADULT_Y15-24&timefrom=2023&timeto=2026`
+   * (2026-10-15): ILO modelled estimates, modelled through 2024 and projected after.
+   */
+  une2eapUga: 'rplumber/une-2eap-uga-x01.csv',
 } as const;
 
 /**
- * Recorded `/data/ref_area` bodies (`format=.json`, `latestyear=TRUE`), trimmed to
- * the profile's headline slices (15+ and 15–24, sex-only and unbroken datasets
- * whole) plus the 25+ rows of the unemployment indicator, so local slicing has to
- * choose. The modelled KEN and X01 captures were recorded at `timeto=2025`, but the
- * service sends the Nov. 2025 edition's cutoff, `timeto=2024`: their periods are
- * set to 2024 keeping the recorded shape and values. `kenModelled2025` keeps the
- * capture's 2025 periods verbatim, for the case where rows past the cutoff must be
- * excluded.
+ * Recorded `/data/ref_area` bodies (`format=.json`). The KEN and X01 captures were
+ * recorded with `latestyear=TRUE` and trimmed to the profile's headline slices
+ * (15+ and 15–24, sex-only and unbroken datasets whole) plus the 25+ rows of the
+ * unemployment indicator, so local slicing has to choose. The CHN captures are
+ * untrimmed, each as its entry describes. The modelled KEN and X01 captures were
+ * recorded at `timeto=2025`, but the service sends the Nov. 2025 edition's cutoff,
+ * `timeto=2024`: their periods are set to 2024 keeping the recorded shape and
+ * values. `kenModelled2025` keeps the capture's 2025 periods verbatim, for the case
+ * where rows past the cutoff must be excluded.
  */
 export const REF_AREA_JSON = {
-  /** `id=KEN_A`, the six reported headline indicators, latest year (2021; informality 2019). */
+  /**
+   * `id=KEN_A`, the six reported headline indicators, latest year (2021; informality
+   * 2019). One period per slice: served to the reported full-history calls it
+   * exercises slicing and pairing, never the pick of a slice's latest period, which
+   * `chnReported` carries.
+   */
   kenReported: 'rplumber/ref-area-ken-reported.json',
   /** `id=KEN_A`, the modelled headline indicators at 2024 (no informality estimate for KEN). */
   kenModelled: 'rplumber/ref-area-ken-modelled.json',
   kenModelled2025: 'rplumber/ref-area-ken-modelled-2025.json',
   /** `id=X01_A`, the modelled unemployment rate and labour income share at 2024. */
   x01Modelled: 'rplumber/ref-area-x01-modelled.json',
+  /** `id=CHN_A`, the six reported headline indicators, full history (2026-10-15; no CHN informality data). */
+  chnReported: 'rplumber/ref-area-chn-reported.json',
+  /** The same with `latestyear=TRUE`: 8 rows, youth unemployment and every SEX_M/SEX_F age slice gone. */
+  chnReportedLatest: 'rplumber/ref-area-chn-reported-latest.json',
+  /** The same full history with `classif1=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24`: the sex-only NEET rows dropped. */
+  chnReportedClassif1: 'rplumber/ref-area-chn-reported-c1.json',
+  /** `id=CHN_A`, the modelled headline indicators (recorded at `timeto=2025`, periods set to 2024 as above). */
+  chnModelled: 'rplumber/ref-area-chn-modelled.json',
 } as const;
 
 /** The rows of a recorded `/data/ref_area` body. */
@@ -312,9 +379,14 @@ const csvCells = (line: string): string[] =>
  * `source`, `time` (`+`-joined periods), `timefrom`, and `timeto` (years), every
  * list read as {@link upstreamParams} reads it. A code filter applies only to rows
  * whose cell for it is non-empty — upstream's rule: a dataset without the breakdown
- * passes through unfiltered. `latestyear`, `best_source`, `type`, and `format` are
- * not emulated; serve a fixture recorded with them instead. Kept lines are returned
- * byte for byte, header (and BOM) first.
+ * passes through unfiltered. `latestyear=TRUE` keeps the rows at the latest period
+ * of each area and indicator (per frequency), every sex and breakdown series
+ * sharing it — the upstream definition, checked against the recorded CHN capture.
+ * It is applied after the other filters; no recorded capture tells that apart from
+ * applying it before them (each capture's newest period survives its filters), so
+ * a test must not depend on the difference. `best_source`, `type`,
+ * and `format` are not emulated; serve a fixture recorded with them instead. Kept
+ * lines are returned byte for byte, header (and BOM) first.
  */
 export function filterIndicatorCsv(csv: string, url: URL): string {
   const [header = '', ...lines] = csv.split('\n').filter((line) => line !== '');
@@ -333,9 +405,12 @@ export function filterIndicatorCsv(csv: string, url: URL): string {
   const from = params.has('timefrom') ? Number(params.get('timefrom')) : undefined;
   const to = params.has('timeto') ? Number(params.get('timeto')) : undefined;
 
-  const kept = lines.filter((line) => {
+  const cellOf = (line: string) => {
     const cells = csvCells(line);
-    const cell = (name: string): string => cells[columns.indexOf(name)] ?? '';
+    return (name: string): string => cells[columns.indexOf(name)] ?? '';
+  };
+  const kept = lines.filter((line) => {
+    const cell = cellOf(line);
     const year = Number(cell('time').slice(0, 4));
     return (
       (!indicators ||
@@ -346,7 +421,56 @@ export function filterIndicatorCsv(csv: string, url: URL): string {
       (to === undefined || year <= to)
     );
   });
-  return `${[header, ...kept].join('\n')}\n`;
+  const latest = params.get('latestyear') === 'TRUE' ? latestOnly(kept, cellOf) : kept;
+  return `${[header, ...latest].join('\n')}\n`;
+}
+
+/** The entries at the latest period of each area and indicator, per frequency — upstream's `latestyear=TRUE`. */
+function latestOnly<T>(entries: T[], cellOf: (entry: T) => (name: string) => string): T[] {
+  const keyOf = (cell: (name: string) => string) =>
+    [
+      cell('ref_area'),
+      cell('indicator'),
+      cell('time')
+        .replace(/^\d{4}/, '')
+        .charAt(0),
+    ].join('|');
+  const newest = new Map<string, string>();
+  for (const entry of entries) {
+    const cell = cellOf(entry);
+    const key = keyOf(cell);
+    const time = cell('time');
+    if ((newest.get(key) ?? '') < time) newest.set(key, time);
+  }
+  return entries.filter((entry) => {
+    const cell = cellOf(entry);
+    return newest.get(keyOf(cell)) === cell('time');
+  });
+}
+
+/**
+ * Emulates `/data/ref_area` over recorded rows: keeps the rows of the requested
+ * `indicator` codes, then — when `classif1` is set — only the rows carrying one of
+ * its codes, dropping rows (whole indicators) with no classif1, as upstream does
+ * there (verified live, unlike `/data/indicator`), then applies `latestyear=TRUE` as
+ * {@link filterIndicatorCsv} does. `timeto` is not emulated: the modelled captures
+ * were recorded with it, and the service's own cutoff check is under test.
+ */
+export function filterRefAreaRows(rows: RawRow[], url: URL): RawRow[] {
+  const params = upstreamParams(url);
+  const listed = (name: string): Set<string> | undefined => {
+    const value = params.get(name);
+    return value ? new Set(value.split('+')) : undefined;
+  };
+  const indicators = listed('indicator');
+  const classif1 = listed('classif1');
+  const kept = rows.filter(
+    (row) =>
+      (!indicators || indicators.has(String(row.indicator))) &&
+      (!classif1 || classif1.has(String(row.classif1 ?? ''))),
+  );
+  const cellOf = (row: RawRow) => (name: string) => String(row[name] ?? '');
+  return params.get('latestyear') === 'TRUE' ? latestOnly(kept, cellOf) : kept;
 }
 
 /**
@@ -432,13 +556,14 @@ export function streamedCsv(
 /**
  * A real in-memory DuckDB canvas, as `core.canvas` builds one, minus the sweeper
  * timer. Its provider disables extension autoinstall/autoload, so it never reaches
- * the network. Call `canvas.shutdown(ctx)` after each test.
+ * the network. `defaultRowLimit` is the provider's per-query row ceiling
+ * (`CANVAS_DEFAULT_ROW_LIMIT`). Call `canvas.shutdown(ctx)` after each test.
  */
-export function memoryCanvas(): DataCanvas {
+export function memoryCanvas({ defaultRowLimit = 10_000 } = {}): DataCanvas {
   const provider = new DuckdbProvider({
     memoryLimitMb: 256,
     exportRootPath: join(tmpdir(), 'ilostat-mcp-server-test-exports'),
-    defaultRowLimit: 10_000,
+    defaultRowLimit,
     schemaSniffRows: 100,
   });
   return new DataCanvas(
@@ -606,8 +731,12 @@ export function clientOptions(
 export interface ObservationLimits {
   /** Response-cache TTL; `0` disables the cache. Defaults to `ILOSTAT_CACHE_TTL_SECONDS`. */
   cacheTtlMs?: number;
+  /** The `latest_only` call deadline; defaults to the service's. */
+  latestDeadlineMs?: number;
   /** Defaults to `ILOSTAT_MAX_ROWS`. */
   maxRows?: number;
+  /** The `latest_only` per-series read budget; defaults to the service's. */
+  perSeriesReadMs?: number;
   /** Defaults to `ILOSTAT_PREVIEW_CHARS`. */
   previewChars?: number;
 }
@@ -672,6 +801,10 @@ export function wireServices(options: WireOptions = {}): WiredServices {
       maxRows: limits.maxRows ?? config.maxRows,
       previewChars: limits.previewChars ?? config.previewChars,
       now,
+      ...(limits.latestDeadlineMs === undefined
+        ? {}
+        : { latestDeadlineMs: limits.latestDeadlineMs }),
+      ...(limits.perSeriesReadMs === undefined ? {} : { perSeriesReadMs: limits.perSeriesReadMs }),
       ...(services.bridge ? { bridge: services.bridge } : {}),
     });
     services.profiles = new ProfileService({ rplumber, catalog, cache });
