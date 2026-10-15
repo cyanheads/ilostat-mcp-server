@@ -1,6 +1,6 @@
 # ilostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 05:50:50
+Generated on: 2026-10-15 16:20:23
 
 ```text
 ilostat-mcp-server/
@@ -25,6 +25,7 @@ ilostat-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -171,6 +172,7 @@ ilostat-mcp-server/
 │   │   │   └── parse-csv.ts
 │   │   ├── observations/
 │   │   │   ├── comparison.ts
+│   │   │   ├── latest-series.ts
 │   │   │   ├── observation-rows.ts
 │   │   │   ├── observation-service.ts
 │   │   │   ├── request-validation.ts
@@ -196,19 +198,30 @@ ilostat-mcp-server/
 │   │   └── server-config.test.ts
 │   ├── fixtures/
 │   │   ├── rplumber/
+│   │   │   ├── catalog-full.json.gz
 │   │   │   ├── dictionaries.json
 │   │   │   ├── header-only.csv
 │   │   │   ├── multi-dataset-union.csv
 │   │   │   ├── observation-catalog-extras.json
+│   │   │   ├── ref-area-chn-modelled.json
+│   │   │   ├── ref-area-chn-reported-c1.json
+│   │   │   ├── ref-area-chn-reported-latest.json
+│   │   │   ├── ref-area-chn-reported.json
 │   │   │   ├── ref-area-ken-modelled-2025.json
 │   │   │   ├── ref-area-ken-modelled.json
 │   │   │   ├── ref-area-ken-reported.json
 │   │   │   ├── ref-area-x01-modelled.json
 │   │   │   ├── retired-dataset.json
+│   │   │   ├── search-corpus-golden.json
 │   │   │   ├── toc-indicator.json
 │   │   │   ├── toc-ref-area.json
+│   │   │   ├── une-2eap-uga-x01.csv
 │   │   │   ├── une-deap-best-source-all.csv
-│   │   │   └── une-deap-sex-age-rt-a.csv
+│   │   │   ├── une-deap-chn-latest-two-slices.csv
+│   │   │   ├── une-deap-chn.csv
+│   │   │   ├── une-deap-sex-age-rt-a.csv
+│   │   │   ├── une-deap-youth-breaks.csv
+│   │   │   └── youth-series-dictionaries.json
 │   │   └── sdmx/
 │   │       ├── probe-EMP_TEMP_SEX_INS_DSB_NB.csv
 │   │       ├── probe-LAP_2LID_QTL_RT.csv
@@ -235,12 +248,14 @@ ilostat-mcp-server/
 │   │   ├── catalog/
 │   │   │   ├── catalog-service.test.ts
 │   │   │   ├── codes.test.ts
+│   │   │   ├── search.test.ts
 │   │   │   ├── snapshot.test.ts
 │   │   │   └── text.test.ts
 │   │   ├── csv/
 │   │   │   └── parse-csv.test.ts
 │   │   ├── observations/
 │   │   │   ├── comparison.test.ts
+│   │   │   ├── latest-series.test.ts
 │   │   │   ├── observation-rows.test.ts
 │   │   │   └── response-cache.test.ts
 │   │   ├── rplumber/
