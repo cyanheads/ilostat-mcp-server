@@ -29,7 +29,7 @@
 
 ## Overview
 
-Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Labour Organization's statistical database, read from two keyless ILO APIs: the [ILOSTAT data API](https://rplumber.ilo.org/__docs__/) (`rplumber.ilo.org`) and the [ILO SDMX API](https://sdmx.ilo.org/) (`sdmx.ilo.org`). Find an indicator, read its unit and breakdown codes, pull observations for countries, regions, and income groups, compare areas, and build a headline labour-market profile. Every value is marked as reported, modelled estimate, or projection. Large results stage as dataframes you query with SQL. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Labour Organization's database. Find an indicator, pull observations for countries, regions, and income groups, compare areas, and build a labour-market profile, with every value marked as reported, modelled, or projected. No API key required.
 
 ### Tools
 
@@ -51,7 +51,7 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 ### `ilostat_search_indicators` <sub>tool</sub>
 
-- Plain-language `query` (every term must match a word or word prefix, and a derived form no catalog word starts with matches by its stem, so `informality` finds `informal`; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure` (every indicator of one measured quantity, by describe's `measure.code`), and `aggregates_only` filters; omit `query` to browse by filters
+- Plain-language `query` (every term must match a word or word prefix; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure`, and `aggregates_only` filters; omit `query` to browse by filters
 - Up to 50 hits per page (default 10; a larger `limit` is applied as 50, with a notice), continued with `next_cursor`; each hit is one indicator with a `dataset_id` per frequency, coverage years, `n_ref_area`, `last_update`, and `has_aggregates`, and `facets` count the whole match set
 - An unrecognized `database`, `subject`, `breakdown`, or `measure` code fails as `unknown_filter_code`
 
@@ -60,17 +60,17 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 ### `ilostat_describe_indicator` <sub>tool</sub>
 
 - One `dataset_id` (`UNE_DEAP_SEX_AGE_RT_A`) or a bare indicator code, which describes every frequency; an unknown code returns `found: false` with `guidance`
-- Definition, `unit` and its `multiplier`, frequency variants, `breakdowns` (sex codes, plus `classif1` / `classif2` codes with totals marked `is_total`), `default_slice`, covered `ref_areas`, `basis_rule`, and the first 20 `related_datasets` with `related_total`, the count of every other indicator sharing the measure (search with `measure` lists them all, this one included)
-- Breakdowns, unit, and areas come from the SDMX API; when it can't answer, `structure_status` is `unavailable` and those fields are absent rather than the call failing
+- Definition, `unit` and its `multiplier`, frequency variants, `breakdowns` (sex codes, plus `classif1` / `classif2` codes with totals marked `is_total`), `default_slice`, covered `ref_areas`, `basis_rule`, and the first 20 `related_datasets` with `related_total`
+- When the SDMX API can't answer, `structure_status` is `unavailable` and breakdowns, unit, and areas are absent rather than the call failing
 
 ---
 
 ### `ilostat_query_indicator` <sub>tool</sub>
 
-- Up to 100 `dataset_ids`, every one validated; the first 3 distinct datasets are queried and the rest come back as `remaining_dataset_ids` for another call. Filtered by `ref_areas` (up to 300) and/or an `area_group`, `sex`, `classif1`, `classif2`, `sources`, and period: one exact `time`, or a `time_from` / `time_to` year window, `latest_only`, or both
-- `latest_only` keeps each series' own latest period (one dataset, area, sex, classif1, and classif2 code), so a youth series ending a year before the 15+ total still comes back; a request whose full history is too large or too slow to read in one call falls back to the latest period per area and dataset, and `applied_filters.latest_mode` and the notice say so
-- `source_selection` is `best` by default (the preferred source per area and period), `all`, or `secondary`; rows carry `source`, `obs_status`, `notes`, and `basis`, decoded in `legend`, and `applied_filters` echoes every parameter sent
-- A result past the inline preview stages in full as a `df_<id>` `dataframe`; an unfiltered request larger than `ILOSTAT_MAX_ROWS` fails as `request_too_broad`, and a filtered one that streams past it as `result_too_large`
+- Up to 100 `dataset_ids`; the first 3 distinct datasets are queried and the rest come back as `remaining_dataset_ids` for another call. Filter by `ref_areas` (up to 300) and/or an `area_group`, `sex`, `classif1`, `classif2`, `sources`, and period: one exact `time`, a `time_from` / `time_to` year window, `latest_only`, or both
+- `latest_only` keeps each series' own latest period; a request whose full history is too large to read in one call falls back to the latest period per area and dataset, and `applied_filters.latest_mode` and the notice say so
+- `source_selection` is `best` by default, `all`, or `secondary`; rows carry `source`, `obs_status`, `notes`, and `basis`, decoded in `legend`, and `applied_filters` echoes every parameter sent
+- A result past the inline preview stages in full as a `df_<id>` `dataframe`; a request over `ILOSTAT_MAX_ROWS` fails as `request_too_broad` (unfiltered) or `result_too_large` (filtered)
 
 ---
 
@@ -86,7 +86,7 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 - One `dataset_id` and one slice (`sex`, `classif1`, `classif2`, defaulting to the dataset's totals); areas from `ref_areas` (up to 300), an `area_group`, or both, and at least one is required
 - `period` puts every area at one period; without it, each area gets its latest value within `lookback_years` (default 10), projections excluded unless `include_projections`; `change_years` (1–30) adds each value's change over that span
-- A change carries the earlier value's source, basis, status, and notes, with `source_changed`, `basis_changed`, and `break_in_series` flags, and the notice counts the changes that are not like-for-like; period mode reads the years between the two values so a break marked there shows, and when they are too many to read in one call it reads the two values alone and leaves `break_in_series` null unless the current value marks a break
+- A change carries the earlier value's source, basis, status, and notes, with `source_changed`, `basis_changed`, and `break_in_series` flags; the notice counts the changes that are not like-for-like
 - Rows carry `rank`, `value`, `period`, `basis`, and `source`; areas without a value land in `missing` with a `reason`, and `comparability` reports `mixed_periods`, `basis_counts`, and `distinct_sources`
 
 ---
@@ -101,17 +101,17 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 ### `ilostat_dataframe_describe` <sub>tool</sub>
 
-- Pass one `df_XXXXX_XXXXX`, or omit `name` to list every staged dataframe, newest first. Listing is off under HTTP with auth `none`, where every caller shares one canvas: there a dataframe is reached by its exact name only
+- Pass one `df_XXXXX_XXXXX`, or omit `name` to list every staged dataframe, newest first (listing is off under HTTP with auth `none`; use the exact name)
 - Each entry carries the producing `source_tool` and its `query_params`, `datasets`, `coverage`, `basis_counts`, `attribution`, `created_at` / `expires_at`, `row_count`, and the `column_schema` to write SQL against
-- Each dataset keeps its full unit beside `unit`: `unit_measure`, `unit_type`, `unit_type_label`, `unit_multiplier`, and `unit_multiplier_label`, so a `register_as` dataframe whose SQL drops the `unit_multiplier` column still records its scale; values are never rescaled
+- Each dataset keeps its full unit beside `unit`: `unit_measure`, `unit_type`, `unit_type_label`, `unit_multiplier`, and `unit_multiplier_label`; values are never rescaled
 
 ---
 
 ### `ilostat_dataframe_query` <sub>tool</sub>
 
 - One DuckDB `SELECT` (joins, aggregates, window functions, CTEs) over `df_<id>` tables, up to 20,000 characters; writes, DDL, multi-statement SQL, file references and file-reading functions, engine-setting reads, and system catalogs are rejected
-- `row_limit` caps the rows materialized (default 1,000, or the per-call cap when lower; a value past the 10,000-row per-call cap is applied as the cap; `row_count_capped` flags a hit) and `preview` the rows returned inline, which also stop at `ILOSTAT_PREVIEW_CHARS` (whole rows only; a lone row past it is withheld, its widest column named with a `substr()` part size that fits, or a pointer to fewer columns when that column fits alone); `applied_limits` echoes the values applied, and BIGINT values arrive as strings
-- `register_as` stores the full result as a new dataframe with a fresh TTL, so analyses chain; a result over 1,000,000 rows is refused as `register_as_too_large`, and `evicted` names any older dataframes dropped to make room
+- `row_limit` caps the rows materialized (default 1,000; capped at 10,000 per call, with `row_count_capped` flagging a hit) and `preview` the rows returned inline, which also stop at `ILOSTAT_PREVIEW_CHARS`; `applied_limits` echoes the values applied, and BIGINT values arrive as strings
+- `register_as` stores the full result as a new dataframe with a fresh TTL; a result over 1,000,000 rows fails as `register_as_too_large`, and `evicted` names any older dataframes dropped to make room
 
 ---
 
@@ -127,10 +127,9 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 ILOSTAT-specific:
 
 - Two keyless ILO APIs: the ILOSTAT data API serves the catalog, the code dictionaries, and observations; the ILO SDMX API serves each dataset's breakdown codes, default slice, and unit
-- The catalog (both tables of contents and 13 code dictionaries) is held in memory and rechecked every `ILOSTAT_CATALOG_REFRESH_HOURS`; every code a tool takes is validated against it before a request goes upstream
-- One request pacer per upstream host; a 429 or challenge page starts a cooldown and reaches the caller as a retryable `upstream_busy` carrying `retryAfter`
-- Data responses of up to 5,000 rows are cached for `ILOSTAT_CACHE_TTL_SECONDS`
-- Dataframes on by default: a query or comparison larger than `ILOSTAT_PREVIEW_CHARS` stages in full as a DuckDB `df_<id>` table that lives for `ILOSTAT_DATASET_TTL_SECONDS`. A tenant holds at most 1,000,000 staged rows in 100 dataframes, so a new table can evict the oldest ones before their TTL, and the response names them in `evicted`. With `CANVAS_PROVIDER_TYPE=none`, or in the `.mcpb` bundle (which ships without DuckDB's native binding), results stop at the inline preview and say so
+- The catalog and code dictionaries are held in memory and rechecked every `ILOSTAT_CATALOG_REFRESH_HOURS`; every code a tool takes is validated against them before a request goes upstream
+- A request pacer per upstream host; a 429 or challenge page reaches the caller as a retryable `upstream_busy` carrying `retryAfter`. Data responses of up to 5,000 rows are cached for `ILOSTAT_CACHE_TTL_SECONDS`
+- Dataframes on by default: a query or comparison larger than `ILOSTAT_PREVIEW_CHARS` stages in full as a DuckDB `df_<id>` table that lives for `ILOSTAT_DATASET_TTL_SECONDS`, up to 1,000,000 rows in 100 dataframes per tenant (older ones are evicted and named in `evicted`). With `CANVAS_PROVIDER_TYPE=none`, or in the `.mcpb` bundle (no DuckDB binding), results stop at the inline preview and say so
 - ILOSTAT data and metadata are published under the ILO Open Access policy as [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); every data response carries an `attribution` to keep with the numbers
 
 Agent-friendly output:
@@ -254,9 +253,9 @@ cp .env.example .env
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `ILOSTAT_CATALOG_REFRESH_HOURS` | Hours between checks of the ILOSTAT tables of contents (1–168). The dictionaries are re-fetched only when a dataset was added, removed, or updated. | `6` |
+| `ILOSTAT_CATALOG_REFRESH_HOURS` | Hours between catalog refresh checks (1–168). | `6` |
 | `ILOSTAT_MAX_ROWS` | Ceiling on the rows one query may return or stage (1,000–1,000,000). | `500000` |
-| `ILOSTAT_PREVIEW_CHARS` | Inline preview budget in serialized characters (at least 1,000); a larger query or comparison result stages as a dataframe, and a dataframe SQL result returns only the leading rows that fit. | `40000` |
+| `ILOSTAT_PREVIEW_CHARS` | Inline preview budget in serialized characters (at least 1,000); larger results stage as a dataframe. | `40000` |
 | `ILOSTAT_CACHE_TTL_SECONDS` | Seconds an upstream data response of up to 5,000 rows stays cached; `0` disables the cache. | `900` |
 | `ILOSTAT_DATASET_TTL_SECONDS` | Per-table TTL for staged dataframes, in seconds (at least 60). | `86400` |
 | `ILOSTAT_DATAFRAME_DROP_ENABLED` | Set `true` to expose `ilostat_dataframe_drop`. | `false` |
