@@ -97,6 +97,44 @@ describe('stemOf', () => {
     expect(stemOf(word)).toBe(stem);
   });
 
+  it.each([
+    'disable',
+    'disables',
+    'disabled',
+    'disabling',
+    'disability',
+    'disabilities',
+    'disably',
+  ])('reads -ble as the -bil its -bility noun spells: %s → disabil', (word) => {
+    expect(stemOf(word)).toBe('disabil');
+  });
+
+  it.each([
+    ['able', 'ability'],
+    ['comparable', 'comparability'],
+    ['possibly', 'possibility'],
+    ['eligible', 'eligibility'],
+  ])('gives %s and %s one stem', (word, noun) => {
+    expect(stemOf(word)).toBe(stemOf(noun));
+  });
+
+  it.each([
+    ['dense', 'density'],
+    ['secure', 'security'],
+    ['mobile', 'mobility'],
+    ['measure', 'measuring'],
+    ['process', 'processes'],
+  ])('drops a silent e, so %s and %s share a stem', (word, related) => {
+    expect(stemOf(word)).toBe(stemOf(related));
+    expect(stemOf(word).endsWith('e')).toBe(false);
+  });
+
+  it('keeps a silent e that would leave fewer than four letters', () => {
+    expect(stemOf('rate')).toBe('rate');
+    expect(stemOf('rates')).toBe('rate');
+    expect(stemOf('ability')).toBe('abil');
+  });
+
   it('keeps the word whole when the stem would be shorter than four letters', () => {
     expect(stemOf('city')).toBe('city');
     expect(stemOf('jobs')).toBe('jobs');

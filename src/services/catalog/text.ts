@@ -84,24 +84,36 @@ const STEM_RULES: readonly (readonly [suffix: string, replacement: string])[] = 
   ['ized', ''],
   ['ised', ''],
   ['ies', 'y'],
+  ['bly', 'bl'],
   ['ly', ''],
   ['ed', ''],
   ['s', ''],
 ];
 
-/**
- * Light suffix stem of a normalized word: one suffix stripped (`informality` →
- * `informal`, `unionization` → `union`, `inactive` and `inactivity` → `inact`),
- * `ies` turned to `y`, never an `s` after `ss`. The word stays whole when the stem
- * would be shorter than four letters.
- */
-export function stemOf(word: string): string {
+/** The word with the first {@link STEM_RULES} suffix that ends it stripped, or whole when that leaves under four letters. */
+function stripSuffix(word: string): string {
   for (const [suffix, replacement] of STEM_RULES) {
     if (!word.endsWith(suffix) || (suffix === 's' && word.endsWith('ss'))) continue;
     const stem = word.slice(0, -suffix.length) + replacement;
     return stem.length >= 4 ? stem : word;
   }
   return word;
+}
+
+/**
+ * Light suffix stem of a normalized word: one suffix stripped (`informality` →
+ * `informal`, `unionization` → `union`, `inactive` and `inactivity` → `inact`),
+ * `ies` turned to `y`, never an `s` after `ss`; the word stays whole when the stem
+ * would be shorter than four letters. Then the stem's ending is spelled as its
+ * `-ity` noun spells it: `-ble` or `-bl` as `-bil` (`disabled`, `disable`, and
+ * `disability` → `disabil`), and a silent `e` dropped when four letters remain
+ * (`secure` and `security` → `secur`).
+ */
+export function stemOf(word: string): string {
+  const stem = stripSuffix(word);
+  if (stem.endsWith('bl')) return `${stem.slice(0, -2)}bil`;
+  if (stem.endsWith('ble')) return `${stem.slice(0, -3)}bil`;
+  return stem.endsWith('e') && stem.length > 4 ? stem.slice(0, -1) : stem;
 }
 
 const ENTITIES: Record<string, string> = {

@@ -3,15 +3,20 @@
  * word or word prefix; a term that matches no word or word prefix anywhere in the
  * catalog is matched by its light suffix stem instead, decided against the whole
  * catalog so a filter never changes how a term matches, and named in the notice.
+ * The sex words (`female`, `women`, `male`, `men`) are indexed beside the breakdown
+ * name of every indicator broken down by sex, and a term naming one of them, when
+ * such an indicator matched, has the notice name the `sex` filter for its values.
  * The ranking is a transparent three-tier rule with no score:
  * tier 1 when every term matches the label, tier 2 when every term matches across
  * label, subject, database, breakdown names, and code, tier 3 when the definition
- * text is needed. Within a tier, indicators covering more reference areas come
- * first, then indicator code. Facets and the zero-hit notice are computed over the
+ * text is needed. A sex word beside other terms must match but sets no tier, so
+ * `female unemployment rate` ranks its hits as `unemployment rate` does. Within a
+ * tier, indicators covering more reference areas come first, then indicator code. Facets and the zero-hit notice are computed over the
  * fully filtered match set, locally.
  * @module services/catalog/search
  */
 
+import { SEX_SEARCH_WORDS } from './codes.js';
 import { pageOf } from './paging.js';
 import { stemOf, termMatches, wordsOf } from './text.js';
 import type { CatalogSnapshot, CodeLabel, Dataset, Indicator } from './types.js';
@@ -55,7 +60,7 @@ export interface SearchResult {
   facets: SearchFacets;
   hits: SearchHit[];
   nextCursor?: string;
-  /** Zero-hit guidance, a note that the query held no searchable word, the terms matched by stem, or that the cursor starts past the last match. */
+  /** Zero-hit guidance, a note that the query held no searchable word, the terms matched by stem, the sex filter a sex word names, or that the cursor starts past the last match. */
   notice?: string;
   total: number;
 }
@@ -67,49 +72,75 @@ const SCOPE_RANK: Record<MatchScope, number> = { label: 0, metadata: 1, definiti
 /** Whether one search term matches among an indicator's words. */
 type TermMatcher = (words: readonly string[]) => boolean;
 
+/**
+ * The query's matchers: `ranked` set an indicator's tier, `required` must only
+ * match somewhere in it. Empty `ranked` means no query term, so search browses.
+ */
+interface QueryMatchers {
+  ranked: TermMatcher[];
+  required: TermMatcher[];
+}
+
 /** A term matched by stem, with the catalog words that share its stem. */
 interface StemmedTerm {
   term: string;
   words: string[];
 }
 
+/** The `SEX_*` code a term names when it is one of {@link SEX_SEARCH_WORDS} or its plural. */
+function sexCodeOf(term: string): 'SEX_F' | 'SEX_M' | undefined {
+  return SEX_SEARCH_WORDS.get(term.replace(/s$/, ''));
+}
+
 /**
  * One matcher per term. A term that is a word or word prefix of any catalog word
  * keeps that rule; any other term matches the catalog words sharing its stem, and
- * the catalog word its stem spells.
+ * the catalog word its stem spells. A sex word beside other terms is required but
+ * not ranked: no label holds one, so ranking by it would drop every hit out of the
+ * label tier. A query of sex words alone ranks by them.
  */
 function termMatchers(
   snapshot: CatalogSnapshot,
   terms: string[],
-): { matchers: TermMatcher[]; stemmed: StemmedTerm[] } {
-  const matchers: TermMatcher[] = [];
+): { matchers: QueryMatchers; stemmed: StemmedTerm[] } {
+  const ranked: TermMatcher[] = [];
+  const sexWords: TermMatcher[] = [];
   const stemmed: StemmedTerm[] = [];
   for (const term of terms) {
+    const group = sexCodeOf(term) ? sexWords : ranked;
     if (termMatches(term, snapshot.searchVocabulary)) {
-      matchers.push((words) => termMatches(term, words));
+      group.push((words) => termMatches(term, words));
       continue;
     }
     const forms = snapshot.searchStems.get(stemOf(term)) ?? [];
     const formSet = new Set(forms);
-    matchers.push((words) => words.some((word) => formSet.has(word)));
+    group.push((words) => words.some((word) => formSet.has(word)));
     if (forms.length > 0) stemmed.push({ term, words: forms });
   }
+  const matchers =
+    ranked.length > 0 ? { ranked, required: sexWords } : { ranked: sexWords, required: [] };
   return { matchers, stemmed };
 }
 
 const matchesAll = (matchers: TermMatcher[], words: readonly string[]) =>
   matchers.every((matches) => matches(words));
 
-function matchScope(indicator: Indicator, matchers: TermMatcher[]): MatchScope | undefined {
-  if (matchesAll(matchers, indicator.search.label)) return 'label';
-  if (matchesAll(matchers, indicator.search.metadata)) return 'metadata';
-  if (matchesAll(matchers, indicator.search.definition)) return 'definition';
+/** The tier the ranked terms reach, when the required terms match the indicator too. */
+function matchScope(
+  indicator: Indicator,
+  { ranked, required }: QueryMatchers,
+): MatchScope | undefined {
+  const { label, metadata, definition } = indicator.search;
+  if (!matchesAll(required, definition)) return;
+  if (matchesAll(ranked, label)) return 'label';
+  if (matchesAll(ranked, metadata)) return 'metadata';
+  if (matchesAll(ranked, definition)) return 'definition';
   return;
 }
 
 function matching(
   snapshot: CatalogSnapshot,
-  matchers: TermMatcher[],
+  matchers: QueryMatchers,
   filters: Filters,
 ): SearchHit[] {
   const hits: SearchHit[] = [];
@@ -124,14 +155,14 @@ function matching(
         (!filters.aggregatesOnly || dataset.hasAggregates),
     );
     if (datasets.length === 0) continue;
-    if (matchers.length === 0) {
+    if (matchers.ranked.length === 0) {
       hits.push({ indicator, datasets });
       continue;
     }
     const scope = matchScope(indicator, matchers);
     if (scope) hits.push({ indicator, datasets, scope });
   }
-  if (matchers.length > 0) {
+  if (matchers.ranked.length > 0) {
     const reach = (hit: SearchHit) => Math.max(...hit.datasets.map((dataset) => dataset.nRefArea));
     hits.sort(
       (a, b) =>
@@ -182,7 +213,7 @@ function without(filters: Filters, key: (typeof RELAXABLE)[number]): Filters {
 /** Composes the zero-hit notice from whichever relaxations would yield hits, each computed locally. */
 function zeroHitNotice(
   snapshot: CatalogSnapshot,
-  matchers: TermMatcher[],
+  matchers: QueryMatchers,
   filters: Filters,
 ): string {
   const fragments: string[] = [];
@@ -203,7 +234,10 @@ function zeroHitNotice(
       'None of these indicators carries regional aggregates; the ILO modelled estimates (database ILOEST) do.',
     );
   }
-  if (matchers.length > 0 && matching(snapshot, matchers, { aggregatesOnly: false }).length === 0) {
+  if (
+    matchers.ranked.length > 0 &&
+    matching(snapshot, matchers, { aggregatesOnly: false }).length === 0
+  ) {
     fragments.push(
       'No indicator matched every term. Use fewer or broader terms (for example "youth unemployment"), or browse subjects with ilostat_list_reference topic subjects and search by subject.',
     );
@@ -233,6 +267,15 @@ export function searchIndicators(snapshot: CatalogSnapshot, params: SearchParams
     notices.push(
       `${term} matched no catalog word or word prefix, so it was matched by stem: ${words.join(', ')}. Check the hits are about ${term}; if those words mean something else, search a synonym instead.`,
     );
+  }
+  if (hits.some((hit) => hit.indicator.classificationTypes.includes('SEX'))) {
+    for (const term of terms) {
+      const code = sexCodeOf(term);
+      if (!code) continue;
+      notices.push(
+        `${term} matched indicators broken down by sex; pass sex: ["${code}"] to ilostat_query_indicator for ${code === 'SEX_F' ? 'female' : 'male'} values.`,
+      );
+    }
   }
   if (hits.length === 0) notices.push(zeroHitNotice(snapshot, matchers, filters));
   if (page.notice) notices.push(page.notice);

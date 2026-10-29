@@ -1,7 +1,8 @@
 /**
  * @fileoverview Builds a {@link CatalogSnapshot} from the raw tables of contents and
- * dictionaries: datasets grouped into indicators, the per-indicator search words and
- * the catalog-wide search vocabulary with its words grouped by stem, reference areas
+ * dictionaries: datasets grouped into indicators, the per-indicator search words (the
+ * sex words beside a sex breakdown's name) and the catalog-wide search vocabulary
+ * with its words grouped by stem, reference areas
  * with their region and income-group memberships, the area groups `area_group`
  * accepts, and every decoded code vocabulary. Pure.
  * @module services/catalog/snapshot
@@ -14,7 +15,12 @@ import type {
   IndicatorTocRow,
   RefAreaTocRow,
 } from '@/services/rplumber/types.js';
-import { classificationTypeOf, FREQUENCY_ORDER, normalizeAreaCode } from './codes.js';
+import {
+  classificationTypeOf,
+  FREQUENCY_ORDER,
+  normalizeAreaCode,
+  SEX_SEARCH_WORDS,
+} from './codes.js';
 import { htmlToText, stemOf, toIsoTimestamp, wordsOf } from './text.js';
 import {
   AREA_GROUP_TYPES,
@@ -100,6 +106,9 @@ function breakdownNames(
   return types.map((type) => (typeLabels.get(type) ?? type).toLowerCase());
 }
 
+/** The sex words, indexed beside the breakdown name of an indicator broken down by sex. */
+const SEX_WORDS = [...SEX_SEARCH_WORDS.keys()].join(' ');
+
 function buildIndicators(
   toc: IndicatorTocRow[],
   descriptions: Map<string, string>,
@@ -125,6 +134,7 @@ function buildIndicators(
       first['database.label'],
       first.database,
       breakdowns.join(' '),
+      types.includes('SEX') ? SEX_WORDS : undefined,
       code,
     );
     indicators.push({
@@ -140,10 +150,12 @@ function buildIndicators(
       ...(edition ? { edition } : {}),
       datasets,
       hasAggregates: datasets.some((dataset) => dataset.hasAggregates),
-      lastUpdate: datasets.reduce(
-        (latest, dataset) => (dataset.lastUpdate > latest ? dataset.lastUpdate : latest),
-        '',
-      ),
+      // ISO timestamps order as strings; Math.max would coerce them to NaN.
+      lastUpdate:
+        datasets
+          .map((dataset) => dataset.lastUpdate)
+          .toSorted()
+          .at(-1) ?? '',
       search: {
         label: labelWords,
         metadata: metadataWords,

@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for `ilostat_search_indicators` against the recorded catalog
  * served through `RplumberClient`'s fetch seam: the three-tier ranking, term
- * normalization, the stem fallback and its notice, browse mode, the per-dataset frequency and aggregates filters,
+ * normalization, the stem fallback and its notice, sex words and the sex-filter notice, browse mode, the per-dataset frequency and aggregates filters,
  * code filters (the measure filter included) validated against the catalog, facets
  * over the fully filtered match set, every zero-hit notice fragment, cursor paging
  * past the first page, a limit past the page cap applied as the cap, blank
@@ -24,6 +24,7 @@ import {
   tocRow,
   wireServices,
 } from '../helpers/ilostat-upstream.js';
+import { readMarkdown } from '../helpers/markdown-text.js';
 import { guardNetwork } from '../helpers/network-guard.js';
 
 guardNetwork();
@@ -184,6 +185,20 @@ describe('derived word forms', () => {
     expect(text).toContain(`> ${MANAGERIALLY}`);
   });
 
+  it('reaches the disability indicators from disabled, on both surfaces', async () => {
+    wireServices();
+    const expected = indicators((await search({ query: 'disability', limit: 50 })).result);
+    expect(expected).toContain('EMP_TEMP_SEX_INS_DSB_NB');
+    const result = await runToolContract(searchIndicatorsTool, { query: 'disabled', limit: 50 });
+    expect(result.isError).toBeFalsy();
+    const output = result.structuredContent as Output & { notice?: string };
+    expect(indicators(output)).toEqual(expected);
+    expect(output.notice).toBe(
+      'disabled matched no catalog word or word prefix, so it was matched by stem: disability. Check the hits are about disabled; if those words mean something else, search a synonym instead.',
+    );
+    expect(readMarkdown(contentText(result))).toContain(`> ${output.notice}`);
+  });
+
   it('keeps the stem notice ahead of the paging guidance on a paged result', async () => {
     wireServices();
     const first = await runToolContract(searchIndicatorsTool, { query: 'employing', limit: 2 });
@@ -217,6 +232,132 @@ describe('derived word forms', () => {
       'UNE_DEAP_SEX_EDU_RT',
     ]);
     expect(enrichment.notice).toBeUndefined();
+  });
+});
+
+describe('sex words', () => {
+  const FEMALE =
+    'female matched indicators broken down by sex; pass sex: ["SEX_F"] to ilostat_query_indicator for female values.';
+  const MEN =
+    'men matched indicators broken down by sex; pass sex: ["SEX_M"] to ilostat_query_indicator for male values.';
+  const ZERO_HIT =
+    'No indicator matched every term. Use fewer or broader terms (for example "youth unemployment"), or browse subjects with ilostat_list_reference topic subjects and search by subject.';
+
+  it('match the sex breakdown and name the sex filter on both surfaces', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, {
+      query: 'female unemployment rate',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      hits: [
+        { indicator: 'UNE_DEAP_SEX_AGE_RT', match_scope: 'label', breakdowns: ['sex', 'age'] },
+        { indicator: 'UNE_2EAP_SEX_AGE_RT', match_scope: 'label' },
+        { indicator: 'UNE_DEAP_SEX_EDU_RT', match_scope: 'label' },
+      ],
+      total: 3,
+      truncated: false,
+      notice: FEMALE,
+    });
+    const text = readMarkdown(contentText(result));
+    expect(text).toContain('**3 matching indicators**');
+    expect(text).toContain(`> ${FEMALE}`);
+    expect(text).toContain('Matched on: label');
+  });
+
+  it('rank by the other terms on both surfaces, page after page', async () => {
+    wireServices({ fixture: loadFullCatalogFixture() });
+    const whole = await search({ query: 'unemployment rate', limit: 20 });
+    const first = await runToolContract(searchIndicatorsTool, {
+      query: 'female unemployment rate',
+      limit: 10,
+    });
+    const firstOutput = first.structuredContent as Output;
+    expect(firstOutput.total).toBe(135);
+    const cursor = nextCursorOf(first);
+    expect(cursor).toBeDefined();
+    const second = await runToolContract(searchIndicatorsTool, {
+      query: 'female unemployment rate',
+      limit: 10,
+      cursor: cursor ?? '',
+    });
+    const secondOutput = second.structuredContent as Output;
+    const paged = [...firstOutput.hits, ...secondOutput.hits];
+    // Every one of the first 20 "unemployment rate" hits is broken down by sex, so the
+    // sex word removes none of them and the two rankings agree hit for hit.
+    expect(paged.map((hit) => [hit.indicator, hit.match_scope])).toEqual(
+      whole.result.hits.map((hit) => [hit.indicator, hit.match_scope]),
+    );
+    expect(paged.every((hit) => hit.match_scope === 'label')).toBe(true);
+    const oneLargerPage = await search({ query: 'female unemployment rate', limit: 20 });
+    expect(paged).toEqual(oneLargerPage.result.hits);
+    for (const [page, output] of [
+      [first, firstOutput],
+      [second, secondOutput],
+    ] as const) {
+      const text = readMarkdown(contentText(page));
+      const headings = text
+        .split('\n')
+        .filter((line) => line.startsWith('### '))
+        .map((line) => line.slice(4, line.indexOf(' — ')));
+      expect(headings).toEqual(output.hits.map((hit) => hit.indicator));
+      expect(text.match(/Matched on: label/g)).toHaveLength(10);
+    }
+    expect(readMarkdown(contentText(first))).toContain(
+      '### UNE_DEAP_SEX_AGE_RT — Unemployment rate by sex and age (%)',
+    );
+  });
+
+  it('keep the sex notice ahead of the paging guidance on every page', async () => {
+    wireServices();
+    const first = await runToolContract(searchIndicatorsTool, { query: 'men', limit: 2 });
+    const output = first.structuredContent as Output & { notice?: string; truncated?: boolean };
+    expect(output.truncated).toBe(true);
+    expect(output.total).toBeGreaterThan(2);
+    expect(output.notice).toBe(
+      `${MEN} Showing 2 of ${output.total} matching indicators; pass next_cursor as cursor for the next page.`,
+    );
+    expect(readMarkdown(contentText(first))).toContain(`> ${MEN} Showing 2 of`);
+    const cursor = nextCursorOf(first);
+    expect(cursor).toBeDefined();
+    const second = await search({ query: 'men', limit: 2, cursor: cursor ?? '' });
+    expect(String(second.enrichment.notice).startsWith(`${MEN} `)).toBe(true);
+  });
+
+  it('compose with the page-cap clamp', async () => {
+    wireServices();
+    const { enrichment } = await search({ query: 'female unemployment rate', limit: 51 });
+    expect(enrichment.notice).toBe(`limit 51 was applied as 50, the per-call page cap. ${FEMALE}`);
+  });
+
+  it('keep the sex notice beside the past-the-end notice on a cursor past the last match', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, {
+      query: 'female unemployment rate',
+      cursor: encodeCursor({ offset: 30, limit: 10 }),
+    });
+    expect(result.structuredContent).toMatchObject({
+      hits: [],
+      total: 3,
+      shown: 0,
+      notice: `${FEMALE} ${pastEndNotice(3)}`,
+    });
+    expect(readMarkdown(contentText(result))).toContain(`> ${FEMALE} ${pastEndNotice(3)}`);
+  });
+
+  it('leave a search that matches nothing with the zero-hit notice alone', async () => {
+    wireServices();
+    const { result, enrichment } = await search({ query: 'female astronaut' });
+    expect(result.total).toBe(0);
+    expect(enrichment.notice).toBe(ZERO_HIT);
+  });
+
+  it('narrow under the breakdown filter, and an unknown breakdown code still fails', async () => {
+    wireServices();
+    const { result } = await search({ query: 'female', breakdown: 'edu' });
+    expect(indicators(result)).toEqual(['UNE_DEAP_SEX_EDU_RT']);
+    const error = await failure({ query: 'female', breakdown: 'NOPE' });
+    expect(error.data).toMatchObject({ reason: 'unknown_filter_code' });
   });
 });
 

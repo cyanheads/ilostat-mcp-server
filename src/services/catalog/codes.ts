@@ -41,6 +41,22 @@ const SEX_ALIASES: Record<string, string> = {
   OTHER: 'SEX_O',
 };
 
+/**
+ * Search words naming one sex, with the `SEX_*` code each names. The catalog indexes
+ * them beside the breakdown name of every indicator broken down by sex, since its
+ * text names the breakdown (`sex`) but not its values; a plural reaches them through
+ * the plural rule.
+ */
+export const SEX_SEARCH_WORDS: ReadonlyMap<string, 'SEX_F' | 'SEX_M'> = new Map<
+  string,
+  'SEX_F' | 'SEX_M'
+>([
+  ['female', 'SEX_F'],
+  ['women', 'SEX_F'],
+  ['male', 'SEX_M'],
+  ['men', 'SEX_M'],
+]);
+
 /** Sex input: trim, uppercase, and map `T`/`M`/`F`/`O` and `total`/`both`/`male`/`female`/`other` onto the `SEX_*` codes. */
 export function normalizeSexCode(code: string): string {
   const upper = code.trim().toUpperCase();

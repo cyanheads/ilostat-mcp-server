@@ -39,7 +39,7 @@ export interface SearchWords {
   /** Label plus metadata plus the definition text. */
   definition: string[];
   label: string[];
-  /** Label, subject, database, breakdown names, and code. */
+  /** Label, subject, database, breakdown names (plus the sex words for a sex breakdown), and code. */
   metadata: string[];
 }
 
