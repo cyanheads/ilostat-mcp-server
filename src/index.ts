@@ -32,6 +32,8 @@ await createApp({
   tools: buildToolDefinitions({ canvasEnabled, dropEnabled: dataframeDropEnabled }),
   resources: [],
   prompts: [],
+  // Published agent skills under ./skills, served as skill:// resources.
+  skills: 'skills',
   // No tool asks the caller for input mid-handler, so every HTTP request can land on
   // any instance. MCP_SESSION_MODE still overrides this when it carries a value.
   sessionMode: 'stateless',

@@ -85,6 +85,7 @@ describe('src/index.ts', () => {
         'resources',
         'sessionMode',
         'setup',
+        'skills',
         'teardown',
         'title',
         'tools',
@@ -95,6 +96,7 @@ describe('src/index.ts', () => {
       title: 'ilostat-mcp-server',
       resources: [],
       prompts: [],
+      skills: 'skills',
       sessionMode: 'stateless',
     });
   });
