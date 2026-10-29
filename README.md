@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/ilostat-mcp-server</h1>
   <p><b>Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL via MCP. STDIO or Streamable HTTP.</b>
-  <div>9 Tools</div>
+  <div>9 Tools • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/ilostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/ilostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/ilostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/ilostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/ilostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/ilostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -47,11 +47,19 @@ Labour statistics from [ILOSTAT](https://ilostat.ilo.org), the International Lab
 
 `ilostat_dataframe_drop` is off unless `ILOSTAT_DATAFRAME_DROP_ENABLED=true`, and `CANVAS_PROVIDER_TYPE=none` turns off all three dataframe tools.
 
+### Skill
+
+| Skill | Description |
+|:---|:---|
+| `ilostat-guide` | Gates for answering labour-market questions with these tools: choosing reported or ILO modelled data, finding a population group as a breakdown code, one classification version per sum, rates that do not add, source changes and breaks in trends, and SQL over staged dataframes |
+
+Ships in `skills/` for plugin installs, the npm package, the Docker image, and the `.mcpb` bundle, and is served over MCP as `skill://ilostat-guide/SKILL.md`.
+
 ## Capability reference
 
 ### `ilostat_search_indicators` <sub>tool</sub>
 
-- Plain-language `query` (every term must match a word or word prefix; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure`, and `aggregates_only` filters; omit `query` to browse by filters
+- Plain-language `query` (every term must match a word or word prefix; a term no catalog word starts with matches by its stem, so `informality` finds `informal` and `disabled` finds `disability`; `female`, `women`, `male`, and `men` match every indicator broken down by sex, and the notice names the `sex` filter for `ilostat_query_indicator`; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure`, and `aggregates_only` filters; omit `query` to browse by filters
 - Up to 50 hits per page (default 10; a larger `limit` is applied as 50, with a notice), continued with `next_cursor`; each hit is one indicator with a `dataset_id` per frequency, coverage years, `n_ref_area`, `last_update`, and `has_aggregates`, and `facets` count the whole match set
 - An unrecognized `database`, `subject`, `breakdown`, or `measure` code fails as `unknown_filter_code`
 
@@ -307,6 +315,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 | `src/services/profile` | Headline country profile. |
 | `src/services/basis` | Rules classing each value as reported, modelled estimate, or projection. |
 | `src/services/canvas-bridge` | DataCanvas adapter: `df_<id>` staging, provenance, SQL, drop. |
+| `skills/ilostat-guide/` | Published agent skill, served over MCP as `skill://ilostat-guide/SKILL.md`. |
 | `tests/` | Vitest suite mirroring `src/`, with recorded upstream fixtures. |
 
 ## Development guide
