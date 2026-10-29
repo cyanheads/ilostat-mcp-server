@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-29 · ⚠️ Breaking
+
+Published ilostat-guide skill, sex-word search (female, men, women, male) and derived forms like disabled, provenance for query() dataframe reads, and the .mcpb bundle running with dataframes off. Breaking: an unqualified current_schema column now fails denied_function.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-15 · ⚠️ Breaking · 🛡️ Security
 
 Per-series latest values, bounded dataframe previews and dataset batches, baseline provenance and break flags in compare changes, derived-word search, and SQL hardening from mcp-ts-core 0.13.15. Breaking: the compare period-mode filter echo and the SQL gate's denied functions.

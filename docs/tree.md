@@ -1,6 +1,6 @@
 # ilostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-15 16:20:23
+Generated on: 2026-10-29 19:17:23
 
 ```text
 ilostat-mcp-server/
@@ -26,6 +26,7 @@ ilostat-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -37,6 +38,8 @@ ilostat-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +137,9 @@ ilostat-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── ilostat-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -236,8 +242,11 @@ ilostat-mcp-server/
 │   ├── helpers/
 │   │   ├── ilostat-upstream.test.ts
 │   │   ├── ilostat-upstream.ts
+│   │   ├── markdown-text.ts
 │   │   ├── network-guard.test.ts
 │   │   └── network-guard.ts
+│   ├── scripts/
+│   │   └── bundle-agent-docs.test.ts
 │   ├── services/
 │   │   ├── basis/
 │   │   │   └── basis.test.ts
@@ -299,7 +308,9 @@ ilostat-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/ilostat-mcp-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.cyanheads/ilostat-mcp-server",
   "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL via MCP. STDIO or Streamable HTTP.",
   "type": "module",
