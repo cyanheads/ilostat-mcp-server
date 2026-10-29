@@ -2,9 +2,10 @@
  * @fileoverview Tests for `ilostat_dataframe_query` over a real in-memory
  * DuckDB canvas: a `register_as` name in any case is stored under the minted
  * `df_XXXXX_XXXXX` form, which describe and a later `register_as` then resolve;
- * a `df_` name in the SQL is read in any case, bare or double-quoted, for the
- * `missing_table` name the engine's rejection is rebuilt with and a derived
- * table's provenance; `missing_table` points at no listing where every caller
+ * a `df_` name in the SQL is read in any case, bare, double-quoted, or inside a
+ * `query()` literal, for the `missing_table` name the engine's rejection is
+ * rebuilt with and a derived table's provenance; an unqualified `current_schema`
+ * keeps the framework's qualify-the-column recovery; `missing_table` points at no listing where every caller
  * shares one canvas; a canvas re-minted
  * after a restart leaves no stale name to clash with; a `register_as` result
  * larger than its inline rows reports an exact `row_count` and points at the
@@ -46,6 +47,7 @@ import {
   type WireOptions,
   wireDataframes,
 } from '../helpers/ilostat-upstream.js';
+import { readMarkdown } from '../helpers/markdown-text.js';
 import { guardNetwork } from '../helpers/network-guard.js';
 
 guardNetwork();
@@ -298,7 +300,7 @@ describe('df_ names in SQL', () => {
     expect(result.structuredContent).toMatchObject({
       error: { code: JsonRpcErrorCode.DatabaseError, message: redacted },
     });
-    expect(contentText(result)).toContain(redacted);
+    expect(readMarkdown(contentText(result))).toContain(redacted);
     expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
   });
 
@@ -330,7 +332,7 @@ describe('df_ names in SQL', () => {
     expect(result.structuredContent).toMatchObject({
       error: { code: ErrorHandler.classifyOnly(engineError).code, message: redacted },
     });
-    expect(contentText(result)).toContain(redacted);
+    expect(readMarkdown(contentText(result))).toContain(redacted);
     expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
   });
 
@@ -409,9 +411,78 @@ describe('df_ names in SQL', () => {
         error: { data: { reason, recovery: { hint } } },
       });
       expect(hint).not.toMatch(/\blists?\b/);
-      expect(contentText(result)).toContain(`Recovery: ${hint}`);
+      expect(readMarkdown(contentText(result))).toContain(`Recovery: ${hint}`);
     },
   );
+
+  it('reads a dataframe inside a query() literal, so a register_as table records it and inherits its datasets, unit multiplier included, on both surfaces', async () => {
+    wireCanvas();
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const sql = `SELECT sum(value) AS total FROM query('SELECT * FROM ${name}') WHERE ref_area = 'KEN'`;
+    const result = await runQuery({ sql, register_as: 'df_NESTD_00001' }, ctx);
+    expect(result).toMatchObject({ registered_as: 'df_NESTD_00001', row_count: 1 });
+
+    const describeCtx = sharingState(
+      createMockContext({ tenantId: TENANT, errors: dataframeDescribeTool.errors }),
+      ctx,
+    );
+    const described = await dataframeDescribeTool.handler(
+      dataframeDescribeTool.input.parse({ name: 'df_NESTD_00001' }),
+      describeCtx as Parameters<typeof dataframeDescribeTool.handler>[1],
+    );
+    expect(described.dataframes[0]).toMatchObject({
+      query_params: { sql, derived_from: [name] },
+      datasets: [{ dataset_id: UNE, unit_multiplier: 0, unit_multiplier_label: 'Units' }],
+    });
+    const text = (dataframeDescribeTool.format?.(described) ?? [])
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(`"derived_from":["${name}"]`);
+    expect(text).toContain(`- Dataset: ${UNE} — `);
+    expect(text).toContain('multiplier 0 (Units)');
+  });
+
+  it('fails missing_table for an unstaged df_ name inside query() in a comment-led read, on both surfaces', async () => {
+    wireCanvas();
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "/* lead */ SELECT * FROM query('SELECT * FROM df_nope0_nope0')",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        message: 'Dataframe df_NOPE0_NOPE0 does not exist or has expired.',
+        data: {
+          reason: 'missing_table',
+          tableName: 'df_NOPE0_NOPE0',
+          recovery: { hint: MISSING_TABLE_RECOVERY },
+        },
+      },
+    });
+    const text = contentText(result);
+    expect(text).toContain('Dataframe df_NOPE0_NOPE0 does not exist or has expired.');
+    expect(text).toContain(`Recovery: ${MISSING_TABLE_RECOVERY}`);
+  });
+
+  it('keeps the framework’s qualify-the-column recovery on an unqualified current_schema column, on both surfaces', async () => {
+    wireCanvas();
+    const hint =
+      'Qualify a column named current_schema with its table (<table>.current_schema), or remove the reference — the current_schema() function is not available.';
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT current_schema FROM (SELECT 1 AS current_schema) AS t',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'denied_function', function: 'current_schema', recovery: { hint } },
+      },
+    });
+    const text = readMarkdown(contentText(result));
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).not.toContain(contractRecovery('denied_function'));
+  });
 
   it('fails missing_table for a double-quoted name that matches nothing, named in the minted form, on both surfaces', async () => {
     wireCanvas();
@@ -904,19 +975,6 @@ describe('row_limit and preview past the per-call cap', () => {
     );
   });
 
-  it('applies a fractional CANVAS_DEFAULT_ROW_LIMIT as the whole rows below it instead of failing', async () => {
-    wireLowCap(500.5);
-    const result = await runToolContract(dataframeQueryTool, {
-      sql: 'SELECT unnest(generate_series(1, 2000)) AS n',
-    });
-    expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toMatchObject({
-      row_count: 500,
-      row_count_capped: true,
-      applied_limits: { row_limit: 500, preview: 500 },
-    });
-  });
-
   it('caps a larger result at the applied cap and names register_as, never raising row_limit, on both surfaces', async () => {
     wireLowCap(500);
     const result = await runToolContract(dataframeQueryTool, {
@@ -1359,6 +1417,17 @@ describe('errors', () => {
     ['read_csv()', () => "SELECT * FROM read_csv('/etc/hosts')", 'denied_function'],
     ['current_setting()', () => "SELECT current_setting('threads') AS t", 'denied_function'],
     ['query_table()', (name: string) => `SELECT * FROM query_table('${name}')`, 'denied_function'],
+    [
+      'query() over a concatenation',
+      (name: string) => `SELECT * FROM query('SELECT * FROM ' || '${name}')`,
+      'denied_function',
+    ],
+    [
+      'a fifth query() level',
+      (name: string) =>
+        `SELECT * FROM query('SELECT * FROM query(''SELECT * FROM query(''''SELECT * FROM query(''''''''SELECT * FROM query(''''''''''''''''SELECT * FROM ${name}'''''''''''''''')'''''''')'''')'')')`,
+      'denied_function',
+    ],
     ['a file named as a table', () => "SELECT * FROM 'data.csv'", 'sql_read_only'],
     ['range()', () => 'SELECT * FROM range(10)', 'plan_operator_not_allowed'],
   ])('fails %s with its declared reason and the contract recovery', async (_label, sql, reason) => {
@@ -1392,7 +1461,7 @@ describe('errors', () => {
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'non_select_statement' } },
       });
-      const text = contentText(result);
+      const text = readMarkdown(contentText(result));
       expect(text).toContain('Canvas query must be SELECT');
       expect(text).toContain(`Recovery: ${contractRecovery('non_select_statement')}`);
       expect(text).not.toContain('does not exist');
@@ -1746,7 +1815,7 @@ describe('contract envelope (runToolContract)', () => {
         data: { reason: 'system_catalog_access', recovery: { hint: recovery } },
       },
     });
-    expect(contentText(result)).toContain(`Recovery: ${recovery}`);
+    expect(readMarkdown(contentText(result))).toContain(`Recovery: ${recovery}`);
   });
 
   it.each([

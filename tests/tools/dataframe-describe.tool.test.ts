@@ -47,6 +47,7 @@ import {
   type WireOptions,
   wireDataframes,
 } from '../helpers/ilostat-upstream.js';
+import { readMarkdown } from '../helpers/markdown-text.js';
 import { guardNetwork } from '../helpers/network-guard.js';
 
 guardNetwork();
@@ -580,7 +581,7 @@ describe('a canvas failure that names a path', () => {
       const result = await runToolContract(dataframeDescribeTool, {});
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({ error: { code, message: redacted } });
-      expect(contentText(result)).toContain(redacted);
+      expect(readMarkdown(contentText(result))).toContain(redacted);
       expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
     },
   );

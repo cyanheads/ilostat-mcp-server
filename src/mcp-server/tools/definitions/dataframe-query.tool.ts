@@ -133,7 +133,7 @@ function fitToBudget(
 export const dataframeQueryTool = tool('ilostat_dataframe_query', {
   title: 'Query staged ILOSTAT dataframes',
   description:
-    'Run a single-statement SELECT against the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by an earlier register_as. Inspect a dataframe with ilostat_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, file references, file-reading table functions, and functions that read engine settings or name a table from a string are rejected, and system catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied. Breakdown versions overlap (AGE_YTHADULT_*, AGE_AGGREGATE_*, AGE_10YRBANDS_*), so filter to one version before summing. Optional register_as stores the result as a new dataframe with a fresh TTL.',
+    'Run a single-statement SELECT against the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by an earlier register_as. Inspect a dataframe with ilostat_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, file references, file-reading table functions, and functions that read engine settings or name a table from a string are rejected, and system catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied. Breakdown versions overlap (AGE_YTHADULT_*, AGE_AGGREGATE_*, AGE_10YRBANDS_*, AGE_5YRBANDS_*; ECO_SECTOR_*, ECO_AGGREGATE_*, ECO_ISIC4_*, ECO_ISIC3_*), so filter to one version before summing. Optional register_as stores the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -324,7 +324,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
     {
       reason: 'denied_function',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL calls a file-reading or external table function, a function that reads engine settings (current_setting, current_schema), or one that runs SQL or names a table from a string (query_table, query() over anything but one string literal).',
+      when: 'The SQL calls a file-reading or external table function, a function that reads engine settings (current_setting, current_schema, which an unqualified column of that name also reads as), or one that runs SQL or names a table from a string (query_table, query() over anything but one string literal, query() nested more than 4 deep).',
       recovery:
         'Remove the denied function and query only df_<id> tables directly, by the names the producing tools returned.',
       severity: 'notice',

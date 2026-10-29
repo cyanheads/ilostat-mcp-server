@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ilostat-mcp-server",
+  "version": "0.2.0",
+  "description": "Search ILOSTAT labour indicators, query and compare series, build country profiles, run SQL via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/ilostat-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/ilostat-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ilostat",
+    "ilo",
+    "labour-statistics",
+    "labor-statistics",
+    "employment",
+    "unemployment",
+    "labour-market",
+    "statistics",
+    "open-data",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http"
+  ]
+}

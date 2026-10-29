@@ -29,6 +29,7 @@ import {
   stageObservations,
   wireDataframes,
 } from '../helpers/ilostat-upstream.js';
+import { readMarkdown } from '../helpers/markdown-text.js';
 import { guardNetwork } from '../helpers/network-guard.js';
 
 guardNetwork();
@@ -176,7 +177,7 @@ describe('a canvas drop that fails', () => {
     const result = await runToolContract(dataframeDropTool, { name: 'df_GONE0_GONE0' });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({ error: { code, message: redacted } });
-    expect(contentText(result)).toContain(redacted);
+    expect(readMarkdown(contentText(result))).toContain(redacted);
     expect(JSON.stringify(result)).not.toContain('/srv/canvas-tmp');
   });
 });

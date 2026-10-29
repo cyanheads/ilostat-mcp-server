@@ -13,7 +13,8 @@
  * the row budget is never kept.
  * SQL runs through the framework gate with system
  * catalogs denied; its rejections are rebuilt with the calling tool's contract
- * recovery, and a canvas whose DuckDB engine cannot load fails `canvas_unavailable`.
+ * recovery (a refusal naming `current_schema` keeps the gate's own), and a canvas
+ * whose DuckDB engine cannot load fails `canvas_unavailable`.
  * Engine and filesystem error text reaches the caller, in an error or a
  * `ctx.log` warning, only with its quoted paths redacted.
  * Where every caller shares one canvas (HTTP with auth `none`), listing every
@@ -218,11 +219,10 @@ function canvasUnavailable(ctx: Context, cause?: unknown): McpError {
 /**
  * The per-call row cap of a dataframe query: {@link QUERY_ROW_CAP}, or
  * `CANVAS_DEFAULT_ROW_LIMIT` when lower, past which the engine refuses a query.
- * The framework accepts a fractional limit, and the engine takes whole row
- * counts only, so the cap is the whole number of rows within it.
+ * The framework config admits only a whole-number limit; a fraction fails startup.
  */
 export function queryRowCap(): number {
-  return Math.min(QUERY_ROW_CAP, Math.floor(config.canvas.defaultRowLimit));
+  return Math.min(QUERY_ROW_CAP, config.canvas.defaultRowLimit);
 }
 
 /**
@@ -455,9 +455,10 @@ export class CanvasBridge {
   /**
    * One read-only SELECT over the shared canvas, system catalogs denied. The
    * engine decides which tables exist; the `df_` identifiers {@link scanSql}
-   * finds outside comments and string literals serve for provenance and for
-   * naming a missing dataframe when the gate rejects a statement that reads
-   * without naming one itself (see {@link rewrap}). A statement that does not
+   * finds outside comments and string literals, and in the SQL of the `query()`
+   * literals the gate admits, serve for provenance and for naming a missing
+   * dataframe when the gate rejects a statement that reads without naming one
+   * itself (see {@link rewrap}). A statement that does not
    * read keeps the gate's statement-type rejection (a write target is an unused
    * name by design). `register_as` stores the result as a new dataframe with a
    * fresh TTL and provenance inherited from the recorded dataframes the SQL
@@ -615,9 +616,11 @@ export class CanvasBridge {
    * SUMMARIZE, …) as `non_select_statement`. Such a read is reported as
    * `missing_table` for the first of `unrecorded`, the `df_` names it reads that
    * have no provenance, and otherwise as `invalid_sql`. `unrecorded` is
-   * `undefined` for a statement that does not read. Any other rejection leaves
-   * with the paths in its message redacted: an engine I/O failure names a spill
-   * file under `CANVAS_TEMP_PATH`.
+   * `undefined` for a statement that does not read. A `denied_function` refusal
+   * naming `current_schema` keeps the gate's recovery, which says to qualify a
+   * staged column of that name; every other declared reason takes the tool's.
+   * Any other rejection leaves with the paths in its message redacted: an engine
+   * I/O failure names a spill file under `CANVAS_TEMP_PATH`.
    */
   private rewrap(ctx: Context, error: unknown, unrecorded: readonly string[] | undefined): unknown {
     if (!(error instanceof McpError)) return withoutPaths(error);
@@ -645,10 +648,12 @@ export class CanvasBridge {
     if (typeof reason !== 'string' || !DECLARED_CANVAS_REASONS.has(reason)) {
       return withoutPaths(error);
     }
+    // A bare current_schema may be a staged column, so the gate's own hint says to qualify it.
+    const keepsGateRecovery = reason === 'denied_function' && data.function === 'current_schema';
     return new McpError(
       error.code,
       redactPaths(error.message),
-      { ...data, reason, ...this.recoveryFor(ctx, reason) },
+      { ...data, reason, ...(keepsGateRecovery ? {} : this.recoveryFor(ctx, reason)) },
       { cause: error },
     );
   }

@@ -5,8 +5,13 @@
  * or recording provenance fails (and a source failure that must not degrade),
  * the `df-meta` provenance record and its expiry, a `register_as` dataframe
  * recording its SQL and `derived_from` and inheriting its parents' datasets,
- * the per-tenant canvas and its re-mint, the lazy expiry sweep, the rewrap of
- * engine rejections, `initCanvasBridge` (the `ILOSTAT_PREVIEW_CHARS` budget it
+ * a parent read inside a `query()` literal in each form the real gate admits and
+ * at depths 1, 2, and 4 (depth 5 refused), no parent from a staged name in a
+ * literal DuckDB never runs (a table aliased `query` and its column list among
+ * them), `missing_table` naming an unstaged
+ * one whatever the statement opens with, the per-tenant canvas and its re-mint,
+ * the lazy expiry sweep, the rewrap of engine rejections (the gate's own
+ * recovery kept on a refusal naming `current_schema`), `initCanvasBridge` (the `ILOSTAT_PREVIEW_CHARS` budget it
  * carries), the per-call row cap from `CANVAS_DEFAULT_ROW_LIMIT`, and the
  * failed-staging disclosure on both producers and both consumption paths.
  * @module tests/services/canvas-bridge/canvas-bridge.test
@@ -618,6 +623,317 @@ describe('df_ names in comments, strings, and aliases', () => {
   });
 });
 
+describe('the SQL of a query() call over one string literal', () => {
+  const MISSING = 'df_NOSUC_HTBL1';
+  const MISSING_TABLE_HINT =
+    'Call ilostat_dataframe_describe to list the staged dataframes, or re-run the producing tool to stage the data again.';
+  const DENIED_FUNCTION_HINT =
+    'Remove the denied function and query only df_<id> tables directly, by the names the producing tools returned.';
+
+  /** `sql` wrapped in `depth` query() calls, each a '…' literal with its quotes doubled. */
+  function nested(sql: string, depth: number): string {
+    let wrapped = sql;
+    for (let level = 0; level < depth; level++) {
+      wrapped = `SELECT * FROM query('${wrapped.replaceAll("'", "''")}')`;
+    }
+    return wrapped;
+  }
+
+  /** Stages a parent holding {@link UNE_DATASET}, then stores `sqlFor(parent)` with register_as. */
+  async function derive(sqlFor: (parent: string) => string) {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const ctx = newContext();
+    const parent = await stage(bridge, ctx, 5);
+    const { meta, result } = await bridge.query(ctx, sqlFor(parent), {
+      rowLimit: 10,
+      registerAs: 'df_DERIV_ED001',
+      sourceTool: 'ilostat_dataframe_query',
+    });
+    return { parent, meta, result };
+  }
+
+  /** The rejection of `sql` over a canvas holding one staged parent, which `sqlFor` may name. */
+  async function failure(sqlFor: (parent: string) => string) {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const ctx = newContext();
+    const parent = await stage(bridge, ctx, 5);
+    return bridge
+      .query(ctx, sqlFor(parent), { rowLimit: 10, sourceTool: 'test' })
+      .catch((caught: unknown) => caught as McpError);
+  }
+
+  // Each form runs through the real gate and engine: what the scanner reads is what DuckDB runs.
+  it.each([
+    ["a '…' literal", (p: string) => `SELECT count(*) AS n FROM query('SELECT * FROM ${p}')`],
+    [
+      'doubled quotes holding an apostrophe before the name',
+      (p: string) => `SELECT count(*) AS n FROM query('SELECT ''it''''s'' AS s, * FROM ${p}')`,
+    ],
+    [
+      "an E'…' literal naming it in hex escapes",
+      (p: string) =>
+        `SELECT count(*) AS n FROM query(E'SELECT \\'a\\' AS s, * FROM \\x64\\x66${p.slice(2)}')`,
+    ],
+    ['a $$ literal', (p: string) => `SELECT count(*) AS n FROM query($$SELECT * FROM ${p}$$)`],
+    ['a $tag$ literal', (p: string) => `SELECT count(*) AS n FROM query($q$SELECT * FROM ${p}$q$)`],
+    [
+      'a literal in parentheses',
+      (p: string) => `SELECT count(*) AS n FROM query((('SELECT * FROM ${p}')))`,
+    ],
+    [
+      'literals joined across a line comment and a break',
+      (p: string) => `SELECT count(*) AS n FROM query('SELECT * FROM ' -- x\n'${p}')`,
+    ],
+    [
+      "an E'…' joined to a '…' that keeps its escapes",
+      (p: string) => `SELECT count(*) AS n FROM query(E'SELECT * FROM '\r\n'\\x64${p.slice(1)}')`,
+    ],
+    [
+      'QUERY spaced from its parenthesis',
+      (p: string) => `SELECT count(*) AS n FROM QUERY ( 'SELECT * FROM ${p}' )`,
+    ],
+    ['main.query', (p: string) => `SELECT count(*) AS n FROM main.query('SELECT * FROM ${p}')`],
+    ['"query"', (p: string) => `SELECT count(*) AS n FROM "query"('SELECT * FROM ${p}')`],
+    [
+      'a call after a comma in a FROM list',
+      (p: string) => `SELECT count(*) AS n FROM (SELECT 1 AS j) x, query('SELECT * FROM ${p}')`,
+    ],
+    [
+      'a call after JOIN … ON',
+      (p: string) =>
+        `SELECT count(*) AS n FROM (SELECT 1 AS j) x JOIN query('SELECT * FROM ${p}') ON true`,
+    ],
+    [
+      'a call after JOIN LATERAL',
+      (p: string) =>
+        `SELECT count(*) AS n FROM (SELECT 1 AS j) x JOIN LATERAL query('SELECT * FROM ${p}') ON true`,
+    ],
+    [
+      'a FROM-first statement',
+      (p: string) => `FROM query('SELECT * FROM ${p}') SELECT count(*) AS n`,
+    ],
+    [
+      'a comment-led statement',
+      (p: string) => `/* lead */ SELECT count(*) AS n FROM query('SELECT * FROM ${p}')`,
+    ],
+  ])(
+    'reads the dataframe in %s, so the stored table inherits its datasets',
+    async (_label, sqlFor) => {
+      const { parent, meta, result } = await derive(sqlFor);
+      expect(result.rows).toEqual([{ n: '5' }]);
+      expect(meta).toMatchObject({
+        queryParams: { derived_from: [parent] },
+        datasets: [UNE_DATASET],
+      });
+    },
+  );
+
+  it.each([1, 2, 4])(
+    'reads the dataframe %i query() levels deep, so the stored table inherits its datasets',
+    async (depth) => {
+      const { parent, meta, result } = await derive((p) =>
+        nested(`SELECT count(*) AS n FROM ${p}`, depth),
+      );
+      expect(result.rows).toEqual([{ n: '5' }]);
+      expect(meta).toMatchObject({
+        queryParams: { derived_from: [parent] },
+        datasets: [UNE_DATASET],
+      });
+    },
+  );
+
+  it('stores an empty result read through query() with its parent’s provenance', async () => {
+    const { parent, meta, result } = await derive(
+      (p) => `SELECT * FROM query('SELECT * FROM ${p} WHERE k = ''none''')`,
+    );
+    expect(result.rowCount).toBe(0);
+    expect(meta).toMatchObject({
+      rowCount: 0,
+      queryParams: { derived_from: [parent] },
+      datasets: [UNE_DATASET],
+    });
+  });
+
+  it('refuses a fifth query() level as denied_function, the gate’s limit, with this tool’s recovery', async () => {
+    const error = await failure((p) => nested(`SELECT * FROM ${p}`, 5));
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: 'Canvas query nests query() more than 4 levels deep.',
+      data: { reason: 'denied_function', recovery: { hint: DENIED_FUNCTION_HINT } },
+    });
+  });
+
+  it.each([
+    [
+      'another function’s string argument',
+      (p: string, d: string) => `upper('SELECT * FROM ${d}') AS s FROM query('SELECT * FROM ${p}')`,
+    ],
+    [
+      'an ordinary literal',
+      (p: string, d: string) => `k FROM query('SELECT * FROM ${p}') WHERE k <> '${d}'`,
+    ],
+    [
+      'a comment inside the query() body',
+      (p: string, d: string) => `k FROM query('SELECT * FROM ${p} -- ${d}')`,
+    ],
+    [
+      'a literal inside the query() body',
+      (p: string, d: string) => `k FROM query('SELECT * FROM ${p} WHERE k <> ''${d}''')`,
+    ],
+  ])('takes no parent from a df_ name in %s', async (_label, sqlFor) => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const ctx = newContext();
+    const parent = await stage(bridge, ctx, 5);
+    // A name with no provenance never becomes a parent, so the decoy is a staged dataframe.
+    const decoy = await stage(bridge, ctx, 3);
+    const { meta } = await bridge.query(ctx, `SELECT ${sqlFor(parent, decoy)}`, {
+      rowLimit: 10,
+      registerAs: 'df_DERIV_ED001',
+      sourceTool: 'ilostat_dataframe_query',
+    });
+    expect(meta).toMatchObject({ queryParams: { derived_from: [parent] } });
+  });
+
+  it.each([
+    ['AS query', (a: string, b: string) => `SELECT count(*) AS n FROM ${a} AS query ('${b}')`],
+    [
+      'query, implicitly',
+      (a: string, b: string) => `SELECT count(*) AS n FROM ${a} query ('${b}')`,
+    ],
+    ['AS "query"', (a: string, b: string) => `SELECT count(*) AS n FROM ${a} AS "query" ('${b}')`],
+  ])(
+    'takes no parent from the column list of a table aliased %s, which DuckDB runs as an alias',
+    async (_label, sqlFor) => {
+      const bridge = newBridge(tracked(memoryCanvas()));
+      const ctx = newContext();
+      const parent = await stage(bridge, ctx, 5);
+      const named = await stage(bridge, ctx, 3, { ...PROVENANCE, datasets: [EMP_DATASET] });
+      const { meta, result } = await bridge.query(ctx, sqlFor(parent, named), {
+        rowLimit: 10,
+        registerAs: 'df_DERIV_ED001',
+        sourceTool: 'ilostat_dataframe_query',
+      });
+      // The parent's five rows, not the named table's three: the literal names a column.
+      expect(result.rows).toEqual([{ n: '5' }]);
+      expect(meta).toMatchObject({
+        queryParams: { derived_from: [parent] },
+        datasets: [UNE_DATASET],
+      });
+    },
+  );
+
+  it.each([
+    ['opening with SELECT', `SELECT * FROM query('SELECT * FROM ${MISSING}')`],
+    ['two levels deep', nested(`SELECT * FROM ${MISSING}`, 2)],
+    ['opening with a comment', `/* c */ SELECT * FROM query('SELECT * FROM ${MISSING}')`],
+    ['opening with (', "(SELECT * FROM query('SELECT * FROM df_nosuc_htbl1'))"],
+    ['opening with a comment, four levels deep', `-- c\n${nested(`SELECT * FROM ${MISSING}`, 4)}`],
+  ])(
+    'fails missing_table for an unstaged dataframe read inside query(), %s',
+    async (_label, sql) => {
+      const error = await failure(() => sql);
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        message: `Dataframe ${MISSING} does not exist or has expired.`,
+        data: {
+          reason: 'missing_table',
+          tableName: MISSING,
+          recovery: { hint: MISSING_TABLE_HINT },
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['over a concatenation', (p: string) => `SELECT * FROM query('SELECT * FROM ' || '${p}')`],
+    ['over a cast', (p: string) => `SELECT * FROM query('SELECT * FROM ${p}'::VARCHAR)`],
+    ['as query_table()', (p: string) => `SELECT * FROM query_table('${p}')`],
+  ])('refuses query() %s as denied_function with this tool’s recovery', async (_label, sqlFor) => {
+    const error = await failure(sqlFor);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'denied_function', recovery: { hint: DENIED_FUNCTION_HINT } },
+    });
+  });
+});
+
+describe('an unqualified current_schema', () => {
+  const QUALIFY_HINT =
+    'Qualify a column named current_schema with its table (<table>.current_schema), or remove the reference — the current_schema() function is not available.';
+
+  /** A bridge and context holding df_CURSC_HEMA1, whose columns are current_schema and k. */
+  async function withColumn() {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const ctx = newContext();
+    await bridge.query(ctx, 'SELECT 1 AS current_schema, 2 AS k', {
+      rowLimit: 10,
+      registerAs: 'df_CURSC_HEMA1',
+      sourceTool: 'ilostat_dataframe_query',
+    });
+    return { bridge, ctx };
+  }
+
+  async function failure(sql: string) {
+    const { bridge, ctx } = await withColumn();
+    return bridge
+      .query(ctx, sql, { rowLimit: 10, sourceTool: 'test' })
+      .catch((caught: unknown) => caught as McpError);
+  }
+
+  it.each([
+    ['bare', 'SELECT current_schema FROM df_CURSC_HEMA1'],
+    ['double-quoted', 'SELECT "current_schema" FROM df_CURSC_HEMA1'],
+  ])(
+    'keeps the framework’s qualify-the-column recovery on a %s reference to a staged column of that name',
+    async (_label, sql) => {
+      expect(await failure(sql)).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message:
+          'Canvas query references current_schema unqualified. DuckDB reads that as the current_schema() function unless a column of that name is in scope, so the canvas refuses it either way.',
+        data: {
+          reason: 'denied_function',
+          function: 'current_schema',
+          recovery: { hint: QUALIFY_HINT },
+        },
+      });
+    },
+  );
+
+  it('reads the column qualified with its table', async () => {
+    const { bridge, ctx } = await withColumn();
+    const { result } = await bridge.query(ctx, 'SELECT t.current_schema FROM df_CURSC_HEMA1 t', {
+      rowLimit: 10,
+      sourceTool: 'test',
+    });
+    expect(result.rows).toEqual([{ current_schema: 1 }]);
+  });
+
+  it('keeps the framework’s recovery on a called current_schema(), which names the function', async () => {
+    expect(await failure('SELECT current_schema() AS s')).toMatchObject({
+      data: {
+        reason: 'denied_function',
+        function: 'current_schema',
+        recovery: {
+          hint: 'Remove the function the message names — only the staged tables are queryable.',
+        },
+      },
+    });
+  });
+
+  it('gives every other denied function this tool’s recovery', async () => {
+    expect(await failure("SELECT current_setting('threads') AS t")).toMatchObject({
+      data: {
+        reason: 'denied_function',
+        function: 'current_setting',
+        recovery: {
+          hint: 'Remove the denied function and query only df_<id> tables directly, by the names the producing tools returned.',
+        },
+      },
+    });
+  });
+});
+
 describe('the tenant canvas and the expiry sweep', () => {
   it('keeps one canvas per tenant in ctx.state and re-mints it once the stored one is gone', async () => {
     const canvas = tracked(memoryCanvas());
@@ -820,11 +1136,15 @@ describe('queryRowCap', () => {
     ['unset', undefined, 10_000],
     ['500', '500', 500],
     ['20000', '20000', 10_000],
-    ['500.5', '500.5', 500],
-    ['1.9', '1.9', 1],
-  ])('applies CANVAS_DEFAULT_ROW_LIMIT %s as a whole row count', (_label, value, cap) => {
+  ])('applies CANVAS_DEFAULT_ROW_LIMIT %s', (_label, value, cap) => {
     resetConfig(value === undefined ? {} : { CANVAS_DEFAULT_ROW_LIMIT: value });
     expect(queryRowCap()).toBe(cap);
+  });
+
+  it('never sees a fractional CANVAS_DEFAULT_ROW_LIMIT: the config refuses it', () => {
+    expect(() => resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '500.5' })).toThrow(
+      /CANVAS_DEFAULT_ROW_LIMIT/,
+    );
   });
 });
 
