@@ -3,16 +3,23 @@
  * comparing numbers: definition, unit and multiplier, frequency variants and
  * coverage, the sex and breakdown codes it uses (totals marked), covered areas,
  * aggregates, and how its observations are classed as reported, modelled, or
- * projected. Catalog metadata comes from memory; breakdown codes, default slice,
- * unit, and areas from the cached SDMX structure, which degrades to
- * `structure_status: 'unavailable'` rather than failing the call. A breakdown
- * lists only the SDMX codes `ilostat_query_indicator` accepts in that slot.
+ * projected. Catalog metadata, the unit included, comes from memory; breakdown
+ * codes, default slice, areas, and the unit's labels from the cached SDMX
+ * structure, which degrades to `structure_status: 'unavailable'` rather than
+ * failing the call. A breakdown lists only the SDMX codes
+ * `ilostat_query_indicator` accepts in that slot.
  * @module mcp-server/tools/definitions/describe-indicator
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blockquote, datasetIdInput, FREQUENCY_NAMES } from '@/mcp-server/tools/tool-helpers.js';
+import { renderUnit, unitOutput } from '@/mcp-server/tools/observation-output.js';
+import {
+  blockquote,
+  datasetIdInput,
+  FREQUENCY_NAMES,
+  labelWithCode,
+} from '@/mcp-server/tools/tool-helpers.js';
 import { ATTRIBUTION } from '@/services/attribution.js';
 import { MODELLED_SOURCE_LABEL } from '@/services/basis/basis.js';
 import { normalizeDatasetId } from '@/services/catalog/codes.js';
@@ -20,7 +27,7 @@ import { inlineText } from '@/services/catalog/text.js';
 import type { CatalogSnapshot } from '@/services/catalog/types.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 import { classificationInSlot } from '@/services/observations/request-validation.js';
-import type { BreakdownDimension } from '@/services/structure/sdmx-structure.js';
+import { type BreakdownDimension, labelUnit } from '@/services/structure/sdmx-structure.js';
 
 const RELATED_LIMIT = 20;
 const AREAS_PER_LINE = 20;
@@ -33,7 +40,7 @@ const AREAS_PER_LINE = 20;
 const JOINED_IDS_PATTERN = /^[A-Z0-9_]+( *[+,] *[A-Z0-9_]+)*$/;
 
 const STRUCTURE_NOTICE =
-  "Breakdown codes and units are unavailable from the ILOSTAT structure service; ilostat_list_reference topic classifications lists every breakdown code, and the label's parenthetical — (%) or (thousands) — gives the unit.";
+  'Breakdown codes are unavailable from the ILOSTAT structure service; ilostat_list_reference topic classifications lists every breakdown code.';
 
 const CodeLabelSchema = (what: string) =>
   z
@@ -142,14 +149,19 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
         measure: z.string().describe('Unit code (PT percent, PS persons, LC local currency, …).'),
         measure_label: z.string().optional().describe('Unit label.'),
         type: z.string().describe('Unit type code (RT rate, NB number, …).'),
-        type_label: z.string().optional().describe('Unit type label.'),
+        type_label: z
+          .string()
+          .optional()
+          .describe('Unit type label; absent when structure_status is unavailable.'),
         multiplier: z
           .number()
           .describe('Power of ten values are expressed in: 0 units, 3 thousands, 6 millions.'),
         multiplier_label: z.string().optional().describe('Multiplier label.'),
       })
       .optional()
-      .describe('Unit of the values, already in the multiplier scale; absent when unresolved.'),
+      .describe(
+        "Unit of the values, from ILOSTAT's catalog, already in the multiplier scale; absent only when the catalog lists none.",
+      ),
     has_aggregates: z
       .boolean()
       .optional()
@@ -213,7 +225,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       .enum(['complete', 'unavailable'])
       .optional()
       .describe(
-        "unavailable when ILOSTAT's structure service has no entry for the indicator or cannot be reached; breakdowns, default_slice, unit, and ref_areas are then absent.",
+        "unavailable when ILOSTAT's structure service has no entry for the indicator or cannot be reached; breakdowns, default_slice, and ref_areas are then absent, and unit carries the catalog's labels without type_label.",
       ),
     catalog_as_of: z.string().describe('ISO timestamp the catalog was last confirmed current.'),
     attribution: z.string().optional().describe('Citation to keep with any use of the data.'),
@@ -230,7 +242,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       .string()
       .optional()
       .describe(
-        'Where to find breakdown codes and units when the structure service did not supply them, and how to list every related indicator when the list is cut — whichever apply, joined.',
+        'Where to find breakdown codes when the structure service did not supply them, and how to list every related indicator when the list is cut — whichever apply, joined.',
       ),
   },
 
@@ -273,8 +285,10 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       (other) => other.code !== indicator.code,
     );
     const related = allRelated.slice(0, RELATED_LIMIT);
-    const structureNotice =
-      lookup.status === 'unavailable' || !lookup.unit ? STRUCTURE_NOTICE : undefined;
+    // Units never differ between an indicator's frequencies; a bare code reads its annual dataset's.
+    const catalogUnit = (dataset ?? indicator.datasets[0])?.unit;
+    const unit = catalogUnit && labelUnit(catalogUnit, shape);
+    const structureNotice = lookup.status === 'unavailable' ? STRUCTURE_NOTICE : undefined;
     ctx.enrich({ truncated: false, shown: related.length, cap: RELATED_LIMIT });
     // The cut guidance replaces the notice slot, so a cut list carries both in it.
     if (allRelated.length > related.length) {
@@ -290,7 +304,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
     ctx.log.info('Described ILOSTAT dataset', {
       indicator: indicator.code,
       structureStatus: lookup.status,
-      unitResolved: Boolean(lookup.unit),
+      unitResolved: Boolean(unit),
     });
 
     /** The SDMX codes the query's slot filter accepts; the rest could only be rejected there. */
@@ -346,20 +360,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
             },
           }
         : {}),
-      ...(lookup.unit
-        ? {
-            unit: {
-              measure: lookup.unit.measure,
-              ...(lookup.unit.measureLabel ? { measure_label: lookup.unit.measureLabel } : {}),
-              type: lookup.unit.type,
-              ...(lookup.unit.typeLabel ? { type_label: lookup.unit.typeLabel } : {}),
-              multiplier: lookup.unit.multiplier,
-              ...(lookup.unit.multiplierLabel
-                ? { multiplier_label: lookup.unit.multiplierLabel }
-                : {}),
-            },
-          }
-        : {}),
+      ...(unit ? { unit: unitOutput(unit) } : {}),
       has_aggregates: dataset ? dataset.hasAggregates : indicator.hasAggregates,
       basis_rule: {
         modelled_source_label: MODELLED_SOURCE_LABEL,
@@ -393,9 +394,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       lines.push(`Indicator: ${inlineText(result.indicator)}`);
     }
     if (result.database) {
-      lines.push(
-        `Database: ${inlineText(result.database.label)} (${inlineText(result.database.code)})`,
-      );
+      lines.push(`Database: ${labelWithCode(result.database.code, result.database.label)}`);
     }
     if (result.subject) {
       lines.push(
@@ -408,10 +407,7 @@ export const describeIndicatorTool = tool('ilostat_describe_indicator', {
       );
     }
     if (result.unit) {
-      const { unit } = result;
-      lines.push(
-        `Unit: ${inlineText(unit.measure_label ?? unit.measure)} (${inlineText(unit.measure)}) · type ${inlineText(unit.type_label ?? unit.type)} (${inlineText(unit.type)}) · multiplier ${unit.multiplier}${unit.multiplier_label ? ` (${inlineText(unit.multiplier_label)})` : ''}`,
-      );
+      lines.push(`Unit: ${renderUnit(result.unit)}`);
     } else if (result.found) {
       lines.push('Unit: not resolved');
     }

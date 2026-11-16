@@ -1,8 +1,8 @@
 /**
  * @fileoverview Tests for the shared tool input and rendering helpers: blank strings
  * and blank array elements from form clients read as unset, multi-line
- * ILO-published text stays inside its markdown blockquote, and a table cell
- * carries no line terminator.
+ * ILO-published text stays inside its markdown blockquote, a code beside its
+ * label appears once, and a table cell carries no line terminator.
  * @module tests/tools/tool-helpers.test
  */
 
@@ -13,6 +13,7 @@ import {
   blankAsUnset,
   blankFreeArray,
   blockquote,
+  labelWithCode,
   splitIdArray,
   tableCell,
 } from '@/mcp-server/tools/tool-helpers.js';
@@ -100,6 +101,45 @@ describe('blockquote', () => {
     expect(blockquote('first\u0085second\u2028third\u2029# not a heading')).toBe(
       '> first\n> second\n> third\n> # not a heading',
     );
+  });
+});
+
+describe('labelWithCode', () => {
+  it.each([
+    [
+      'a label without its code gets it appended',
+      'LFS',
+      'Labour Force Statistics',
+      'Labour Force Statistics (LFS)',
+    ],
+    [
+      'a label already ending with its code is printed once',
+      'LFS',
+      'Labour Force Statistics (LFS)',
+      'Labour Force Statistics (LFS)',
+    ],
+    ['the code alone stands in for an absent label', 'RT', undefined, 'RT'],
+    ['the code alone stands in for an empty label', 'RT', '', 'RT'],
+    [
+      'the code inside the label, not at its end, is appended again',
+      'LFS',
+      'LFS and STLFS',
+      'LFS and STLFS (LFS)',
+    ],
+    // the exact code must reach content[]: a differently cased parenthetical does not stand in for it
+    [
+      'a code ending the label in other case is appended',
+      'YOUTHSTATS',
+      'Youth Labour Market Indicators (YouthSTATS)',
+      'Youth Labour Market Indicators (YouthSTATS) (YOUTHSTATS)',
+    ],
+  ])('%s', (_case, code, label, expected) => {
+    expect(labelWithCode(code, label)).toBe(expected);
+  });
+
+  it('flattens line breaks in the label and the code', () => {
+    expect(labelWithCode('LFS', 'Labour\r\n# Force (LFS)')).toBe('Labour # Force (LFS)');
+    expect(labelWithCode('L\rFS', 'Labour')).toBe('Labour (L FS)');
   });
 });
 

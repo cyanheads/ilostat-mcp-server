@@ -58,7 +58,7 @@ const ALLOWLIST: Record<string, readonly string[]> = {
     'type',
     'format',
   ],
-  '/data/ref_area': ['id', 'indicator', 'classif1', 'timeto', 'latestyear', 'format'],
+  '/data/ref_area': ['id', 'indicator', 'classif1', 'timefrom', 'timeto', 'format'],
 };
 
 const HEADER =
@@ -277,14 +277,14 @@ describe('/data/ref_area request', () => {
       client.refAreaDataUrl({
         area: 'KEN',
         indicators: ['EAP_2WAP_SEX_AGE_RT', 'UNE_2EAP_SEX_AGE_RT', 'LAP_2GDP_NOC_RT'],
-        latestOnly: true,
+        timeFrom: 2019,
         timeTo: 2024,
       }),
     );
     expect(url.origin + url.pathname).toBe(`${RPLUMBER_ORIGIN}/data/ref_area`);
     // the indicator codes are joined by a literal +, the separator upstream splits on
     expect(url.search).toBe(
-      '?id=KEN_A&indicator=EAP_2WAP_SEX_AGE_RT+UNE_2EAP_SEX_AGE_RT+LAP_2GDP_NOC_RT&timeto=2024&latestyear=TRUE&format=.json',
+      '?id=KEN_A&indicator=EAP_2WAP_SEX_AGE_RT+UNE_2EAP_SEX_AGE_RT+LAP_2GDP_NOC_RT&timefrom=2019&timeto=2024&format=.json',
     );
     for (const [name] of url.searchParams) expect(ALLOWLIST['/data/ref_area']).toContain(name);
     for (const code of upstreamParams(url).get('indicator')?.split('+') ?? []) {
@@ -292,13 +292,12 @@ describe('/data/ref_area request', () => {
     }
   });
 
-  it('leaves out timeto and latestyear when unset', () => {
+  it('leaves out timefrom and timeto when unset', () => {
     const client = rplumber(createFetchMock([]).fetch);
     const url = new URL(
       client.refAreaDataUrl({
         area: 'X01',
         indicators: ['UNE_2EAP_SEX_AGE_RT'],
-        latestOnly: false,
       }),
     );
     expect([...url.searchParams.keys()]).toEqual(['id', 'indicator', 'format']);
@@ -312,7 +311,6 @@ describe('/data/ref_area request', () => {
         area: 'CHN',
         indicators: ['EAP_DWAP_SEX_AGE_RT', 'UNE_DEAP_SEX_AGE_RT'],
         classif1: ['AGE_YTHADULT_YGE15', 'AGE_YTHADULT_Y15-24'],
-        latestOnly: false,
       }),
     );
     expect(url.search).toBe(
@@ -332,20 +330,30 @@ describe('/data/ref_area request', () => {
     const url = client.refAreaDataUrl({
       area: 'KEN',
       indicators: ['LAP_2GDP_NOC_RT', 'SDG_0111_SEX_AGE_RT'],
-      latestOnly: true,
+      timeFrom: 2019,
       timeTo: 2024,
     });
     const rows = await client.getRefAreaData(url, scope());
     expect(http.calls[0]?.request.headers.get('accept')).toBe('application/json');
-    expect(rows).toHaveLength(32);
+    expect(rows).toHaveLength(394);
+    expect(rows[0]).toEqual({
+      refArea: 'KEN',
+      source: 'XA:1909',
+      indicator: 'SDG_0111_SEX_AGE_RT',
+      period: '2024',
+      notes: [],
+      sex: 'SEX_T',
+      classif1: 'AGE_YTHADULT_YGE15',
+      value: 34.025,
+      obsStatus: 'A',
+    });
     expect(rows.find((row) => row.indicator === 'LAP_2GDP_NOC_RT')).toEqual({
       refArea: 'KEN',
       source: 'XA:1909',
       indicator: 'LAP_2GDP_NOC_RT',
       period: '2024',
       notes: [],
-      value: 33.276,
-      obsStatus: 'M',
+      value: 33.319,
     });
     expect(rows.find((row) => row.indicator === 'EIP_2EET_SEX_RT' && row.sex === 'SEX_F')).toEqual({
       refArea: 'KEN',
@@ -354,7 +362,7 @@ describe('/data/ref_area request', () => {
       period: '2024',
       notes: [],
       sex: 'SEX_F',
-      value: 25.745,
+      value: 25.597,
     });
   });
 
@@ -378,11 +386,7 @@ describe('/data/ref_area request', () => {
           ]),
       },
     ]);
-    const url = client.refAreaDataUrl({
-      area: 'KEN',
-      indicators: ['UNE_DEAP_SEX_AGE_RT'],
-      latestOnly: true,
-    });
+    const url = client.refAreaDataUrl({ area: 'KEN', indicators: ['UNE_DEAP_SEX_AGE_RT'] });
     expect(await client.getRefAreaData(url, scope())).toEqual([
       {
         refArea: 'KEN',

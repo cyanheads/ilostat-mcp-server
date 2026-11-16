@@ -72,7 +72,7 @@ const HOUR_MS = 3_600_000;
 const ATTRIBUTION =
   'Source: ILOSTAT, International Labour Organization (CC BY 4.0) — https://ilostat.ilo.org';
 const CANVAS_UNAVAILABLE_RECOVERY =
-  'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.';
+  'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies and page through their rows inline with next_offset.';
 const CANVAS_UNAVAILABLE_MESSAGE =
   'Dataframes are unavailable in this deployment: the DataCanvas DuckDB engine could not be loaded.';
 const NO_CANVAS_MESSAGE =
@@ -638,7 +638,28 @@ describe('unit provenance', () => {
     expect(text).toContain(UNIT_LINE);
   });
 
-  it('carries no unit fields for a dataset whose unit did not resolve', async () => {
+  it('carries no unit fields for a dataset whose catalog row lists no unit', async () => {
+    const fixture = observationCatalogFixture();
+    const row = tocRow(fixture, UNE);
+    for (const key of ['unit_measure', 'unit_measure.label', 'unit_mult', 'unit_mult.label']) {
+      delete row[key];
+    }
+    wireCanvas({ fixture });
+    const ctx = newContext();
+    const { name } = await stageObservations(ctx);
+    const { frame, text } = await described(name, ctx);
+    const [dataset] = frame?.datasets ?? [];
+    expect(dataset).toEqual({
+      dataset_id: UNE,
+      label: UNE_DATASET.label,
+      last_update: UNE_DATASET.last_update,
+    });
+    expect(text).toContain(
+      `- Dataset: ${UNE} — Unemployment rate by sex and age (%) · updated 2026-09-24T07:10:19`,
+    );
+  });
+
+  it("carries the catalog's unit, with no type label, while the structure service is down", async () => {
     wireCanvas({
       routes: [
         structureRoute('UNE_DEAP_SEX_AGE_RT', () => Promise.reject(new TypeError('fetch failed'))),
@@ -652,9 +673,14 @@ describe('unit provenance', () => {
       dataset_id: UNE,
       label: UNE_DATASET.label,
       last_update: UNE_DATASET.last_update,
+      unit: '%',
+      unit_measure: 'PT',
+      unit_type: 'RT',
+      unit_multiplier: 0,
+      unit_multiplier_label: 'units',
     });
     expect(text).toContain(
-      `- Dataset: ${UNE} — Unemployment rate by sex and age (%) · updated 2026-09-24T07:10:19`,
+      `- Dataset: ${UNE} — Unemployment rate by sex and age (%) · unit % (PT) · type RT · multiplier 0 (units) · updated 2026-09-24T07:10:19`,
     );
   });
 

@@ -25,7 +25,7 @@ const ServerConfigSchema = z.object({
     .max(1_000_000, 'At most 1,000,000, the staged rows one tenant may hold.')
     .default(500_000)
     .describe(
-      'Ceiling on the rows one query may return or stage (1,000–1,000,000, the per-tenant staging row budget). An unfiltered request estimated above it is refused before any upstream call; a filtered one that streams past it is refused and its partial dataframe dropped.',
+      'Ceiling on the rows one query reads or stages (1,000–1,000,000, the per-tenant staging row budget). An unfiltered request estimated above it is refused before any upstream call; a filtered result past it is paged but not staged, its partial dataframe dropped, and a page reaching past it is refused.',
     ),
   previewChars: z.coerce
     .number()
@@ -33,7 +33,7 @@ const ServerConfigSchema = z.object({
     .min(1_000)
     .default(40_000)
     .describe(
-      'Inline preview budget in serialized characters (about 10k tokens at the default). A larger query or comparison result is staged as a dataframe; a dataframe SQL result returns only the leading rows that fit.',
+      'Staging trigger in serialized characters (about 10k tokens at the default). A query or comparison whose first page finds its result past it is staged as a dataframe; their pages are bounded by limit, not by it. A dataframe SQL result returns only the leading rows that fit.',
     ),
   cacheTtlSeconds: z.coerce
     .number()

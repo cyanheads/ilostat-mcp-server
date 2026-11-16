@@ -1,14 +1,14 @@
 /**
- * @fileoverview Tests for the per-indicator structure and unit cache over an
- * `SdmxClient` fetch fake: the unit probe walking up to three constrained areas
- * past "no data" answers, degradation to `unavailable` (cached only when SDMX said
- * so definitively), this server's own faults surfacing, the cache keyed by the ToC
- * `last.update` with its TTL and LRU bound, and single-flight lookups detached from
- * any one caller's cancellation.
+ * @fileoverview Tests for the per-indicator structure cache over an `SdmxClient`
+ * fetch fake: one structure request per lookup and no data request, degradation
+ * to `unavailable` (cached for its TTL when SDMX said so definitively, for a
+ * minute when SDMX failed), shutdown and a caller's cancellation rejecting rather
+ * than degrading and never remembered, the cache keyed by the ToC `last.update`
+ * with its TTL and LRU bound, and single-flight lookups detached from any one
+ * caller's cancellation.
  * @module tests/services/structure/structure-service.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
   createMockContext,
@@ -21,15 +21,13 @@ import type { FetchFn } from '@/services/upstream/upstream-http.js';
 import {
   callUrls,
   clientOptions,
-  isProbeRequest,
+  hangingFetch,
   isStructureRequest,
-  probeRoute,
-  SDMX_404_NO_DATA,
   SDMX_404_NO_STRUCTURE,
-  SDMX_422_SHORT_KEY,
-  SDMX_500_ORA,
   sdmxFixtureRoutes,
   sdmxText,
+  structureDocument,
+  structureResponse,
   structureRoute,
   tooManyRequests,
 } from '../../helpers/ilostat-upstream.js';
@@ -68,79 +66,116 @@ function setup(
   });
   disposables.push(structure, sdmx);
   const structureCalls = () => callUrls(http, (request) => isStructureRequest(request)).length;
-  const probeUrls = () =>
-    callUrls(http, (request) => isProbeRequest(request)).map((url) => url.pathname);
-  return { http, structure, structureCalls, probeUrls };
+  return { http, structure, structureCalls };
 }
 
 describe('StructureService.lookup', () => {
-  it('returns the structure and the unit the first constrained area reports', async () => {
-    const { structure, probeUrls } = setup();
+  it('returns the structure, with its unit codelists, from one request and no data request', async () => {
+    const { http, structure } = setup();
     const lookup = await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
-    expect(lookup.status).toBe('complete');
+    expect(lookup).toEqual({ status: 'complete', structure: expect.any(Object) });
     expect(lookup.structure?.classif1?.id).toBe('AGE');
-    expect(lookup.unit).toEqual({
-      measure: 'PT',
-      measureLabel: 'Percentage',
-      type: 'RT',
-      typeLabel: 'Rate',
-      multiplier: 0,
-      multiplierLabel: 'Units',
-    });
-    expect(probeUrls()).toEqual(['/rest/data/ILO,DF_UNE_DEAP_SEX_AGE_RT,1.0/ABW....']);
-  });
-
-  it('probes the next area on a 404 or an ORA- 500, up to three areas', async () => {
-    const { structure, probeUrls } = setup([
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () => sdmxText(SDMX_404_NO_DATA, 404)),
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'KEN....', () => sdmxText(SDMX_500_ORA, 500)),
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'USA....'),
-      ...sdmxFixtureRoutes(),
+    expect(lookup.structure?.unitCodelists.measure.get('PT')).toBe('Percentage');
+    expect(callUrls(http).map((url) => url.pathname)).toEqual([
+      '/rest/dataflow/ILO/DF_UNE_DEAP_SEX_AGE_RT/latest',
     ]);
-    const lookup = await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
-    expect(lookup.unit?.measure).toBe('PT');
-    expect(probeUrls()).toEqual([
-      '/rest/data/ILO,DF_UNE_DEAP_SEX_AGE_RT,1.0/ABW....',
-      '/rest/data/ILO,DF_UNE_DEAP_SEX_AGE_RT,1.0/KEN....',
-      '/rest/data/ILO,DF_UNE_DEAP_SEX_AGE_RT,1.0/USA....',
-    ]);
-  });
-
-  it('stops after three areas and caches a complete lookup with no unit', async () => {
-    const { structure, probeUrls, structureCalls } = setup([
-      {
-        match: (request) => isProbeRequest(request, 'UNE_DEAP_SEX_AGE_RT'),
-        respond: () => sdmxText(SDMX_404_NO_DATA, 404),
-      },
-      ...sdmxFixtureRoutes(),
-    ]);
-    const lookup = await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
-    expect(lookup.status).toBe('complete');
-    expect(lookup.unit).toBeUndefined();
-    expect(probeUrls()).toHaveLength(3);
-    await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
-    expect(structureCalls()).toBe(1);
   });
 
   it('degrades to unavailable and caches it when SDMX has no dataflow', async () => {
-    const { structure, structureCalls, probeUrls } = setup();
+    const { structure, structureCalls } = setup();
     const lookup = await structure.lookup('POP_2POP_SEX_NB', UPDATED, createMockContext());
     expect(lookup).toEqual({ status: 'unavailable' });
     await structure.lookup('POP_2POP_SEX_NB', UPDATED, createMockContext());
     expect(structureCalls()).toBe(1);
-    expect(probeUrls()).toHaveLength(0);
   });
 
-  it('degrades to unavailable without caching when SDMX fails transiently', async () => {
+  it('remembers a transient SDMX failure for a minute, so a lookup inside it degrades with no request', async () => {
+    const clock = manualClock();
+    const { structure, structureCalls } = setup(
+      [
+        structureRoute('UNE_DEAP_SEX_AGE_RT', () => new Response('down', { status: 503 })),
+        ...sdmxFixtureRoutes(),
+      ],
+      { now: clock.now },
+    );
+    await expect(
+      structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext()),
+    ).resolves.toEqual({ status: 'unavailable' });
+    clock.advance(59_999);
+    await expect(
+      structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext()),
+    ).resolves.toEqual({ status: 'unavailable' });
+    expect(structureCalls()).toBe(1);
+    clock.advance(1);
+    await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
+    expect(structureCalls()).toBe(2);
+  });
+
+  it('serves a recovered SDMX once the failure minute passes, then caches the structure', async () => {
+    const clock = manualClock();
+    let down = true;
+    const { structure, structureCalls } = setup(
+      [
+        structureRoute('UNE_DEAP_SEX_AGE_RT', () =>
+          down
+            ? new Response('down', { status: 503 })
+            : structureResponse(structureDocument('UNE_DEAP_SEX_AGE_RT')),
+        ),
+        ...sdmxFixtureRoutes(),
+      ],
+      { now: clock.now },
+    );
+    await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
+    down = false;
+    clock.advance(30_000);
+    await expect(
+      structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext()),
+    ).resolves.toEqual({ status: 'unavailable' });
+    clock.advance(30_000);
+    const recovered = await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
+    expect(recovered.status).toBe('complete');
+    expect(recovered.structure?.classif1?.id).toBe('AGE');
+    // the structure replaced the failure: served for its own TTL, well past a minute
+    clock.advance(10 * 60_000);
+    await expect(
+      structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext()),
+    ).resolves.toBe(recovered);
+    expect(structureCalls()).toBe(2);
+  });
+
+  it("re-asks inside the failure minute once the indicator's last.update moves", async () => {
     const { structure, structureCalls } = setup([
       structureRoute('UNE_DEAP_SEX_AGE_RT', () => new Response('down', { status: 503 })),
       ...sdmxFixtureRoutes(),
     ]);
-    await expect(
-      structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext()),
-    ).resolves.toEqual({ status: 'unavailable' });
     await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
+    await structure.lookup('UNE_DEAP_SEX_AGE_RT', '2026-09-25T07:00:00', createMockContext());
     expect(structureCalls()).toBe(2);
+  });
+
+  it("never remembers a caller's cancellation as a failure", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const upstream = createFetchMock(sdmxFixtureRoutes());
+    const { structure } = setup(undefined, {
+      fetch: (input, init) => gate.then(() => upstream.fetch(input, init)),
+    });
+    const controller = new AbortController();
+    controller.abort(new Error('caller cancelled'));
+    await expect(
+      structure.lookup(
+        'UNE_DEAP_SEX_AGE_RT',
+        UPDATED,
+        createMockContext({ signal: controller.signal }),
+      ),
+    ).rejects.toThrow('caller cancelled');
+
+    release();
+    const later = await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
+    expect(later.status).toBe('complete');
+    expect(callUrls(upstream, (request) => isStructureRequest(request))).toHaveLength(1);
   });
 
   it('degrades a throttled SDMX (429) and a malformed structure to unavailable', async () => {
@@ -160,27 +195,16 @@ describe('StructureService.lookup', () => {
     ).resolves.toEqual({ status: 'unavailable' });
   });
 
-  it('keeps the structure but not the cache entry when the unit probe fails transiently', async () => {
-    const { structure, structureCalls } = setup([
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () => sdmxText('Internal Server Error', 500)),
-      ...sdmxFixtureRoutes(),
-    ]);
-    const lookup = await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
-    expect(lookup.status).toBe('complete');
-    expect(lookup.structure).toBeDefined();
-    expect(lookup.unit).toBeUndefined();
-    await structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
-    expect(structureCalls()).toBe(2);
-  });
-
-  it("surfaces this server's own fault (a 422 on the probe key) instead of degrading", async () => {
-    const { structure } = setup([
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () => sdmxText(SDMX_422_SHORT_KEY, 422)),
-      ...sdmxFixtureRoutes(),
-    ]);
+  it('rejects waiting lookups once disposed mid-fetch, rather than degrading them, and never remembers it', async () => {
+    const { fetch } = hangingFetch();
+    const { structure } = setup(undefined, { fetch });
+    const pending = structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext());
+    structure.dispose();
+    await expect(pending).rejects.toBeDefined();
+    // a remembered failure would answer `unavailable` here; the shutdown rejects again instead
     await expect(
       structure.lookup('UNE_DEAP_SEX_AGE_RT', UPDATED, createMockContext()),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InternalError });
+    ).rejects.toBeDefined();
   });
 });
 

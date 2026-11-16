@@ -10,12 +10,14 @@
  * dropped, while parentless leaves (deciles) stay. The default slice takes, per
  * dimension ID, the first code the dataflow's `DEFAULT` annotation lists that is
  * a total; that annotation is keyed by dimension ID, not dimension order. Covered
- * areas keep only plain SDMX codes, since each may become a probe-key segment. Pure.
+ * areas keep only plain SDMX codes. The unit codelists label a dataset's catalog
+ * unit. Pure.
  * @module services/structure/sdmx-structure
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { toIsoTimestamp } from '@/services/catalog/text.js';
+import type { UnitInfo } from '@/services/catalog/types.js';
 
 const AnnotationSchema = z.object({
   title: z.string().optional(),
@@ -37,9 +39,7 @@ const ComponentSchema = z.object({
 
 const StructureDocumentSchema = z.object({
   data: z.object({
-    dataflows: z
-      .array(z.object({ version: z.string(), annotations: z.array(AnnotationSchema).optional() }))
-      .min(1),
+    dataflows: z.array(z.object({ annotations: z.array(AnnotationSchema).optional() })).min(1),
     dataStructures: z
       .array(
         z.object({
@@ -98,8 +98,6 @@ export interface IndicatorStructure {
   classif2?: BreakdownDimension;
   /** Total codes the dataflow's default view uses, per slot. */
   defaultSlice: { classif1?: string; classif2?: string; sex?: string };
-  /** Dimension IDs in key order (time excluded), for building a series key. */
-  keyDimensions: string[];
   /** `LAST_UPDATE` annotation, ISO 8601 without zone. */
   lastUpdate?: string;
   /** Reference areas with data, from the content constraint; only codes matching `[A-Z0-9_]+`. */
@@ -107,23 +105,11 @@ export interface IndicatorStructure {
   /** Sex codes in use; absent when the dataflow has no `SEX` dimension. */
   sexCodes?: string[];
   unitCodelists: UnitCodelists;
-  /** Dataflow version, for data-probe URLs. */
-  version: string;
-}
-
-/** Decoded unit attributes of one dataset. Values are already in the multiplier's scale. */
-export interface UnitInfo {
-  measure: string;
-  measureLabel?: string;
-  multiplier: number;
-  multiplierLabel?: string;
-  type: string;
-  typeLabel?: string;
 }
 
 const NON_BREAKDOWN_DIMENSIONS = new Set(['REF_AREA', 'FREQ', 'MEASURE', 'SEX']);
 
-/** An area code a probe key may carry; anything else is left out of `refAreas`. */
+/** A plain SDMX area code; anything else is left out of `refAreas`, so describe and compare see codes only. */
 const AREA_CODE = /^[A-Z0-9_]+$/;
 
 function annotation(annotations: z.infer<typeof AnnotationSchema>[] | undefined, type: string) {
@@ -235,9 +221,7 @@ export function parseStructure(document: unknown): IndicatorStructure {
   const lastUpdate = annotation(dataflow.annotations, 'LAST_UPDATE');
   const [classif1, classif2] = breakdowns;
   return {
-    version: dataflow.version,
     ...(lastUpdate ? { lastUpdate: toIsoTimestamp(lastUpdate) } : {}),
-    keyDimensions: dimensions.map((dimension) => dimension.id),
     ...(sexCodes ? { sexCodes } : {}),
     ...(classif1 ? { classif1 } : {}),
     ...(classif2 ? { classif2 } : {}),
@@ -251,29 +235,23 @@ export function parseStructure(document: unknown): IndicatorStructure {
   };
 }
 
-/** Series key selecting one area with every other dimension wildcarded (`USA....`). */
-export function probeKey(structure: IndicatorStructure, area: string): string {
-  return structure.keyDimensions.map((id) => (id === 'REF_AREA' ? area : '')).join('.');
-}
-
-/** Unit attributes from a probed SDMX-CSV series row; `undefined` when the row carries none. */
-export function unitFromRow(
-  row: Record<string, string>,
-  codelists: UnitCodelists,
-): UnitInfo | undefined {
-  const type = row.UNIT_MEASURE_TYPE?.trim();
-  const measure = row.UNIT_MEASURE?.trim();
-  const multiplierCode = row.UNIT_MULT?.trim();
-  if (!type || !measure || !multiplierCode || !/^\d+$/.test(multiplierCode)) return;
-  const typeLabel = codelists.type.get(type);
-  const measureLabel = codelists.measure.get(measure);
-  const multiplierLabel = codelists.multiplier.get(multiplierCode);
+/**
+ * A dataset's catalog unit with each label the structure's unit codelists give
+ * for its code; a code they lack keeps the catalog's label, and the type, which
+ * the catalog does not label, then has none. Without a structure, the unit as is.
+ */
+export function labelUnit(unit: UnitInfo, structure: IndicatorStructure | undefined): UnitInfo {
+  if (!structure) return unit;
+  const { measure, multiplier, type } = structure.unitCodelists;
+  const measureLabel = measure.get(unit.measure) ?? unit.measureLabel;
+  const typeLabel = type.get(unit.type) ?? unit.typeLabel;
+  const multiplierLabel = multiplier.get(String(unit.multiplier)) ?? unit.multiplierLabel;
   return {
-    measure,
+    measure: unit.measure,
     ...(measureLabel ? { measureLabel } : {}),
-    type,
+    type: unit.type,
     ...(typeLabel ? { typeLabel } : {}),
-    multiplier: Number(multiplierCode),
+    multiplier: unit.multiplier,
     ...(multiplierLabel ? { multiplierLabel } : {}),
   };
 }

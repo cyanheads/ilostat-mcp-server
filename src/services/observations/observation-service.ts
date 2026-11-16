@@ -3,10 +3,12 @@
  * `ilostat_compare_geographies`: validation against the catalog, the unfiltered
  * size preflight, the allowlisted `/data/indicator` request, the `latest_only`
  * reduction per series (falling back to upstream's latest year per area when the
- * full history is too large), row decoding and basis classification, running
- * summaries, the response cache, and routing rows inline or onto the canvas. The
- * upstream stream is always aborted once reading stops, so a refusal or an early
- * stop costs one bounded transfer.
+ * full history is too large, and remembering that fallback per request URL for
+ * the response cache's TTL), row decoding and basis classification, running
+ * summaries, the response cache, and routing: one page of rows inline, a large
+ * first page's whole result staged onto the canvas. Each page re-reads the
+ * request from the start, and the upstream stream is always aborted once reading
+ * stops, so a refusal or an early stop costs one bounded transfer.
  * @module services/observations/observation-service
  */
 
@@ -30,7 +32,7 @@ import {
 import type { AreaGroup, CatalogSnapshot, Dataset, Indicator } from '@/services/catalog/types.js';
 import type { BestSource, RplumberClient } from '@/services/rplumber/rplumber-client.js';
 import type { RawObservation } from '@/services/rplumber/types.js';
-import type { IndicatorStructure } from '@/services/structure/sdmx-structure.js';
+import { type IndicatorStructure, labelUnit } from '@/services/structure/sdmx-structure.js';
 import type { StructureLookup, StructureService } from '@/services/structure/structure-service.js';
 import {
   type Candidate,
@@ -86,6 +88,10 @@ export interface QueryRequest {
   classif2?: string[];
   datasetIds: string[];
   latestOnly: boolean;
+  /** Rows the page holds at most, after the tool's page cap. */
+  limit: number;
+  /** Rows before the page. */
+  offset: number;
   refAreas?: string[];
   sex?: string[];
   sourceSelection?: SourceSelection;
@@ -137,14 +143,24 @@ export type QueryFailReason =
 
 export interface QueryResult {
   appliedFilters: QueryAppliedFilters;
+  /**
+   * Requested areas each queried dataset returned no rows for, in the order sent;
+   * set when areas were requested and a read that reached the end of the result
+   * returned rows.
+   */
+  areasWithoutRows?: AreaWithoutRows[];
+  /**
+   * True when `summary` counts every row of the result: the read reached its end,
+   * or the `latest_only` rows were reduced per series from the full history, read
+   * whole before routing.
+   */
+  complete: boolean;
   datasets: ResolvedDataset[];
-  /** The deferred datasets, not-applicable filter disclosures, units left unresolved, and, on zero rows, the zero-row fragments. */
+  /** `ILOSTAT_MAX_ROWS`, the ceiling an outcome `cause` of `past_ceiling` names. */
+  maxRows: number;
+  /** The deferred datasets, not-applicable filter disclosures, datasets the catalog lists no unit for, then, on zero rows, the zero-row fragments, or, with `areasWithoutRows`, its sentences. */
   notices: string[];
   outcome: Exclude<RouteOutcome<ObservationRow>, { kind: 'too_large' }>;
-  /** True when the `latest_only` rows were reduced per series from the full history, read whole before routing. */
-  perSeries: boolean;
-  /** The inline preview budget applied, in serialized characters. */
-  previewChars: number;
   /** Distinct datasets past the first {@link DATASETS_PER_CALL}, in request order; never fetched in this call. */
   remainingDatasetIds: string[];
   summary: ObservationSummary;
@@ -161,7 +177,11 @@ export interface CompareRequest {
   classif2?: string;
   datasetId: string;
   includeProjections: boolean;
+  /** Areas the page holds at most. */
+  limit: number;
   lookbackYears: number;
+  /** Areas before the page, in `sort` order. */
+  offset: number;
   period?: string;
   refAreas?: string[];
   sex?: string;
@@ -214,15 +234,13 @@ export interface CompareResult {
   mode: CompareMode;
   notices: string[];
   outcome: Exclude<RouteOutcome<ComparisonRow>, { kind: 'too_large' }>;
-  /** The inline preview budget applied, in serialized characters. */
-  previewChars: number;
   slice: CompareSlice;
   /** Latest mode: the first year the request covered. */
   windowFrom?: number;
 }
 
 export interface ObservationServiceOptions {
-  /** Absent when dataframes are off; results then stop at the inline preview. */
+  /** Absent when dataframes are off; results then page without staging. */
   bridge?: CanvasBridge;
   cache: ResponseCache;
   catalog: CatalogService;
@@ -240,7 +258,7 @@ export interface ObservationServiceOptions {
    * {@link PER_SERIES_READ_MS}.
    */
   perSeriesReadMs?: number;
-  /** `ILOSTAT_PREVIEW_CHARS`. */
+  /** `ILOSTAT_PREVIEW_CHARS`: a first page whose result passes it is staged. */
   previewChars: number;
   rplumber: RplumberClient;
   structure: StructureService;
@@ -258,7 +276,7 @@ interface RowSource {
   rows: AsyncIterable<RawObservation> | Iterable<RawObservation>;
 }
 
-/** Provenance datasets, each with the full unit its structure resolved; values are never rescaled. */
+/** Provenance datasets, each with its full unit; values are never rescaled. */
 const fromCatalog = (datasets: ResolvedDataset[]): Provenance['datasets'] =>
   datasets.map(({ dataset, unit }) => {
     const label = unitLabel(unit);
@@ -379,11 +397,15 @@ export class ObservationService {
   }
 
   /**
-   * Validates and runs one observation query, routing its rows inline or onto
-   * the canvas. Every dataset ID is validated; the first
-   * {@link DATASETS_PER_CALL} distinct datasets are queried in one request and
-   * the rest are returned unfetched. Raises the calling tool's declared reasons
-   * through `ctx.fail`.
+   * Validates and runs one observation query, returning one page of its rows
+   * inline and staging a large first page's result onto the canvas unless it
+   * passes `ILOSTAT_MAX_ROWS`. The request is read from the start in one upstream
+   * request, one row past the page and at least 5,001 rows when it holds them, so
+   * a result the response cache can hold is read and cached whole on its first
+   * page; a page reaching past `ILOSTAT_MAX_ROWS` rows fails `result_too_large`.
+   * Every dataset ID is validated; the first {@link DATASETS_PER_CALL} distinct
+   * datasets are queried in one request and the rest are returned unfetched.
+   * Raises the calling tool's declared reasons through `ctx.fail`.
    */
   async query(
     snapshot: CatalogSnapshot,
@@ -474,11 +496,16 @@ export class ObservationService {
         latestOnly: latestYear,
         bestSource,
       });
-    // latest_only reduces the full history per series, unless the ToC already sizes that history past the ceiling.
+    /**
+     * latest_only reduces the full history per series, unless the ToC already sizes
+     * that history past the ceiling, or a read of it fell back within the cache TTL:
+     * a later page or a repeat call then never repeats a read that gives up again.
+     */
     let latestYear =
       request.latestOnly &&
-      (fullHistoryEstimate(datasets, request, codes, areas, bestSource) ?? 0) >
-        this.options.maxRows;
+      ((fullHistoryEstimate(datasets, request, codes, areas, bestSource) ?? 0) >
+        this.options.maxRows ||
+        this.options.cache.fellBack(urlFor(false)));
 
     const resolving = this.resolveDatasets(snapshot, datasets, ctx);
     // Awaited once the rows open, so a rows failure reports first; handled now so an earlier lookup rejection never goes unhandled.
@@ -490,8 +517,10 @@ export class ObservationService {
     try {
       let rows: AsyncIterable<RawObservation> | Iterable<RawObservation> | undefined;
       if (deadline && !latestYear) {
-        rows = await this.latestPerSeries(urlFor(false), ctx, deadline, sources);
+        const fullHistory = urlFor(false);
+        rows = await this.latestPerSeries(fullHistory, ctx, deadline, sources);
         latestYear = rows === undefined;
+        if (latestYear) this.options.cache.rememberFallback(fullHistory);
       }
       if (!rows) {
         const source = await this.openRows(urlFor(latestYear), deadline?.scope(ctx) ?? ctx);
@@ -510,7 +539,7 @@ export class ObservationService {
         summary.add(row);
         return row;
       };
-      // Per-series rows are already held whole, so row_count and the summary count every one past a preview cut.
+      // Per-series rows are already held whole, so row_count and the summary count every one, not only those the page read.
       const perSeries = request.latestOnly && !latestYear;
       const decoded =
         perSeries && Array.isArray(raws)
@@ -519,10 +548,15 @@ export class ObservationService {
               for await (const raw of raws) yield decode(raw);
             })();
 
+      const { limit, offset } = request;
       const outcome = await routeRows(this.options.bridge, {
         ctx,
         source: decoded,
         schema: OBSERVATION_COLUMNS,
+        offset,
+        limit,
+        // One row past the cache's entry limit: a result it can hold is read, counted, and cached whole on its first page.
+        minRead: CACHEABLE_ROWS + 1,
         previewChars: this.options.previewChars,
         maxRows: this.options.maxRows,
         provenance: () => ({
@@ -538,11 +572,12 @@ export class ObservationService {
           attribution: ATTRIBUTION,
         }),
       });
+      const { maxRows } = this.options;
       if (outcome.kind === 'too_large') {
         throw ctx.fail(
           'result_too_large',
-          `The result passed the ${this.options.maxRows.toLocaleString('en-US')}-row ceiling; nothing was staged.`,
-          { maxRows: this.options.maxRows, ...ctx.recoveryFor('result_too_large') },
+          `The result passes the ${maxRows.toLocaleString('en-US')}-row ceiling, and rows ${(offset + 1).toLocaleString('en-US')}–${(offset + limit).toLocaleString('en-US')} reach past it; no page is read beyond the ceiling.`,
+          { maxRows, ...ctx.recoveryFor('result_too_large') },
         );
       }
 
@@ -552,16 +587,25 @@ export class ObservationService {
         ...notApplicableNotices(datasets, codes),
         ...unitNotices(resolved),
       ];
+      // Per-series rows were read whole, so their counts are complete wherever the page stopped reading.
+      const complete = outcome.ended || perSeries;
+      let withoutRows: AreaWithoutRows[] | undefined;
       if (summary.rows === 0) {
         notices.push(...zeroRowFragments(lookedUp, codes, request, areas, sourceSelection));
+      } else if (areas.length > 0 && complete) {
+        // Only a read that reached the end of the result can say an area has no rows.
+        const { entries, sentences } = areasWithoutRows(lookedUp, areas, summary);
+        withoutRows = entries;
+        notices.push(...sentences);
       }
       return {
         appliedFilters,
+        ...(withoutRows ? { areasWithoutRows: withoutRows } : {}),
+        complete,
         datasets: resolved,
+        maxRows,
         notices,
         outcome,
-        perSeries,
-        previewChars: this.options.previewChars,
         remainingDatasetIds,
         summary,
       };
@@ -612,7 +656,8 @@ export class ObservationService {
   /**
    * Validates and runs one comparison: one dataset, one slice (defaulted to the
    * dataset's totals), each area's value at a period or its latest non-projected
-   * period, and the comparison rows routed inline or onto the canvas.
+   * period, every area computed before one page of the rows, in `sort` order, is
+   * returned inline (a large first page's comparison staged onto the canvas).
    */
   async compare(
     snapshot: CatalogSnapshot,
@@ -687,22 +732,32 @@ export class ObservationService {
       : undefined;
     const read = (scope: Context) =>
       this.readCandidates(urlFor(time), snapshot, resolved, scope, keep);
-    let candidates: Map<string, Candidate[]>;
+    let candidates: Map<string, Candidate[]> | undefined;
     let endpointsOnly = false;
     if (changeBase && period) {
-      // The years between get the first share of one deadline; the two periods alone, what remains.
+      /**
+       * The years between get the first share of one deadline; the two periods
+       * alone, what remains. A read of the years between that fell back within the
+       * cache TTL is not repeated, so a later page goes straight to the two periods.
+       */
       const deadline = new CallDeadline(
         this.latestDeadlineMs,
         'The comparison',
         'Narrow ref_areas or area_group, or lower change_years, then call again.',
       );
       try {
-        const budget = AbortSignal.timeout(this.perSeriesReadMs);
-        try {
-          candidates = await read(deadline.scope(ctx, budget));
-        } catch (error) {
-          const outlasted = budget.aborted && !deadline.expired && !ctx.signal.aborted;
-          if (!outlasted && !isUpstreamTooLarge(error)) throw error;
+        const between = urlFor(time);
+        if (!this.options.cache.fellBack(between)) {
+          const budget = AbortSignal.timeout(this.perSeriesReadMs);
+          try {
+            candidates = await read(deadline.scope(ctx, budget));
+          } catch (error) {
+            const outlasted = budget.aborted && !deadline.expired && !ctx.signal.aborted;
+            if (!outlasted && !isUpstreamTooLarge(error)) throw error;
+            this.options.cache.rememberFallback(between);
+          }
+        }
+        if (!candidates) {
           time = { time: [period, changeBase] };
           endpointsOnly = true;
           candidates = await read(deadline.scope(ctx));
@@ -725,10 +780,7 @@ export class ObservationService {
       best_source: 'upstream default (yes)',
     };
 
-    const coveredAreas =
-      lookup.status === 'complete' && lookup.structure
-        ? new Set(lookup.structure.refAreas)
-        : undefined;
+    const covered = coveredAreas(lookup.structure);
     const comparison = compareAreas({
       areas,
       candidates,
@@ -737,7 +789,7 @@ export class ObservationService {
       decode: (raw) => decodeObservation(raw, snapshot, resolved),
       ...(endpointsOnly ? { betweenRead: false } : {}),
       ...(request.changeYears === undefined ? {} : { changeYears: request.changeYears }),
-      ...(coveredAreas ? { coveredAreas } : {}),
+      ...(covered ? { coveredAreas: covered } : {}),
     });
     const notices = comparisonNotices(comparison);
     if (endpointsOnly) {
@@ -745,7 +797,7 @@ export class ObservationService {
         `The periods from ${changeBase} to ${period} were too many to read within this call's size and time limits, so only ${changeBase} and ${period} were read: break_in_series is true where the current value marks a break and null elsewhere, since a break between them is unknown. Narrow ref_areas or area_group, or lower change_years, to check the periods between.`,
       );
     }
-    if (!coveredAreas) {
+    if (!covered) {
       notices.push(
         `The area list of ${dataset.id} is unavailable from the ILOSTAT structure service, so no missing area is marked not_covered, even one ${dataset.id} does not cover.`,
       );
@@ -757,6 +809,8 @@ export class ObservationService {
       ctx,
       source: stagedRows,
       schema: COMPARISON_COLUMNS,
+      offset: request.offset,
+      limit: request.limit,
       previewChars: this.options.previewChars,
       provenance: () => ({
         sourceTool: 'ilostat_compare_geographies',
@@ -788,7 +842,6 @@ export class ObservationService {
       mode,
       notices,
       outcome,
-      previewChars: this.options.previewChars,
       slice,
       ...(windowFrom === undefined ? {} : { windowFrom }),
     };
@@ -822,9 +875,8 @@ export class ObservationService {
   }
 
   /**
-   * Cutoff and unit per dataset, with the structure lookup they came from, looked
-   * up in parallel; a unit that does not resolve is left absent. Rejects as
-   * `lookupStructure` does.
+   * Cutoff and unit per dataset, with the structure lookup that labels the unit,
+   * looked up in parallel. Rejects as `lookupStructure` does.
    */
   private resolveDatasets(
     snapshot: CatalogSnapshot,
@@ -847,15 +899,14 @@ export class ObservationService {
     return {
       dataset,
       cutoff: this.options.catalog.projectionCutoff(indicatorOf(snapshot, dataset), snapshot),
-      ...(lookup.unit ? { unit: lookup.unit } : {}),
+      ...(dataset.unit ? { unit: labelUnit(dataset.unit, lookup.structure) } : {}),
     };
   }
 
   /**
    * The cached SDMX structure of a dataset's indicator. An SDMX outage or a
-   * missing dataflow comes back `unavailable`; the lookup rejects only for this
-   * server's own fault (an SDMX 422 on the probe key), the caller's cancellation,
-   * or shutdown, and those fail the call.
+   * missing dataflow comes back `unavailable`; the lookup rejects only for the
+   * caller's cancellation or shutdown, and those fail the call.
    */
   private lookupStructure(
     snapshot: CatalogSnapshot,
@@ -1050,14 +1101,10 @@ function notApplicableNotices(datasets: readonly Dataset[], codes: BreakdownCode
   return notices;
 }
 
-/** Names the datasets whose unit the SDMX lookup could not supply, as describe's structure notice does. */
+/** Names the datasets whose catalog row lists no unit. */
 function unitNotices(datasets: readonly ResolvedDataset[]): string[] {
   const ids = datasets.filter((entry) => !entry.unit).map((entry) => entry.dataset.id);
-  return ids.length > 0
-    ? [
-        `The unit of ${ids.join(', ')} is unavailable from the ILOSTAT structure service; the dataset label's parenthetical — (%) or (thousands) — gives it.`,
-      ]
-    : [];
+  return ids.length > 0 ? [`The ILOSTAT catalog lists no unit for ${ids.join(', ')}.`] : [];
 }
 
 /** The codes a structure lists for one filter; `undefined` when it has no such dimension. */
@@ -1078,6 +1125,76 @@ function requestedYears(request: QueryRequest): { from: number; to: number } | u
     from: request.timeFrom ? Number(request.timeFrom) : Number.NEGATIVE_INFINITY,
     to: request.timeTo ? Number(request.timeTo) : Number.POSITIVE_INFINITY,
   };
+}
+
+const LISTS_AREAS = 'ilostat_describe_indicator lists the areas it covers.';
+
+/** The areas a dataset's SDMX structure lists; `undefined` when the structure is unavailable. */
+function coveredAreas(structure: IndicatorStructure | undefined): Set<string> | undefined {
+  return structure && new Set(structure.refAreas);
+}
+
+/** Areas a dataset's structure leaves out: ten named, the rest counted. */
+function uncoveredSentence(areas: readonly string[], datasetId: string): string {
+  return `${nameCodes(areas)} ${areas.length === 1 ? 'has' : 'have'} no ${datasetId} data — ${LISTS_AREAS}`;
+}
+
+/** Why a requested area returned no rows from a queried dataset. */
+export const AREA_WITHOUT_ROWS_REASONS = ['not_covered', 'no_rows'] as const;
+
+/** A requested area one queried dataset returned no rows for. */
+export interface AreaWithoutRows {
+  dataset_id: string;
+  reason: (typeof AREA_WITHOUT_ROWS_REASONS)[number];
+  ref_area: string;
+}
+
+/**
+ * The requested areas each queried dataset returned no rows for — datasets in
+ * request order, areas in the order sent — and one sentence per dataset and
+ * reason. `not_covered` is an area the dataset's SDMX structure leaves out of its
+ * area list; `no_rows` one it lists, or any area when that list is unavailable,
+ * which a last sentence says. Meaningful only over every row of a non-empty result.
+ */
+function areasWithoutRows(
+  datasets: readonly LookedUpDataset[],
+  areas: readonly string[],
+  summary: ObservationSummary,
+): { entries: AreaWithoutRows[]; sentences: string[] } {
+  const entries: AreaWithoutRows[] = [];
+  const sentences: string[] = [];
+  for (const {
+    lookup: { structure },
+    resolved: { dataset },
+  } of datasets) {
+    const covered = coveredAreas(structure);
+    const found = areas
+      .filter((area) => !summary.hasRows(dataset.id, area))
+      .map(
+        (area): AreaWithoutRows => ({
+          dataset_id: dataset.id,
+          ref_area: area,
+          reason: covered && !covered.has(area) ? 'not_covered' : 'no_rows',
+        }),
+      );
+    entries.push(...found);
+    const named = (reason: AreaWithoutRows['reason']) =>
+      found.filter((entry) => entry.reason === reason).map((entry) => entry.ref_area);
+    const uncovered = named('not_covered');
+    const noRows = named('no_rows');
+    if (uncovered.length > 0) sentences.push(uncoveredSentence(uncovered, dataset.id));
+    if (noRows.length > 0) {
+      sentences.push(
+        `${nameCodes(noRows)} returned no ${dataset.id} rows for these filters and period.`,
+      );
+    }
+    if (!covered && found.length > 0) {
+      sentences.push(
+        `The area list of ${dataset.id} is unavailable from the ILOSTAT structure service, so no area is marked not_covered.`,
+      );
+    }
+  }
+  return { entries, sentences };
 }
 
 /**
@@ -1122,15 +1239,12 @@ function zeroRowFragments(
       );
     }
     if (areas.length > 0) {
-      const listsAreas = 'ilostat_describe_indicator lists the areas it covers.';
-      const covered = structure && new Set(structure.refAreas);
+      const covered = coveredAreas(structure);
       const uncovered = covered ? areas.filter((area) => !covered.has(area)) : [];
       if (!covered) {
-        fragments.push(`Some requested areas have no ${dataset.id} data — ${listsAreas}`);
+        fragments.push(`Some requested areas have no ${dataset.id} data — ${LISTS_AREAS}`);
       } else if (uncovered.length > 0) {
-        fragments.push(
-          `${nameCodes(uncovered)} ${uncovered.length === 1 ? 'has' : 'have'} no ${dataset.id} data — ${listsAreas}`,
-        );
+        fragments.push(uncoveredSentence(uncovered, dataset.id));
       }
     }
   }

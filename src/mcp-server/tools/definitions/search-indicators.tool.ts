@@ -8,7 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { blankAsUnset, FREQUENCY_NAMES } from '@/mcp-server/tools/tool-helpers.js';
+import { blankAsUnset, FREQUENCY_NAMES, labelWithCode } from '@/mcp-server/tools/tool-helpers.js';
 import { cursorOffset } from '@/services/catalog/paging.js';
 import { searchIndicators } from '@/services/catalog/search.js';
 import { inlineText } from '@/services/catalog/text.js';
@@ -57,7 +57,7 @@ const FacetSchema = z
 export const searchIndicatorsTool = tool('ilostat_search_indicators', {
   title: 'Search ILOSTAT indicators',
   description:
-    "Search ILOSTAT's catalog of labour-statistics indicators by plain-language terms and filters. Each hit is one indicator with its datasets — one per available frequency (annual, quarterly, monthly) — plus breakdowns, coverage years, number of reference areas, source database, and last update; pass a dataset ID to ilostat_describe_indicator for its units and breakdown codes, then to ilostat_query_indicator or ilostat_compare_geographies for values. Every search term must match a word or word prefix in the indicator's label, subject, database, breakdown names, code, or definition; a term that matches no word or word prefix anywhere in the catalog matches the words sharing its stem instead (informality finds informal, unionization finds union, disabled finds disability), and the notice names it. female, women, male, and men (or their plurals) also match every indicator broken down by sex, and the notice names the sex filter that selects those values in ilostat_query_indicator. British and American spellings (labour/labor) match alike. The measure filter lists every indicator of one measured quantity, as ilostat_describe_indicator's related indicators count them. Facet counts reflect all applied filters.",
+    "Search ILOSTAT's catalog of labour-statistics indicators by plain-language terms and filters. Each hit is one indicator with its datasets — one per available frequency (annual, quarterly, monthly) — plus breakdowns, coverage years, number of reference areas, source database, and last update; pass a dataset ID to ilostat_describe_indicator for its units and breakdown codes, then to ilostat_query_indicator or ilostat_compare_geographies for values. Every search term must match a word or word prefix in the indicator's label, subject, database, breakdown names, code, or definition; a term that matches no word or word prefix anywhere in the catalog matches the words sharing its stem instead (informality finds informal, unionization finds union, disabled finds disability), and the notice names it. female, women, male, and men (or their plurals) also match every indicator broken down by sex, and the notice names the sex filter that selects those values in ilostat_query_indicator; youth and young (the 15-24 band) and adult (25+), or their plurals, match every indicator broken down by age, and the notice says where that band's AGE_* codes come from. Beside other terms these words must match but leave the ranking to the other terms. British and American spellings (labour/labor) match alike. The measure filter lists every indicator of one measured quantity, as ilostat_describe_indicator's related indicators count them. Facet counts reflect all applied filters.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -128,7 +128,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
               .enum(['label', 'metadata', 'definition'])
               .optional()
               .describe(
-                'Where every term matched (a sex word beside other terms is left out): label (tier 1), label plus subject, database, breakdowns, and code (tier 2), or the definition text too (tier 3). Absent when browsing without a query.',
+                'Where every term matched (a sex or age word beside other terms is left out): label (tier 1), label plus subject, database, breakdowns, and code (tier 2), or the definition text too (tier 3). Absent when browsing without a query.',
               ),
             datasets: z
               .array(HitDatasetSchema)
@@ -173,7 +173,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
       .string()
       .optional()
       .describe(
-        'That a limit past the page cap was applied as the cap, why the query was browsed by filters alone, which terms were matched by stem and as which catalog words (check those hits are on topic), the sex filter a sex word names, how to widen a search that matched nothing, that the cursor starts past the last match, and how to reach the remaining pages — whichever apply, joined.',
+        'That a limit past the page cap was applied as the cap, why the query was browsed by filters alone, which terms were matched by stem and as which catalog words (check those hits are on topic), the sex filter a sex word names, the band an age word names and where its AGE_* codes come from, how to widen a search that matched nothing, that the cursor starts past the last match, and how to reach the remaining pages — whichever apply, joined.',
       ),
   },
 
@@ -300,7 +300,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
         '',
         `### ${inlineText(hit.indicator)} — ${inlineText(hit.label)}`,
         [
-          `Database: ${inlineText(hit.database.label)} (${inlineText(hit.database.code)})`,
+          `Database: ${labelWithCode(hit.database.code, hit.database.label)}`,
           `Subject: ${inlineText(hit.subject.label)} (${inlineText(hit.subject.code)})`,
           `Breakdowns: ${breakdowns}${hit.classification ? ` (${inlineText(hit.classification)})` : ''}`,
           `Has aggregates: ${hit.has_aggregates}`,
@@ -316,10 +316,7 @@ export const searchIndicatorsTool = tool('ilostat_search_indicators', {
     const facetLine = (facets: { code: string; count: number; label?: string }[]) =>
       facets.length > 0
         ? facets
-            .map(
-              (facet) =>
-                `${inlineText(facet.code)}${facet.label ? ` (${inlineText(facet.label)})` : ''}: ${facet.count}`,
-            )
+            .map((facet) => `${labelWithCode(facet.code, facet.label)}: ${facet.count}`)
             .join(', ')
         : 'none';
     lines.push(

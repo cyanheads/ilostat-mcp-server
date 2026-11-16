@@ -27,10 +27,8 @@ import {
   FAST_PACING,
   hangingFetch,
   isIndicatorData,
-  isProbeRequest,
   isRplumber,
   isStructureRequest,
-  probeResponse,
   rplumberBody,
   streamedCsv,
   structureDocument,
@@ -214,7 +212,7 @@ describe('the busy check trips the pacer cooldown', () => {
     const { http, client } = sdmx(
       [
         {
-          match: (request) => isProbeRequest(request),
+          match: (request) => isStructureRequest(request),
           respond: () => tooManyRequests(),
           once: true,
         },
@@ -225,7 +223,7 @@ describe('the busy check trips the pacer cooldown', () => {
       ],
       { pacing: COOLDOWN_PACING },
     );
-    const first = await rejection(client.probeSeries('SDG_0552_NOC_RT', '1.0', 'KEN..', scope()));
+    const first = await rejection(client.getDataflowStructure('SDG_0552_NOC_RT', scope()));
     expect(first.data?.reason).toBe('upstream_busy');
 
     const shed = await rejection(client.getDataflowStructure('SDG_0552_NOC_RT', scope()));
@@ -452,12 +450,6 @@ describe('body caps → upstream_too_large', () => {
       capText: '16 MiB',
       call: (c: Clients) => c.sdmx.getDataflowStructure('UNE_DEAP_SEX_AGE_RT', scope()),
     },
-    {
-      label: 'a unit probe',
-      cap: MIB,
-      capText: '1 MiB',
-      call: (c: Clients) => c.sdmx.probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'USA....', scope()),
-    },
   ])(
     'stops reading $label one chunk past its $capText cap, and never retries it',
     async ({ cap, capText, call }) => {
@@ -657,11 +649,11 @@ describe('identifying headers', () => {
   it('sends Accept-Language en and the User-Agent on SDMX requests too', async () => {
     const { http, client } = sdmx([
       {
-        match: (request) => isProbeRequest(request),
-        respond: () => probeResponse('DATAFLOW,REF_AREA\n'),
+        match: (request) => isStructureRequest(request),
+        respond: () => structureResponse(structureDocument('SDG_0552_NOC_RT')),
       },
     ]);
-    await client.probeSeries('SDG_0552_NOC_RT', '1.0', 'KEN..', scope());
+    await client.getDataflowStructure('SDG_0552_NOC_RT', scope());
     const headers = http.calls[0]?.request.headers;
     expect(headers?.get('accept-language')).toBe('en');
     expect(headers?.get('user-agent')).toMatch(/^ilostat-mcp-server\//);

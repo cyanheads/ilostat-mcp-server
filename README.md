@@ -59,7 +59,7 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 
 ### `ilostat_search_indicators` <sub>tool</sub>
 
-- Plain-language `query` (every term must match a word or word prefix; a term no catalog word starts with matches by its stem, so `informality` finds `informal` and `disabled` finds `disability`; `female`, `women`, `male`, and `men` match every indicator broken down by sex, and the notice names the `sex` filter for `ilostat_query_indicator`; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure`, and `aggregates_only` filters; omit `query` to browse by filters
+- Plain-language `query` (every term must match a word or word prefix; a term no catalog word starts with matches by its stem, so `informality` finds `informal` and `disabled` finds `disability`; `female`, `women`, `male`, and `men` match every indicator broken down by sex, and the notice names the `sex` filter for `ilostat_query_indicator`; `youth`, `young`, and `adult` match every indicator broken down by age, and the notice says where that band's `AGE_*` codes come from; case, accents, and labour/labor folded) plus `frequency`, `database`, `subject`, `breakdown`, `measure`, and `aggregates_only` filters; omit `query` to browse by filters
 - Up to 50 hits per page (default 10; a larger `limit` is applied as 50, with a notice), continued with `next_cursor`; each hit is one indicator with a `dataset_id` per frequency, coverage years, `n_ref_area`, `last_update`, and `has_aggregates`, and `facets` count the whole match set
 - An unrecognized `database`, `subject`, `breakdown`, or `measure` code fails as `unknown_filter_code`
 
@@ -69,16 +69,18 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 
 - One `dataset_id` (`UNE_DEAP_SEX_AGE_RT_A`) or a bare indicator code, which describes every frequency; an unknown code returns `found: false` with `guidance`
 - Definition, `unit` and its `multiplier`, frequency variants, `breakdowns` (sex codes, plus `classif1` / `classif2` codes with totals marked `is_total`), `default_slice`, covered `ref_areas`, `basis_rule`, and the first 20 `related_datasets` with `related_total`
-- When the SDMX API can't answer, `structure_status` is `unavailable` and breakdowns, unit, and areas are absent rather than the call failing
+- When the SDMX API can't answer, `structure_status` is `unavailable` and breakdowns and areas are absent rather than the call failing; the unit keeps the catalog's labels. A failed lookup is remembered for a minute per indicator, so calls during an SDMX outage degrade at once
 
 ---
 
 ### `ilostat_query_indicator` <sub>tool</sub>
 
 - Up to 100 `dataset_ids`; the first 3 distinct datasets are queried and the rest come back as `remaining_dataset_ids` for another call. Filter by `ref_areas` (up to 300) and/or an `area_group`, `sex`, `classif1`, `classif2`, `sources`, and period: one exact `time`, a `time_from` / `time_to` year window, `latest_only`, or both
-- `latest_only` keeps each series' own latest period; a request whose full history is too large to read in one call falls back to the latest period per area and dataset, and `applied_filters.latest_mode` and the notice say so
+- `latest_only` keeps each series' own latest period; a request whose full history is too large to read in one call falls back to the latest period per area and dataset, and `applied_filters.latest_mode` and the notice say so. The fallback is remembered for `ILOSTAT_CACHE_TTL_SECONDS`, so later pages and repeat calls of that request go straight to it
 - `source_selection` is `best` by default, `all`, or `secondary`; rows carry `source`, `obs_status`, `notes`, and `basis`, decoded in `legend`, and `applied_filters` echoes every parameter sent
-- A result past the inline preview stages in full as a `df_<id>` `dataframe`; a request over `ILOSTAT_MAX_ROWS` fails as `request_too_broad` (unfiltered) or `result_too_large` (filtered)
+- Rows come back `limit` (default 50, at most 5,000) at a time from `offset`, continued by `next_offset`. On the first page a result past the staging threshold (`ILOSTAT_PREVIEW_CHARS`) also stages in full as a `df_<id>` `dataframe`, unless it passes `ILOSTAT_MAX_ROWS`; an unfiltered request over that ceiling fails as `request_too_broad`, and a page reaching past it as `result_too_large`
+- A result of more than 5,000 rows is not cached, so each later page re-reads the request from its start; for a large result, SQL over the staged dataframe (dataframes on) or a narrower request is the cheap path
+- When the result was read to its end (`summary.complete`), `summary.areas_without_rows` names every requested area that returned no rows, per dataset, as `not_covered` (outside the dataset's area list) or `no_rows`, and the notice says the same
 
 ---
 
@@ -96,6 +98,7 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 - `period` puts every area at one period; without it, each area gets its latest value within `lookback_years` (default 10), projections excluded unless `include_projections`; `change_years` (1–30) adds each value's change over that span
 - A change carries the earlier value's source, basis, status, and notes, with `source_changed`, `basis_changed`, and `break_in_series` flags; the notice counts the changes that are not like-for-like
 - Rows carry `rank`, `value`, `period`, `basis`, and `source`; areas without a value land in `missing` with a `reason`, and `comparability` reports `mixed_periods`, `basis_counts`, and `distinct_sources`
+- Areas come back `limit` (default 50) at a time from `offset` in the `sort` order, continued by `next_offset`; ranks, `missing`, and `comparability` cover every area on every page, and a first page whose comparison passes the staging threshold (`ILOSTAT_PREVIEW_CHARS`) also stages in full as a `df_<id>` `dataframe`
 
 ---
 
@@ -134,10 +137,10 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 ILOSTAT-specific:
 
-- Two keyless ILO APIs: the ILOSTAT data API serves the catalog, the code dictionaries, and observations; the ILO SDMX API serves each dataset's breakdown codes, default slice, and unit
+- Two keyless ILO APIs: the ILOSTAT data API serves the catalog, the code dictionaries, and observations; the ILO SDMX API serves each dataset's breakdown codes, default slice, covered areas, and unit labels (the unit itself comes from the catalog)
 - The catalog and code dictionaries are held in memory and rechecked every `ILOSTAT_CATALOG_REFRESH_HOURS`; every code a tool takes is validated against them before a request goes upstream
 - A request pacer per upstream host; a 429 or challenge page reaches the caller as a retryable `upstream_busy` carrying `retryAfter`. Data responses of up to 5,000 rows are cached for `ILOSTAT_CACHE_TTL_SECONDS`
-- Dataframes on by default: a query or comparison larger than `ILOSTAT_PREVIEW_CHARS` stages in full as a DuckDB `df_<id>` table that lives for `ILOSTAT_DATASET_TTL_SECONDS`, up to 1,000,000 rows in 100 dataframes per tenant (older ones are evicted and named in `evicted`). With `CANVAS_PROVIDER_TYPE=none`, or in the `.mcpb` bundle (no DuckDB binding), results stop at the inline preview and say so
+- Dataframes on by default: a query or comparison whose first page finds it larger than `ILOSTAT_PREVIEW_CHARS` stages in full as a DuckDB `df_<id>` table that lives for `ILOSTAT_DATASET_TTL_SECONDS`, up to 1,000,000 rows in 100 dataframes per tenant (older ones are evicted and named in `evicted`). With `CANVAS_PROVIDER_TYPE=none`, or in the `.mcpb` bundle (no DuckDB binding), results page with `next_offset` and the notice says they are not staged
 - ILOSTAT data and metadata are published under the ILO Open Access policy as [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); every data response carries an `attribution` to keep with the numbers
 
 Agent-friendly output:
@@ -227,7 +230,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - No API key or account: both ILO APIs are open.
 
 ### Installation
@@ -262,9 +265,9 @@ cp .env.example .env
 | Variable | Description | Default |
 |:---|:---|:---|
 | `ILOSTAT_CATALOG_REFRESH_HOURS` | Hours between catalog refresh checks (1–168). | `6` |
-| `ILOSTAT_MAX_ROWS` | Ceiling on the rows one query may return or stage (1,000–1,000,000). | `500000` |
-| `ILOSTAT_PREVIEW_CHARS` | Inline preview budget in serialized characters (at least 1,000); larger results stage as a dataframe. | `40000` |
-| `ILOSTAT_CACHE_TTL_SECONDS` | Seconds an upstream data response of up to 5,000 rows stays cached; `0` disables the cache. | `900` |
+| `ILOSTAT_MAX_ROWS` | Ceiling on the rows one query reads or stages (1,000–1,000,000); a filtered result past it is paged but not staged, an unfiltered request estimated above it is refused with `request_too_broad`, and a page reaching past it fails as `result_too_large`. | `500000` |
+| `ILOSTAT_PREVIEW_CHARS` | Staging trigger in serialized characters (at least 1,000): a query or comparison whose first page finds its result past it is staged as a dataframe. Query and compare pages are bounded by `limit`; also the inline row budget of `ilostat_dataframe_query`. | `40000` |
+| `ILOSTAT_CACHE_TTL_SECONDS` | Seconds an upstream data response of up to 5,000 rows stays cached, and a read that fell back to a narrower request is remembered; `0` disables the cache. | `900` |
 | `ILOSTAT_DATASET_TTL_SECONDS` | Per-table TTL for staged dataframes, in seconds (at least 60). | `86400` |
 | `ILOSTAT_DATAFRAME_DROP_ENABLED` | Set `true` to expose `ilostat_dataframe_drop`. | `false` |
 | `CANVAS_PROVIDER_TYPE` | DataCanvas engine for staged dataframes: `duckdb`, or `none` to turn dataframes and the three dataframe tools off. | `duckdb` |
@@ -310,7 +313,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) and the input and rendering helpers they share. Nine tools. |
 | `src/services/rplumber`, `src/services/sdmx` | Clients for the ILOSTAT data API and the ILO SDMX API, on the paced, retried HTTP layer in `src/services/upstream`. |
 | `src/services/catalog` | In-memory catalog snapshot, indicator search, reference listings, paging. |
-| `src/services/structure` | Per-indicator SDMX structure and unit, cached. |
+| `src/services/structure` | Per-indicator SDMX structure, cached. |
 | `src/services/observations` | Request validation, size preflight, row decoding, comparisons, response cache. |
 | `src/services/profile` | Headline country profile. |
 | `src/services/basis` | Rules classing each value as reported, modelled estimate, or projection. |

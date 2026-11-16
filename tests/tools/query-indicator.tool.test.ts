@@ -4,10 +4,11 @@
  * emulator) and the recorded SDMX structures: a multi-dataset header union,
  * compound notes, an empty value, `best_source` under `all`, every zero-row
  * fragment, the not-applicable-filter and unresolved-unit notices, the `sources` default, blank
- * form-client inputs and period normalization, the four row routes (complete,
- * staged on a real in-memory DuckDB canvas, the canvas-off preview, and the
- * refused over-ceiling result) with the upstream stream cancelled once reading
- * stops, the response cache, every declared error reason, and both consumption
+ * form-client inputs and period normalization, the row routes (complete, staged
+ * on a real in-memory DuckDB canvas, paged with dataframes off, a first page past
+ * the row ceiling left unstaged, and a page reaching past it refused) with the
+ * upstream stream cancelled once reading stops, paging by limit and offset with
+ * its cache and read bounds, the response cache, every declared error reason, and both consumption
  * paths (`structuredContent` and `content[]`).
  * @module tests/tools/query-indicator.tool.test
  */
@@ -44,11 +45,9 @@ import {
   isRplumber,
   memoryCanvas,
   observationCatalogFixture,
-  probeRoute,
   RPLUMBER_ORIGIN,
   retiredDatasetResponse,
-  SDMX_422_SHORT_KEY,
-  sdmxText,
+  SDMX_ORIGIN,
   streamedCsv,
   structureRoute,
   tocRow,
@@ -76,21 +75,35 @@ const UNE = 'UNE_DEAP_SEX_AGE_RT_A';
 const UNE_CSV = fixtureText(INDICATOR_CSV.uneDeap);
 /** The LAP_2GDP_NOC_RT_A + UNE_2EAP_SEX_AGE_RT_A capture (KEN, 2020), behind the emulator. */
 const UNION_ROUTE = indicatorDataRoute(fixtureText(INDICATOR_CSV.multiDatasetUnion));
-/** Neither union indicator has an SDMX dataflow in the fixtures, so neither unit resolves. */
-const UNION_UNIT_NOTICE =
-  "The unit of LAP_2GDP_NOC_RT_A, UNE_2EAP_SEX_AGE_RT_A is unavailable from the ILOSTAT structure service; the dataset label's parenthetical — (%) or (thousands) — gives it.";
+/**
+ * A percent unit as the catalog's ToC row labels it: what a dataset reports when
+ * its SDMX structure is unavailable, as for both union indicators, which have no
+ * SDMX dataflow in the fixtures.
+ */
+const PERCENT_UNIT_FROM_TOC = {
+  measure: 'PT',
+  measure_label: '%',
+  type: 'RT',
+  multiplier: 0,
+  multiplier_label: 'units',
+};
 const ATTRIBUTION =
   'Source: ILOSTAT, International Labour Organization (CC BY 4.0) — https://ilostat.ilo.org';
 const UPSTREAM_BUSY_RECOVERY =
   'The ILOSTAT API is throttling this server; wait the retry-after interval in the error data, then call again with the same arguments.';
-const PROBE_422_MESSAGE =
-  'ILOSTAT SDMX API (sdmx.ilo.org) rejected the series key built for UNE_DEAP_SEX_AGE_RT (HTTP 422).';
-const CANVAS_OFF_NOTICE = (shown: number) =>
-  `Showing the first ${shown} rows: dataframes are off in this deployment, so reading stopped at the inline preview and the rest of the result was not fetched. Narrow the request — fewer areas, a shorter time window, or specific sex/classif1 codes — to see all of it.`;
 
 /** A header plus rows in the recorded column order, without note columns. */
 const CSV_HEADER =
   '"ref_area","source","indicator","sex","classif1","time","obs_value","obs_status"';
+
+/** `n` USA rows, one per year from 1000, streamed 100 rows a pull. */
+const usaRows = (n: number) =>
+  streamedCsv(
+    CSV_HEADER,
+    n,
+    (index) =>
+      `"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","${1000 + index}",${index % 10},`,
+  );
 
 /**
  * The recorded catalog with the observation extras, the recorded UNE_DEAP CSV
@@ -170,6 +183,22 @@ async function canvasTables(canvas: DataCanvas, ctx: Context) {
   return (await (await tenantCanvas(canvas, ctx)).describe()).map((table) => table.name);
 }
 
+/** The observation catalog with twelve more X36 members, copies of JOR's row: thirteen areas UNE_DEAP's structure leaves out. */
+function x36Fixture() {
+  const fixture = observationCatalogFixture();
+  const jordan = fixture.refAreaToc.find((row) => row.ref_area === 'JOR');
+  const added = 'ABCDEFGHIJKL'.split('').map((letter) => `Q${letter}${letter}`);
+  for (const code of added) {
+    fixture.refAreaToc.push({
+      ...jordan,
+      id: `${code}_A`,
+      ref_area: code,
+      'ref_area.label': code,
+    });
+  }
+  return { fixture, members: ['JOR', ...added] };
+}
+
 describe('rows', () => {
   it('reads a two-dataset header union: request-order metas, sparse rows, legend, and summary', async () => {
     const wired = wire({ routes: [UNION_ROUTE] });
@@ -187,19 +216,21 @@ describe('rows', () => {
       projection_rule: 'edition',
       edition: 'Nov. 2025',
     };
-    // neither indicator has an SDMX dataflow in the fixtures, so no unit resolves
+    // neither indicator has an SDMX dataflow in the fixtures, so each unit keeps the catalog's labels
     expect(result.datasets).toEqual([
       {
         dataset_id: 'LAP_2GDP_NOC_RT_A',
         label: 'Labour income share as a percent of GDP -- ILO modelled estimates, Nov. 2025 (%)',
         last_update: '2026-03-20T12:54:04',
         ...modelledMeta,
+        unit: PERCENT_UNIT_FROM_TOC,
       },
       {
         dataset_id: 'UNE_2EAP_SEX_AGE_RT_A',
         label: 'Unemployment rate by sex and age -- ILO modelled estimates, Nov. 2025 (%)',
         last_update: '2025-12-02T12:33:47',
         ...modelledMeta,
+        unit: PERCENT_UNIT_FROM_TOC,
       },
     ]);
     const une = { dataset_id: 'UNE_2EAP_SEX_AGE_RT_A', ref_area: 'KEN', source: 'XA:1909' };
@@ -243,6 +274,7 @@ describe('rows', () => {
       period_max: '2020',
       basis_counts: { reported: 0, modelled_estimate: 4, projection: 0 },
       complete: true,
+      areas_without_rows: [],
     });
     expect(result).not.toHaveProperty('dataframe');
     expect(result.attribution).toBe(ATTRIBUTION);
@@ -259,8 +291,9 @@ describe('rows', () => {
       },
       truncated: false,
       shown: 4,
-      cap: 40_000,
-      notice: `classif1 does not apply to LAP_2GDP_NOC_RT_A, which has no classif1 breakdown; its rows are not narrowed by it. ${UNION_UNIT_NOTICE}`,
+      cap: 50,
+      notice:
+        'classif1 does not apply to LAP_2GDP_NOC_RT_A, which has no classif1 breakdown; its rows are not narrowed by it.',
     });
     expect(sentParams(wired)).toEqual({
       id: 'LAP_2GDP_NOC_RT_A+UNE_2EAP_SEX_AGE_RT_A',
@@ -421,38 +454,97 @@ describe('rows', () => {
   });
 });
 
-describe('unit from the structure service', () => {
-  const unitNotice = (ids: string) =>
-    `The unit of ${ids} is unavailable from the ILOSTAT structure service; the dataset label's parenthetical — (%) or (thousands) — gives it.`;
+describe('unit from the catalog', () => {
+  const STRUCTURE_DOWN = structureRoute('UNE_DEAP_SEX_AGE_RT', () =>
+    Promise.reject(new TypeError('fetch failed')),
+  );
+  const sdmxPaths = (wired: ReturnType<typeof wire>) =>
+    callUrls(wired.http, (request) => new URL(request.url).origin === SDMX_ORIGIN).map(
+      (url) => url.pathname,
+    );
 
-  it('says the unit could not be read when the structure service is down, on both surfaces', async () => {
-    wire({
-      routes: [
-        structureRoute('UNE_DEAP_SEX_AGE_RT', () => Promise.reject(new TypeError('fetch failed'))),
-      ],
+  /** The observation catalog with the four ToC unit fields removed from `ids`' rows. */
+  function withoutUnits(...ids: string[]): CatalogFixture {
+    const fixture = observationCatalogFixture();
+    for (const id of ids) {
+      const row = tocRow(fixture, id);
+      for (const key of ['unit_measure', 'unit_measure.label', 'unit_mult', 'unit_mult.label']) {
+        delete row[key];
+      }
+    }
+    return fixture;
+  }
+
+  it('labels the unit from the structure and sends SDMX no data request', async () => {
+    const wired = wire();
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      time: '2025',
     });
-    const args = { dataset_ids: [UNE], ref_areas: ['USA'], time: '2025' };
+    expect(sdmxPaths(wired)).toEqual(['/rest/dataflow/ILO/DF_UNE_DEAP_SEX_AGE_RT/latest']);
+    expect(result.datasets[0]?.unit).toEqual({
+      measure: 'PT',
+      measure_label: 'Percentage',
+      type: 'RT',
+      type_label: 'Rate',
+      multiplier: 0,
+      multiplier_label: 'Units',
+    });
+    expect(enrichment.notice).toBeUndefined();
+  });
+
+  it("keeps the catalog's unit when the structure service is down: inline, rendered, and staged", async () => {
+    const canvas = canvasOn();
+    wire({ canvas, observations: { previewChars: 3_000 }, routes: [STRUCTURE_DOWN] });
+    const ctx = newContext();
+    const { result, enrichment } = await query(
+      { dataset_ids: [UNE], ref_areas: ['USA', 'X01', 'KEN'] },
+      ctx,
+    );
+    expect(result.datasets[0]?.unit).toEqual(PERCENT_UNIT_FROM_TOC);
+    expect(enrichment.notice ?? '').not.toMatch(/\bunit\b/);
+    expect(render(result)).toContain('Unit: % (PT) · type RT · multiplier 0 (units)');
+    const name = result.dataframe?.name ?? '';
+    expect(name).toMatch(/^df_/);
+    expect(
+      await canvasRows(
+        canvas,
+        ctx,
+        `SELECT unit, unit_multiplier, count(*)::INTEGER AS n FROM ${name} GROUP BY ALL`,
+      ),
+    ).toEqual([{ unit: '%', unit_multiplier: 0, n: 52 }]);
+    const meta = await ctx.state.get<DataframeMeta>(`df-meta/${name}`);
+    expect(meta?.datasets).toEqual([
+      expect.objectContaining({
+        datasetId: UNE,
+        unit: '%',
+        unitMeasure: 'PT',
+        unitType: 'RT',
+        unitMultiplier: 0,
+        unitMultiplierLabel: 'units',
+      }),
+    ]);
+    expect(meta?.datasets[0]).not.toHaveProperty('unitTypeLabel');
+  });
+
+  it('names only the datasets whose catalog row lists no unit, without pointing at the label, on both surfaces', async () => {
+    const fixture = withoutUnits('UNE_2EAP_SEX_AGE_RT_A');
+    wire({ fixture });
+    const args = { dataset_ids: [UNE, 'UNE_2EAP_SEX_AGE_RT_A'], ref_areas: ['USA'], time: '2025' };
     const { result, enrichment } = await query(args);
-    expect(result.datasets[0]).not.toHaveProperty('unit');
-    expect(result.row_count).toBeGreaterThan(0);
-    expect(enrichment.notice).toBe(unitNotice(UNE));
+    expect(result.datasets.map((dataset) => Boolean(dataset.unit))).toEqual([true, false]);
+    // The sentences naming USA, which has no UNE_2EAP rows here, follow the unit sentence.
+    const notice =
+      'The ILOSTAT catalog lists no unit for UNE_2EAP_SEX_AGE_RT_A. USA returned no UNE_2EAP_SEX_AGE_RT_A rows for these filters and period. The area list of UNE_2EAP_SEX_AGE_RT_A is unavailable from the ILOSTAT structure service, so no area is marked not_covered.';
+    expect(enrichment.notice).toBe(notice);
     expect(render(result)).toContain('Unit: not resolved');
 
     const contract = await runToolContract(queryIndicatorTool, args);
     expect(contract.isError).toBeFalsy();
-    expect(contract.structuredContent).toMatchObject({ notice: unitNotice(UNE) });
-    expect(contentText(contract)).toContain(unitNotice(UNE));
-  });
-
-  it('names only the datasets whose unit is missing', async () => {
-    wire();
-    const { result, enrichment } = await query({
-      dataset_ids: [UNE, 'UNE_2EAP_SEX_AGE_RT_A'],
-      ref_areas: ['USA'],
-      time: '2025',
-    });
-    expect(result.datasets.map((dataset) => Boolean(dataset.unit))).toEqual([true, false]);
-    expect(enrichment.notice).toBe(unitNotice('UNE_2EAP_SEX_AGE_RT_A'));
+    expect(contract.structuredContent).toMatchObject({ notice });
+    expect(contentText(contract)).toContain(notice);
+    expect(contentText(contract)).not.toContain('parenthetical');
   });
 });
 
@@ -471,7 +563,7 @@ describe('filters', () => {
       ['UNE_2EAP_SEX_AGE_RT_A', 'SEX_M'],
     ]);
     expect(enrichment.notice).toBe(
-      `sex does not apply to LAP_2GDP_NOC_RT_A, which has no sex breakdown; its rows are not narrowed by it. classif1 does not apply to LAP_2GDP_NOC_RT_A, which has no classif1 breakdown; its rows are not narrowed by it. ${UNION_UNIT_NOTICE}`,
+      'sex does not apply to LAP_2GDP_NOC_RT_A, which has no sex breakdown; its rows are not narrowed by it. classif1 does not apply to LAP_2GDP_NOC_RT_A, which has no classif1 breakdown; its rows are not narrowed by it.',
     );
   });
 
@@ -643,17 +735,39 @@ describe('dataset batch', () => {
       EAP_DWAP,
     ]);
     expect(structured.applied_filters).toMatchObject({ dataset_ids: [UNE, EMP_TEMP, EAP_DWAP] });
+    // each unit from its catalog row; only UNE_DEAP has an SDMX structure here, so the others keep the ToC labels
+    expect(structured.datasets.map((dataset) => dataset.unit)).toEqual([
+      {
+        measure: 'PT',
+        measure_label: 'Percentage',
+        type: 'RT',
+        type_label: 'Rate',
+        multiplier: 0,
+        multiplier_label: 'Units',
+      },
+      {
+        measure: 'PS',
+        measure_label: 'persons',
+        type: 'NB',
+        multiplier: 3,
+        multiplier_label: 'thousands',
+      },
+      PERCENT_UNIT_FROM_TOC,
+    ]);
     expect(structured.rows.map((row) => [row.dataset_id, row.period, row.value])).toEqual([
       [UNE, '2023', 3.638],
     ]);
     const notice = deferredNotice(EMP_DWAP, 1);
     expect(structured.notice).toContain(notice);
+    expect(structured.notice).not.toContain('lists no unit');
     // one request, for the queried three only
     expect(sentParams(wired).id).toBe(`${UNE}+${EMP_TEMP}+${EAP_DWAP}`);
     const text = contentText(result);
     expect(text).toContain(`**Remaining dataset IDs (not queried):** ${EMP_DWAP}`);
     expect(text).toContain(notice);
     expect(text).toContain(`**Applied filters:** datasets ${UNE}, ${EMP_TEMP}, ${EAP_DWAP} ·`);
+    expect(text).toContain('Unit: persons (PS) · type NB · multiplier 3 (thousands)');
+    expect(text).not.toContain('Unit: not resolved');
   });
 
   it('dedupes before counting, so four spellings of two datasets defer nothing', async () => {
@@ -793,8 +907,6 @@ describe('latest_only', () => {
     "latest_only fell back to ILOSTAT's latest period per area and dataset, because this request's full history is too large or too slow to read series by series in one call: a series (one sex, classif1, or classif2 code) whose data ends before its dataset's newest period in an area may be missing. Narrow with time_from or classif1 to get each series' own latest period; sex or fewer ref_areas alone may still read too much and fall back again.";
   const LATEST_TIMEOUT_HINT =
     'Narrow the request with time_from or classif1, then call again; sex or fewer ref_areas alone may still read too much.';
-  const PER_SERIES_PREVIEW_NOTICE = (shown: number, why: string) =>
-    `Showing the first ${shown} rows: ${why}, so the latest-period rows past the inline preview are not returned. The full history was read to find each series' latest period. Narrow the request — fewer areas or specific sex/classif1 codes — to see all of them.`;
   const TWO_SLICES = {
     dataset_ids: [UNE],
     ref_areas: ['CHN'],
@@ -912,12 +1024,12 @@ describe('latest_only', () => {
   });
 
   it('returns one row per series with no breakdown filter: all 84 of CHN, each at its own latest year', async () => {
-    // a preview large enough to hold all 84 rows inline
-    const wired = wire({ routes: [CHN_ROUTE], observations: { previewChars: 200_000 } });
+    const wired = wire({ routes: [CHN_ROUTE] });
     const { result, enrichment } = await query({
       dataset_ids: [UNE],
       ref_areas: ['CHN'],
       latest_only: true,
+      limit: 100,
     });
     const seriesOf = (row: { sex?: string | undefined; classif1?: string | undefined }) =>
       `${row.sex}|${row.classif1}`;
@@ -933,7 +1045,10 @@ describe('latest_only', () => {
       value: 3.841,
       source: 'AA:992',
     });
-    expect(enrichment.notice).toBeUndefined();
+    // the 84 rows pass the default preview budget, so the first page says why nothing was staged
+    expect(enrichment.notice).toBe(
+      'Showing rows 1–84 of 84. Dataframes are off in this deployment, so the result is not staged for SQL.',
+    );
     expect(sentParams(wired)).not.toHaveProperty('latestyear');
   });
 
@@ -1023,6 +1138,64 @@ describe('latest_only', () => {
     // the recorded USA SEX_T rows at upstream's latest period
     expect(new Set(structured.rows.map((row) => row.period))).toEqual(new Set(['2025']));
     expect(contentText(result)).toContain(LATEST_YEAR_NOTICE);
+  });
+
+  it('sends a later page of a fallen-back request straight to the fallback, with no full-history request', async () => {
+    const stream = streamedCsv(CSV_HEADER, 1_001, usaYear);
+    const wired = wire({
+      routes: [fullOrLatest(() => stream.response())],
+      observations: { maxRows: 1_000 },
+    });
+    const args = { ...USA_SEX_T, limit: 1 };
+    const first = await query(args);
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true]);
+    expect(first.result.next_offset).toBe(1);
+
+    const pulledByFirst = stream.pulled;
+    const second = await query({ ...args, offset: 1 });
+    // the latestyear rows were cached on the first page, so the second sends no request at all
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true]);
+    expect(stream.pulled).toBe(pulledByFirst);
+    expect(second.enrichment.applied_filters).toMatchObject({ latest_mode: 'latest_year' });
+    expect(String(second.enrichment.notice).startsWith(LATEST_YEAR_NOTICE)).toBe(true);
+    expect(second.result.row_count).toBe(first.result.row_count);
+    expect(second.result.rows).toHaveLength(1);
+    expect(second.result.rows[0]).not.toEqual(first.result.rows[0]);
+    expect(second.result.rows[0]?.period).toBe('2025');
+
+    // a repeat call of the same request skips the doomed read too
+    await query(args);
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true]);
+  });
+
+  it('forgets a fallback with the response cache TTL, then reads per series again', async () => {
+    let current = FIXED_NOW.getTime();
+    const stream = streamedCsv(CSV_HEADER, 1_001, usaYear);
+    const wired = wire({
+      routes: [fullOrLatest(() => stream.response())],
+      observations: { maxRows: 1_000, cacheTtlMs: 1_000 },
+      now: () => new Date(current),
+    });
+    const args = { ...USA_SEX_T, limit: 1 };
+    await query(args);
+    current += 999;
+    await query({ ...args, offset: 1 });
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true]);
+    current += 1;
+    const expired = await query({ ...args, offset: 1 });
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true, false, true]);
+    expect(expired.enrichment.applied_filters).toMatchObject({ latest_mode: 'latest_year' });
+  });
+
+  it('remembers no fallback with the response cache off', async () => {
+    const stream = streamedCsv(CSV_HEADER, 1_001, usaYear);
+    const wired = wire({
+      routes: [fullOrLatest(() => stream.response())],
+      observations: { maxRows: 1_000, cacheTtlMs: 0 },
+    });
+    await query(USA_SEX_T);
+    await query(USA_SEX_T);
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false, true, false, true]);
   });
 
   it('stays per series when the full history holds exactly the row ceiling', async () => {
@@ -1166,6 +1339,34 @@ describe('latest_only', () => {
     expect(urls.map(latestYearSent)).toEqual([false]);
   });
 
+  it.each([
+    ['a failure before the per-series body', 'unavailable'],
+    ["the caller's cancellation of the per-series read", 'cancelled'],
+  ] as const)(
+    'records no fallback for %s: the next call reads per series',
+    async (_case, first) => {
+      const controller = new AbortController();
+      let fullHistoryReads = 0;
+      const urls = wireIndicatorFetch((url, signal) => {
+        if (latestYearSent(url)) return csvResponse(filterIndicatorCsv(UNE_CSV, url));
+        fullHistoryReads += 1;
+        if (fullHistoryReads > 1) return csvResponse(filterIndicatorCsv(UNE_CSV, url));
+        if (first === 'unavailable') return new Response('unavailable', { status: 503 });
+        setTimeout(() => controller.abort(new Error('caller went away')), 20);
+        return hangingBody(signal);
+      });
+      const ctx = createMockContext({
+        errors: queryIndicatorTool.errors,
+        signal: controller.signal,
+      });
+      await expect(query(USA_SEX_T, ctx)).rejects.toBeDefined();
+
+      const { enrichment } = await query(USA_SEX_T);
+      expect(urls.map(latestYearSent)).toEqual([false, false]);
+      expect(enrichment.applied_filters).toMatchObject({ latest_mode: 'per_series' });
+    },
+  );
+
   it('fails Timeout when the deadline passes during a retry backoff, with no fallback request', async () => {
     // A backoff of 22.5 s or more that the deadline failed to cut would outlast the test timeout
     const urls = wireIndicatorFetch(() => new Response('unavailable', { status: 503 }), {
@@ -1217,55 +1418,119 @@ describe('latest_only', () => {
     expect(dataUrls(wired)).toHaveLength(1);
   });
 
-  it('with dataframes off, says the full history was read and only the latest rows were cut', async () => {
-    wire({ routes: [CHN_ROUTE], observations: { previewChars: 2_000 } });
-    const { result, enrichment } = await query({
-      dataset_ids: [UNE],
-      ref_areas: ['CHN'],
-      latest_only: true,
-    });
-    const shown = result.rows.length;
-    expect(shown).toBeGreaterThan(0);
-    expect(shown).toBeLessThan(84);
-    // every held row is counted, not only the preview's
-    expect(result.row_count).toBe(84);
-    expect(Object.values(result.summary.basis_counts).reduce((sum, n) => sum + n, 0)).toBe(84);
-    expect(result.summary).toMatchObject({
+  it('with dataframes off, pages the per-series rows, every held row counted on each page', async () => {
+    const wired = wire({ routes: [CHN_ROUTE], observations: { previewChars: 2_000 } });
+    const args = { dataset_ids: [UNE], ref_areas: ['CHN'], latest_only: true };
+    const first = await query(args);
+    expect(first.result.rows).toHaveLength(50);
+    expect(first.result.next_offset).toBe(50);
+    // every held row is counted, not only the page's
+    expect(first.result.row_count).toBe(84);
+    expect(Object.values(first.result.summary.basis_counts).reduce((sum, n) => sum + n, 0)).toBe(
+      84,
+    );
+    expect(first.result.summary).toMatchObject({
       period_min: '2000',
       period_max: '2022',
       complete: true,
     });
-    expect(render(result)).toContain('**Summary:** 84 rows ·');
-    expect(enrichment).toMatchObject({
+    expect(render(first.result)).toContain('**Summary:** 84 rows ·');
+    expect(first.enrichment).toMatchObject({
       truncated: true,
-      shown,
-      notice: PER_SERIES_PREVIEW_NOTICE(shown, 'dataframes are off in this deployment'),
+      shown: 50,
+      cap: 50,
+      notice:
+        'Showing rows 1–50 of 84. Dataframes are off in this deployment, so the result is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.',
     });
+
+    const second = await query({ ...args, offset: 50 });
+    expect(second.result.rows).toHaveLength(34);
+    expect(second.result).not.toHaveProperty('next_offset');
+    expect(second.result).toMatchObject({ row_count: 84, summary: { complete: true } });
+    expect(second.enrichment).toMatchObject({
+      truncated: false,
+      shown: 34,
+      notice: 'Showing rows 51–84 of 84.',
+      applied_filters: { latest_mode: 'per_series' },
+    });
+    const seriesOf = (row: { sex?: string | undefined; classif1?: string | undefined }) =>
+      `${row.sex}|${row.classif1}`;
+    expect(new Set([...first.result.rows, ...second.result.rows].map(seriesOf)).size).toBe(84);
+    // the full history was read whole and cached on the first page; the second sends no request
+    expect(dataUrls(wired)).toHaveLength(1);
   });
 
-  it('when staging fails, says the same of the per-series rows', async () => {
+  it('with dataframes off, counts per-series rows past the 5,001 a page reads as exact: complete, its areas without rows named', async () => {
+    // 6,000 USA series, one row each (a classif2 code apiece), all held before the page is cut
+    const series = 6_000;
+    const stream = streamedCsv(
+      '"ref_area","source","indicator","sex","classif1","classif2","time","obs_value","obs_status"',
+      series,
+      (index) =>
+        `"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","SYN_${index}","2024",${index % 10},`,
+    );
+    const wired = wire({ routes: [dataRoute(() => stream.response())] });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA', 'KEN'],
+      latest_only: true,
+    });
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([false]);
+    expect(enrichment.applied_filters).toMatchObject({ latest_mode: 'per_series' });
+    expect(result.rows).toHaveLength(50);
+    expect(result.next_offset).toBe(50);
+    expect(result.row_count).toBe(series);
+    expect(result.summary).toMatchObject({
+      complete: true,
+      areas_without_rows: [{ dataset_id: UNE, ref_area: 'KEN', reason: 'no_rows' }],
+    });
+    expect(enrichment.notice).toBe(
+      `KEN returned no ${UNE} rows for these filters and period. Showing rows 1–50 of 6,000. Dataframes are off in this deployment, so the result is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.`,
+    );
+    const text = render(result);
+    expect(text).toContain('**Summary:** 6000 rows ·');
+    expect(text).toContain('· complete: true');
+    expect(text).toContain(`- ${UNE} · KEN: no_rows`);
+  });
+
+  it('when staging fails, says so of the per-series rows', async () => {
     const canvas = faultyCanvas({ at: 'acquire', error: new Error('engine down') });
     canvases.push(canvas);
     wire({ canvas, routes: [CHN_ROUTE], observations: { previewChars: 2_000 } });
-    const { result, enrichment } = await query({
+    const { enrichment } = await query({
       dataset_ids: [UNE],
       ref_areas: ['CHN'],
       latest_only: true,
     });
     expect(enrichment.notice).toBe(
-      PER_SERIES_PREVIEW_NOTICE(
-        result.rows.length,
-        'staging the full result as a dataframe failed',
-      ),
+      'Showing rows 1–50 of 84. Staging the full result as a dataframe failed; call again with offset 0 to retry it. Pass next_offset as offset, with the same other arguments, for the next page.',
     );
   });
 
-  it('keeps the not-fetched wording after a fallback, where reading did stop at the preview', async () => {
-    wire({ observations: { maxRows: 100_000, previewChars: 1_000 } });
-    const { result, enrichment } = await query({ dataset_ids: [UNE], latest_only: true });
-    expect(enrichment.notice).toBe(
-      `${LATEST_YEAR_NOTICE} ${CANVAS_OFF_NOTICE(result.rows.length)}`,
+  it('pages the latest_year fallback like any stream, its notice ahead of the page notice', async () => {
+    const wired = wire({ observations: { maxRows: 100_000, previewChars: 1_000 } });
+    const args = { dataset_ids: [UNE], latest_only: true, limit: 3 };
+    const first = await query(args);
+    // the recorded rows at each area's latest period: KEN 2021, six of USA 2025, X01 2027
+    expect(first.result.rows.map((row) => row.ref_area)).toEqual(['KEN', 'USA', 'USA']);
+    expect(first.result).toMatchObject({
+      row_count: 8,
+      next_offset: 3,
+      summary: { complete: true },
+    });
+    expect(first.enrichment.notice).toBe(
+      `${LATEST_YEAR_NOTICE} Showing rows 1–3 of 8. Dataframes are off in this deployment, so the result is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.`,
     );
+
+    const second = await query({ ...args, offset: 3 });
+    expect(second.result.rows.map((row) => row.ref_area)).toEqual(['USA', 'USA', 'USA']);
+    expect(second.result).toMatchObject({ row_count: 8, next_offset: 6 });
+    expect(second.enrichment).toMatchObject({
+      notice: `${LATEST_YEAR_NOTICE} Showing rows 4–6 of 8. Pass next_offset as offset, with the same other arguments, for the next page.`,
+      applied_filters: { latest_mode: 'latest_year' },
+    });
+    // one latestyear request, read whole and cached on the first page
+    expect(dataUrls(wired).map(latestYearSent)).toEqual([true]);
   });
 });
 
@@ -1331,6 +1596,22 @@ describe('zero rows', () => {
     expect(enrichment.notice).toBe(COVERAGE);
   });
 
+  it('adds no past-the-end sentence when the result is empty at a later offset, on both surfaces', async () => {
+    wire();
+    const result = await runToolContract(queryIndicatorTool, {
+      ...USA_TOTAL,
+      time_from: '1900',
+      time_to: '1905',
+      offset: 5,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ rows: [], row_count: 0, notice: COVERAGE });
+    expect(result.structuredContent).not.toHaveProperty('next_offset');
+    const text = contentText(result);
+    expect(text).toContain(COVERAGE);
+    expect(text).not.toContain('past the end');
+  });
+
   it('leaves the coverage out when the window touches it, even at one end year', async () => {
     wire();
     const { result, enrichment } = await query({
@@ -1372,17 +1653,7 @@ describe('zero rows', () => {
   });
 
   it('names the areas the structure does not cover — up to 10, then a count — and never a covered one', async () => {
-    const fixture = observationCatalogFixture();
-    const jordan = fixture.refAreaToc.find((row) => row.ref_area === 'JOR');
-    const added = 'ABCDEFGHIJKL'.split('').map((letter) => `Q${letter}${letter}`);
-    for (const code of added) {
-      fixture.refAreaToc.push({
-        ...jordan,
-        id: `${code}_A`,
-        ref_area: code,
-        'ref_area.label': code,
-      });
-    }
+    const { fixture, members } = x36Fixture();
     wire({ fixture });
     const { result, enrichment } = await query({
       dataset_ids: [UNE],
@@ -1393,7 +1664,7 @@ describe('zero rows', () => {
     expect(result.row_count).toBe(0);
     expect(enrichment.applied_filters).toMatchObject({ ref_area_count: 14 });
     expect(enrichment.notice).toBe(
-      `JOR, ${added.slice(0, 9).join(', ')} and 3 more have no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
+      `${members.slice(0, 10).join(', ')} and 3 more have no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
     );
   });
 
@@ -1407,7 +1678,6 @@ describe('zero rows', () => {
     expect(result.row_count).toBe(0);
     expect(enrichment.notice).toBe(
       [
-        "The unit of UNE_2EAP_SEX_AGE_RT_A is unavailable from the ILOSTAT structure service; the dataset label's parenthetical — (%) or (thousands) — gives it.",
         `JOR has no ${UNE} data — ilostat_describe_indicator lists the areas it covers.`,
         'UNE_2EAP_SEX_AGE_RT_A may not use SEX_F — ilostat_describe_indicator UNE_2EAP_SEX_AGE_RT_A lists the codes it uses.',
         'Some requested areas have no UNE_2EAP_SEX_AGE_RT_A data — ilostat_describe_indicator lists the areas it covers.',
@@ -1429,6 +1699,176 @@ describe('zero rows', () => {
   });
 });
 
+describe('areas without rows', () => {
+  const COVERS = 'ilostat_describe_indicator lists the areas it covers.';
+  const UNE_2EAP = 'UNE_2EAP_SEX_AGE_RT_A';
+  const STRUCTURE_DOWN = structureRoute('UNE_DEAP_SEX_AGE_RT', () =>
+    Promise.reject(new TypeError('fetch failed')),
+  );
+  /** KEN (6 rows) and USA (3) have 15+ total rows; ABW is in UNE_DEAP's structure area list with none, JOR outside it. */
+  const MIXED = {
+    dataset_ids: [UNE],
+    ref_areas: ['KEN', 'JOR', 'ABW', 'USA'],
+    sex: ['SEX_T'],
+    classif1: ['AGE_YTHADULT_YGE15'],
+  };
+  const MIXED_LIST = [
+    { dataset_id: UNE, ref_area: 'JOR', reason: 'not_covered' },
+    { dataset_id: UNE, ref_area: 'ABW', reason: 'no_rows' },
+  ];
+  const MIXED_NOTICE = `JOR has no ${UNE} data — ${COVERS} ABW returned no ${UNE} rows for these filters and period.`;
+
+  it('names each requested area without rows and why, in the order sent, on both surfaces', async () => {
+    wire();
+    const result = await runToolContract(queryIndicatorTool, MIXED);
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    expect(structured.summary).toMatchObject({ ref_areas: 2, complete: true });
+    expect(structured.summary.areas_without_rows).toEqual(MIXED_LIST);
+    expect(structured.notice).toBe(MIXED_NOTICE);
+    const text = contentText(result);
+    expect(text).toContain(MIXED_NOTICE);
+    const lines = text.split('\n');
+    expect(lines).toContain('**Areas without rows:**');
+    expect(lines.filter((line) => line.startsWith(`- ${UNE} · `))).toEqual([
+      `- ${UNE} · JOR: not_covered`,
+      `- ${UNE} · ABW: no_rows`,
+    ]);
+  });
+
+  it('covers every row read, not the page: a later page and an offset past the end carry the same list', async () => {
+    wire();
+    const pages = [];
+    for (const offset of [0, 4, 100]) {
+      pages.push((await query({ ...MIXED, limit: 2, offset })).result);
+    }
+    // USA's rows sit past the pages that hold rows
+    expect(pages.map((page) => page.rows.map((row) => row.ref_area))).toEqual([
+      ['KEN', 'KEN'],
+      ['KEN', 'KEN'],
+      [],
+    ]);
+    for (const page of pages) {
+      expect(page.row_count).toBe(9);
+      expect(page.summary).toMatchObject({ complete: true, areas_without_rows: MIXED_LIST });
+    }
+  });
+
+  it('lists an area under each dataset it has no rows in, and only that one', async () => {
+    const csv = [
+      CSV_HEADER,
+      '"KEN","BA:7008","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2020",5.1,',
+      '"USA","XA:1909","UNE_2EAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","2020",8.1,',
+      '',
+    ].join('\n');
+    wire({ routes: [indicatorDataRoute(csv)] });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE, UNE_2EAP],
+      ref_areas: ['KEN', 'USA'],
+    });
+    expect(result.summary.ref_areas).toBe(2);
+    // UNE_2EAP has no SDMX dataflow in the fixtures, so its area list is unavailable
+    expect(result.summary.areas_without_rows).toEqual([
+      { dataset_id: UNE, ref_area: 'USA', reason: 'no_rows' },
+      { dataset_id: UNE_2EAP, ref_area: 'KEN', reason: 'no_rows' },
+    ]);
+    expect(enrichment.notice).toBe(
+      [
+        `USA returned no ${UNE} rows for these filters and period.`,
+        `KEN returned no ${UNE_2EAP} rows for these filters and period.`,
+        `The area list of ${UNE_2EAP} is unavailable from the ILOSTAT structure service, so no area is marked not_covered.`,
+      ].join(' '),
+    );
+  });
+
+  it('names ten areas outside the structure and counts the rest, the list holding every one', async () => {
+    const { fixture, members } = x36Fixture();
+    wire({ fixture });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      area_group: 'X36',
+      ref_areas: ['USA'],
+    });
+    expect(result.summary.ref_areas).toBe(1);
+    expect(result.summary.areas_without_rows).toEqual(
+      members.map((area) => ({ dataset_id: UNE, ref_area: area, reason: 'not_covered' })),
+    );
+    expect(enrichment.notice).toBe(
+      `${members.slice(0, 10).join(', ')} and 3 more have no ${UNE} data — ${COVERS}`,
+    );
+  });
+
+  it('marks every area no_rows when the structure is unavailable, and says why', async () => {
+    const { fixture, members } = x36Fixture();
+    wire({ fixture, routes: [STRUCTURE_DOWN] });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      area_group: 'X36',
+      ref_areas: ['USA'],
+    });
+    expect(result.summary.areas_without_rows).toEqual(
+      members.map((area) => ({ dataset_id: UNE, ref_area: area, reason: 'no_rows' })),
+    );
+    expect(enrichment.notice).toBe(
+      `${members.slice(0, 10).join(', ')} and 3 more returned no ${UNE} rows for these filters and period. The area list of ${UNE} is unavailable from the ILOSTAT structure service, so no area is marked not_covered.`,
+    );
+  });
+
+  it('carries the list on a staged result and a per-series latest_only result', async () => {
+    const canvas = canvasOn();
+    wire({ canvas, observations: { previewChars: 3_000 } });
+    const staged = await query({ dataset_ids: [UNE], ref_areas: ['USA', 'X01', 'KEN', 'JOR'] });
+    expect(staged.result.dataframe?.row_count).toBe(52);
+    expect(staged.result.summary).toMatchObject({
+      complete: true,
+      areas_without_rows: [{ dataset_id: UNE, ref_area: 'JOR', reason: 'not_covered' }],
+    });
+    const latest = await query({ ...MIXED, latest_only: true });
+    expect(latest.enrichment.applied_filters).toMatchObject({ latest_mode: 'per_series' });
+    expect(latest.result.summary.areas_without_rows).toEqual(MIXED_LIST);
+  });
+
+  it('is empty, with no sentence, when every requested area returned rows', async () => {
+    wire();
+    const { result, enrichment } = await query({ ...MIXED, ref_areas: ['KEN', 'USA'] });
+    expect(result.summary.areas_without_rows).toEqual([]);
+    expect(enrichment.notice).toBeUndefined();
+    expect(render(result).split('\n')).toContain('**Areas without rows:** none');
+  });
+
+  it('is left out when no area is named, and on zero rows, whose notice is unchanged', async () => {
+    wire();
+    const unnamed = await query({ dataset_ids: [UNE], sex: ['SEX_T'], time: '2024' });
+    expect(unnamed.result.row_count).toBeGreaterThan(0);
+    expect(unnamed.result.summary).not.toHaveProperty('areas_without_rows');
+    expect(render(unnamed.result)).not.toContain('Areas without rows');
+    const empty = await query({ ...MIXED, ref_areas: ['JOR', 'ABW'] });
+    expect(empty.result.row_count).toBe(0);
+    expect(empty.result.summary).not.toHaveProperty('areas_without_rows');
+    expect(empty.enrichment.notice).toBe(`JOR has no ${UNE} data — ${COVERS}`);
+  });
+
+  it('is left out of a read that stopped before the end of the result', async () => {
+    const stream = streamedCsv(
+      CSV_HEADER,
+      10_000,
+      (index) =>
+        `"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","${1000 + index}",${index % 10},`,
+    );
+    wire({ routes: [dataRoute(() => stream.response())] });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA', 'KEN'],
+      limit: 10,
+    });
+    // KEN has no rows in the part read, which says nothing about the rest
+    expect(result.summary.complete).toBe(false);
+    expect(result.summary).not.toHaveProperty('areas_without_rows');
+    expect(enrichment.notice).not.toMatch(/KEN (returned|has) no/);
+    expect(render(result)).not.toContain('Areas without rows');
+  });
+});
+
 describe('routing', () => {
   it('stages a result larger than the preview on the canvas, labels and decimals included', async () => {
     const canvas = canvasOn();
@@ -1446,20 +1886,22 @@ describe('routing', () => {
       expires_at: '2026-09-27T12:00:00.000Z',
     });
     expect(result.row_count).toBe(52);
-    expect(result.rows.length).toBeGreaterThan(0);
-    expect(result.rows.length).toBeLessThan(52);
+    // the page is limit rows, not what fits the preview
+    expect(result.rows).toHaveLength(50);
+    expect(result.next_offset).toBe(50);
     expect(result.summary).toEqual({
       ref_areas: 3,
       period_min: '1999',
       period_max: '2027',
       basis_counts: { reported: 24, modelled_estimate: 25, projection: 3 },
       complete: true,
+      areas_without_rows: [],
     });
     expect(enrichment).toMatchObject({
-      truncated: false,
-      shown: result.rows.length,
-      cap: 3_000,
-      notice: `Full result staged as ${name} (52 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL.`,
+      truncated: true,
+      shown: 50,
+      cap: 50,
+      notice: `Full result staged as ${name} (52 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL. Showing rows 1–50 of 52. Pass next_offset as offset, with the same other arguments, for the next page.`,
     });
 
     expect(await canvasTables(canvas, ctx)).toEqual([name]);
@@ -1516,61 +1958,257 @@ describe('routing', () => {
     });
   });
 
-  it('with dataframes off, stops at the preview, discloses it, and cancels the upstream body', async () => {
-    const stream = streamedCsv(
-      CSV_HEADER,
-      10_000,
-      (index) =>
-        `"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","${1000 + index}",${index % 10},`,
-    );
+  it('with dataframes off, returns limit rows, reads 5,001 rows past the cache limit, and cancels the upstream body', async () => {
+    const stream = usaRows(10_000);
     wire({ routes: [dataRoute(() => stream.response())], observations: { previewChars: 3_000 } });
     const { result, enrichment } = await query({ dataset_ids: [UNE], ref_areas: ['USA'] });
-    const shown = result.rows.length;
-    expect(shown).toBeGreaterThan(0);
+    expect(result.rows.map((row) => row.period)).toEqual(
+      Array.from({ length: 50 }, (_, index) => String(1000 + index)),
+    );
+    expect(result.next_offset).toBe(50);
     expect(result).not.toHaveProperty('dataframe');
-    expect(result.summary.complete).toBe(false);
     // row_count is the rows read, not the rows upstream holds
-    expect(result.row_count).toBeGreaterThanOrEqual(shown);
-    expect(result.row_count).toBeLessThan(10_000);
+    expect(result.row_count).toBe(5_001);
+    expect(result.summary.complete).toBe(false);
     expect(enrichment).toMatchObject({
       truncated: true,
-      shown,
-      cap: 3_000,
-      notice: CANVAS_OFF_NOTICE(shown),
+      shown: 50,
+      cap: 50,
+      notice:
+        'Showing rows 1–50 of at least 5,001. Dataframes are off in this deployment, so the result is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.',
     });
     expect(stream.cancelled).toBe(true);
-    expect(stream.pulled).toBeLessThan(1_000);
+    expect(stream.pulled).toBeGreaterThanOrEqual(5_001);
+    expect(stream.pulled).toBeLessThan(10_000);
   });
 
-  it('refuses a result past the row ceiling as result_too_large, drops the partial table, and stops the transfer', async () => {
+  it('returns the first page of a result past the row ceiling unstaged, drops the partial table, and stops the transfer', async () => {
     const canvas = canvasOn();
-    const stream = streamedCsv(
-      CSV_HEADER,
-      10_000,
-      (index) =>
-        `"USA","BA:453","UNE_DEAP_SEX_AGE_RT","SEX_T","AGE_YTHADULT_YGE15","${1000 + index}",${index % 10},`,
-    );
+    const stream = usaRows(10_000);
     wire({
       canvas,
       routes: [dataRoute(() => stream.response())],
       observations: { maxRows: 250, previewChars: 2_000 },
     });
     const ctx = newContext();
-    const error = await query({ dataset_ids: [UNE], ref_areas: ['USA'] }, ctx).then(
-      () => undefined,
-      (caught: unknown) => caught as McpError,
+    const { result, enrichment } = await query({ dataset_ids: [UNE], ref_areas: ['USA'] }, ctx);
+    expect(result.rows.map((row) => row.period)).toEqual(
+      Array.from({ length: 50 }, (_, index) => String(1000 + index)),
     );
-    expect(error?.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(error?.data).toMatchObject({
-      reason: 'result_too_large',
-      maxRows: 250,
-      recovery: {
-        hint: 'Narrow the request with fewer reference areas, a shorter time window, or specific sex/classif1 codes, then call again.',
-      },
+    expect(result.next_offset).toBe(50);
+    expect(result).not.toHaveProperty('dataframe');
+    // the rows read: the ceiling plus the one that proved the result passes it
+    expect(result.row_count).toBe(251);
+    expect(result.summary.complete).toBe(false);
+    expect(enrichment).toMatchObject({
+      truncated: true,
+      shown: 50,
+      cap: 50,
+      notice:
+        'Showing rows 1–50 of at least 251. The result passes the 250-row ceiling, so it is not staged for SQL; narrow the request (fewer reference areas, a shorter time window, or specific sex or classif1 codes) to stage it. Pass next_offset as offset, with the same other arguments, for the next page.',
     });
-    expect(error?.message).toBe('The result passed the 250-row ceiling; nothing was staged.');
+    expect(render(result)).toContain('**next_offset:** 50');
     expect(stream.cancelled).toBe(true);
     expect(stream.pulled).toBeLessThan(1_000);
+    expect(await canvasTables(canvas, ctx)).toEqual([]);
+    expect((await ctx.state.list('df-meta/')).items).toEqual([]);
+  });
+
+  it.each([
+    ['a first page staging with dataframes on', true, 0, 300, '1–300'],
+    ['a later page with dataframes off', false, 220, 50, '221–270'],
+  ])(
+    'refuses %s that reaches past the row ceiling as result_too_large, stopping the transfer',
+    async (_label, withCanvas, offset, limit, rows) => {
+      const canvas = withCanvas ? canvasOn() : undefined;
+      const stream = usaRows(10_000);
+      wire({
+        ...(canvas ? { canvas } : {}),
+        routes: [dataRoute(() => stream.response())],
+        observations: { maxRows: 250, previewChars: 2_000 },
+      });
+      const ctx = newContext();
+      const error = await query(
+        { dataset_ids: [UNE], ref_areas: ['USA'], offset, limit },
+        ctx,
+      ).then(
+        () => undefined,
+        (caught: unknown) => caught as McpError,
+      );
+      expect(error?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error?.data).toMatchObject({
+        reason: 'result_too_large',
+        maxRows: 250,
+        recovery: {
+          hint: 'Narrow the request with fewer reference areas, a shorter time window, or specific sex/classif1 codes, then call again.',
+        },
+      });
+      expect(error?.message).toBe(
+        `The result passes the 250-row ceiling, and rows ${rows} reach past it; no page is read beyond the ceiling.`,
+      );
+      expect(stream.cancelled).toBe(true);
+      expect(stream.pulled).toBeLessThan(1_000);
+      if (canvas) expect(await canvasTables(canvas, ctx)).toEqual([]);
+      expect((await ctx.state.list('df-meta/')).items).toEqual([]);
+    },
+  );
+
+  it('names the row ceiling instead of offering a next page the ceiling refuses', async () => {
+    wire({
+      routes: [dataRoute(() => usaRows(10_000).response())],
+      observations: { maxRows: 250, previewChars: 2_000 },
+    });
+    const narrow =
+      'narrow the request (fewer reference areas, a shorter time window, or specific sex or classif1 codes) to read rows past 250.';
+
+    const last = await query({ dataset_ids: [UNE], ref_areas: ['USA'], offset: 200 });
+    expect(last.result.next_offset).toBe(250);
+    expect(last.enrichment.notice).toBe(
+      `Showing rows 201–250 of at least 251. Rows past the 250-row ceiling are not read; ${narrow}`,
+    );
+
+    const short = await query({ dataset_ids: [UNE], ref_areas: ['USA'], offset: 150, limit: 80 });
+    expect(short.result.next_offset).toBe(230);
+    expect(short.enrichment.notice).toBe(
+      `Showing rows 151–230 of at least 251. The next page would reach past the 250-row ceiling: pass next_offset as offset with limit 20 for the rows up to it, or ${narrow}`,
+    );
+    // the advertised short page is served
+    const tail = await query({ dataset_ids: [UNE], ref_areas: ['USA'], offset: 230, limit: 20 });
+    expect(tail.result.rows.map((row) => row.period)).toEqual(
+      Array.from({ length: 20 }, (_, index) => String(1230 + index)),
+    );
+
+    // a page whose successor stays under the ceiling keeps the plain guidance
+    const early = await query({ dataset_ids: [UNE], ref_areas: ['USA'], offset: 50 });
+    expect(early.enrichment.notice).toBe(
+      'Showing rows 51–100 of at least 251. Pass next_offset as offset, with the same other arguments, for the next page.',
+    );
+  });
+});
+
+describe('paging', () => {
+  /** The recorded USA, X01, and KEN rows: 52 in all. */
+  const THREE_AREAS = { dataset_ids: [UNE], ref_areas: ['USA', 'X01', 'KEN'] };
+
+  it('reads a result the cache holds whole on its first page: disjoint pages, the whole result in order, one request', async () => {
+    const wired = wire();
+    const pages: Output['rows'][] = [];
+    // 52 rows at 20 a page take 3 pages; a walk still going after one more never ends
+    const maxPages = Math.ceil(52 / 20) + 1;
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      if (pages.length === maxPages) {
+        throw new Error(`next_offset still set after ${maxPages} pages`);
+      }
+      const { result } = await query({ ...THREE_AREAS, limit: 20, offset });
+      // read whole on the first page, so every page counts the result exactly
+      expect(result).toMatchObject({ row_count: 52, summary: { complete: true } });
+      pages.push(result.rows);
+      offset = result.next_offset;
+    }
+    expect(pages.map((page) => page.length)).toEqual([20, 20, 12]);
+    const { result: whole } = await query({ ...THREE_AREAS, limit: 5_000 });
+    expect(whole.rows).toHaveLength(52);
+    expect(pages.flat()).toEqual(whole.rows);
+    expect(dataUrls(wired)).toHaveLength(1);
+  });
+
+  it.each([
+    [5_000, 5_000, true, 1],
+    [5_001, 5_001, false, 2],
+  ])(
+    'caches a result of %i rows only when read to its end within the cache limit',
+    async (rows, rowCount, complete, requests) => {
+      const stream = usaRows(rows);
+      const wired = wire({ routes: [dataRoute(() => stream.response())] });
+      const { result } = await query({ dataset_ids: [UNE], ref_areas: ['USA'] });
+      expect(result).toMatchObject({ row_count: rowCount, next_offset: 50, summary: { complete } });
+      await query({ dataset_ids: [UNE], ref_areas: ['USA'], offset: 50 });
+      expect(dataUrls(wired)).toHaveLength(requests);
+    },
+  );
+
+  it.each([
+    ['past 5,000 rows', 5_000, 100, 5_101, 5_100],
+    ['at the end of the result', 9_950, 50, 10_000, undefined],
+  ])(
+    'reads one row past a page %s, in one request',
+    async (_label, offset, limit, rowCount, nextOffset) => {
+      const stream = usaRows(10_000);
+      const wired = wire({ routes: [dataRoute(() => stream.response())] });
+      const { result } = await query({ dataset_ids: [UNE], ref_areas: ['USA'], offset, limit });
+      expect(result.rows.map((row) => row.period)).toEqual(
+        Array.from({ length: limit }, (_, index) => String(1000 + offset + index)),
+      );
+      expect(result.next_offset).toBe(nextOffset);
+      expect(result.row_count).toBe(rowCount);
+      expect(result.summary.complete).toBe(nextOffset === undefined);
+      expect(stream.pulled).toBeGreaterThanOrEqual(rowCount);
+      expect(dataUrls(wired)).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    [5_001, '5001'],
+    [10_000, '10000'],
+    [1e20, '100000000000000000000'],
+  ])('applies a limit of %d as the 5,000-row page cap and says so', async (limit, sent) => {
+    const stream = usaRows(10_000);
+    wire({ routes: [dataRoute(() => stream.response())] });
+    const { result, enrichment } = await query({ dataset_ids: [UNE], ref_areas: ['USA'], limit });
+    expect(result.rows).toHaveLength(5_000);
+    expect(result.next_offset).toBe(5_000);
+    expect(enrichment).toMatchObject({ truncated: true, shown: 5_000, cap: 5_000 });
+    expect(enrichment.notice).toMatch(
+      new RegExp(
+        `^limit ${sent} was applied as 5000, the per-call page cap\\. Showing rows 1–5,000 of at least 5,001\\.`,
+      ),
+    );
+  });
+
+  it('applies a limit of exactly the 5,000-row page cap as asked, with no cap sentence', async () => {
+    const stream = usaRows(10_000);
+    wire({ routes: [dataRoute(() => stream.response())] });
+    const { result, enrichment } = await query({
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      limit: 5_000,
+    });
+    expect(result.rows).toHaveLength(5_000);
+    expect(result.next_offset).toBe(5_000);
+    expect(enrichment).toMatchObject({ truncated: true, shown: 5_000, cap: 5_000 });
+    expect(enrichment.notice).toMatch(/^Showing rows 1–5,000 of at least 5,001\./);
+    expect(enrichment.notice).not.toContain('was applied as');
+  });
+
+  it.each([52, 60])(
+    'returns no rows and a notice, not an error, for offset %i at or past the end',
+    async (offset) => {
+      wire();
+      const result = await runToolContract(queryIndicatorTool, { ...THREE_AREAS, offset });
+      expect(result.isError).toBeFalsy();
+      const notice = `offset ${offset} is past the end of the result, which holds 52 rows.`;
+      expect(result.structuredContent).toMatchObject({
+        rows: [],
+        row_count: 52,
+        truncated: false,
+        shown: 0,
+        notice,
+      });
+      expect(result.structuredContent).not.toHaveProperty('next_offset');
+      expect(contentText(result)).toContain(notice);
+    },
+  );
+
+  it('with dataframes on, stages nothing for a later page', async () => {
+    const canvas = canvasOn();
+    wire({ canvas, observations: { previewChars: 3_000 } });
+    const ctx = newContext();
+    const { result, enrichment } = await query({ ...THREE_AREAS, offset: 50 }, ctx);
+    expect(result.rows).toHaveLength(2);
+    expect(result).not.toHaveProperty('next_offset');
+    expect(result).not.toHaveProperty('dataframe');
+    expect(enrichment.notice).toBe('Showing rows 51–52 of 52.');
     expect(await canvasTables(canvas, ctx)).toEqual([]);
     expect((await ctx.state.list('df-meta/')).items).toEqual([]);
   });
@@ -1594,11 +2232,12 @@ describe('response cache', () => {
     expect(dataUrls(wired)).toHaveLength(2);
   });
 
-  it('never caches a response whose reading stopped at the preview', async () => {
-    const wired = wire({ observations: { previewChars: 2_000 } });
+  it('never caches a response whose reading stopped before its end', async () => {
+    const stream = usaRows(10_000);
+    const wired = wire({ routes: [dataRoute(() => stream.response())] });
     const args = { dataset_ids: [UNE], ref_areas: ['USA'] };
     expect((await query(args)).result.summary.complete).toBe(false);
-    await query(args);
+    await query({ ...args, offset: 50 });
     expect(dataUrls(wired)).toHaveLength(2);
   });
 });
@@ -1923,24 +2562,6 @@ describe('errors', () => {
     },
   );
 
-  it("InternalError: a unit-probe key the SDMX host rejects (422) is this server's bug, on both surfaces", async () => {
-    const probe422 = probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () =>
-      sdmxText(SDMX_422_SHORT_KEY, 422),
-    );
-    wire({ routes: [probe422] });
-    const args = { dataset_ids: [UNE], ref_areas: ['USA'] };
-    const error = await failure(args);
-    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
-    expect(error.message).toBe(PROBE_422_MESSAGE);
-
-    const result = await runToolContract(queryIndicatorTool, args);
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      error: { code: JsonRpcErrorCode.InternalError },
-    });
-    expect(contentText(result)).toContain(PROBE_422_MESSAGE);
-  });
-
   it.each([
     ['a dataset ID with a space', { dataset_ids: ['UNE DEAP'] }],
     [
@@ -1975,7 +2596,7 @@ describe('format()', () => {
     const lines = render(result).split('\n');
     for (const line of [
       `## ${UNE} — Unemployment rate by sex and age (%)`,
-      'Frequency: annual (A) · Database: Labour Force Statistics (LFS) (LFS) · Updated 2026-09-24T07:10:19 · Has aggregates: true',
+      'Frequency: annual (A) · Database: Labour Force Statistics (LFS) · Updated 2026-09-24T07:10:19 · Has aggregates: true',
       'Unit: Percentage (PT) · type Rate (RT) · multiplier 0 (Units)',
       'Basis rule: ILO modelled rows through 2024 are modelled_estimate, later ones projection (rule catalog_edition, edition Nov. 2025); every other source is reported.',
       '### Observations (4 of 4 rows shown)',
@@ -2033,9 +2654,28 @@ describe('format()', () => {
     expect(result.datasets[0]?.last_update).toBe('24/09/2026\n## update');
     const lines = render(result).split('\n');
     expect(lines).toContain(
-      'Frequency: annual (A) · Database: Labour Force Statistics (LFS) (LFS) · Updated 24/09/2026 ## update · Has aggregates: true',
+      'Frequency: annual (A) · Database: Labour Force Statistics (LFS) · Updated 24/09/2026 ## update · Has aggregates: true',
     );
     expect(lines.some((line) => line.startsWith('## update'))).toBe(false);
+  });
+
+  it('appends the database code to a database label that does not end with it, on both surfaces', async () => {
+    const fixture: CatalogFixture = observationCatalogFixture();
+    tocRow(fixture, UNE)['database.label'] = 'Labour Force Statistics';
+    wire({ fixture });
+    const result = await runToolContract(queryIndicatorTool, {
+      dataset_ids: [UNE],
+      ref_areas: ['USA'],
+      time: '2024',
+    });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as Output).datasets[0]?.database).toEqual({
+      code: 'LFS',
+      label: 'Labour Force Statistics',
+    });
+    expect(contentText(result)).toContain(
+      'Frequency: annual (A) · Database: Labour Force Statistics (LFS) · Updated',
+    );
   });
 
   it('flattens a line terminator in the ToC frequency, verbatim in structuredContent', async () => {
@@ -2151,9 +2791,11 @@ describe('contract envelope (runToolContract)', () => {
       row_count: 4,
       truncated: false,
       shown: 4,
-      cap: 40_000,
+      cap: 50,
       applied_filters: { dataset_ids: ['LAP_2GDP_NOC_RT_A', 'UNE_2EAP_SEX_AGE_RT_A'] },
     });
+    expect(structured).not.toHaveProperty('next_offset');
+    expect(contentText(result)).not.toContain('next_offset');
     const text = contentText(result);
     for (const row of structured.rows) {
       expect(text).toContain(`- ${row.period}: ${row.value}`);
@@ -2161,7 +2803,7 @@ describe('contract envelope (runToolContract)', () => {
     for (const fragment of [
       '## LAP_2GDP_NOC_RT_A — Labour income share as a percent of GDP -- ILO modelled estimates, Nov. 2025 (%)',
       '## UNE_2EAP_SEX_AGE_RT_A — Unemployment rate by sex and age -- ILO modelled estimates, Nov. 2025 (%)',
-      'Unit: not resolved',
+      'Unit: % (PT) · type RT · multiplier 0 (units)',
       '#### LAP_2GDP_NOC_RT_A · KEN · XA:1909',
       '#### UNE_2EAP_SEX_AGE_RT_A · KEN · SEX_M · AGE_YTHADULT_YGE15 · XA:1909',
       '- 2020: 36.723 · modelled_estimate',
@@ -2235,26 +2877,40 @@ describe('contract envelope (runToolContract)', () => {
     const text = contentText(result);
     expect(text).toContain(`**Dataframe:** ${name} (52 rows, expires 2026-09-27T12:00:00.000Z)`);
     expect(text).toContain(`Full result staged as ${name} (52 rows)`);
-    expect(text).toContain(`### Observations (${structured.rows.length} of 52 rows shown)`);
+    expect(text).toContain('### Observations (50 of 52 rows shown)');
+    expect(structured.next_offset).toBe(50);
+    expect(text).toContain('**next_offset:** 50');
   });
 
-  it('a preview page validates as truncated, the disclosure on both surfaces', async () => {
+  it('a paged result validates as truncated: the same rows, next_offset, and notice on both surfaces', async () => {
     wire({ observations: { previewChars: 3_000 } });
     const result = await runToolContract(queryIndicatorTool, {
       dataset_ids: [UNE],
       ref_areas: ['USA', 'X01', 'KEN'],
     });
     expect(result.isError).toBeFalsy();
-    const structured = result.structuredContent as Output & { shown: number };
+    const structured = result.structuredContent as Output & Record<string, unknown>;
+    const notice =
+      'Showing rows 1–50 of 52. Dataframes are off in this deployment, so the result is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.';
     expect(structured).toMatchObject({
+      row_count: 52,
+      next_offset: 50,
       truncated: true,
-      cap: 3_000,
-      summary: { complete: false },
+      shown: 50,
+      cap: 50,
+      summary: { complete: true },
+      notice,
     });
+    expect(structured.rows).toHaveLength(50);
     expect(structured).not.toHaveProperty('dataframe');
     const text = contentText(result);
-    expect(text).toContain(CANVAS_OFF_NOTICE(structured.shown));
-    expect(text).toContain('complete: false');
+    for (const row of structured.rows) {
+      expect(text).toContain(`- ${row.period}: ${row.value ?? 'no value'}`);
+    }
+    expect(text).toContain('### Observations (50 of 52 rows shown)');
+    expect(text).toContain('**next_offset:** 50');
+    expect(text).toContain(notice);
+    expect(text).toContain('complete: true');
   });
 
   it('a declared failure reaches both surfaces with its reason and recovery', async () => {

@@ -2,9 +2,12 @@
  * @fileoverview Process-wide cache of small upstream data responses, keyed by the
  * canonical request URL. ILOSTAT data is public, so one entry serves every
  * caller. Only responses of at most {@link CACHEABLE_ROWS} rows are stored —
- * larger results live on in the caller's staged dataframe instead. LRU over
+ * a larger result is re-read for each page, or read from its staged dataframe. LRU over
  * `maxEntries` and a total-row budget, with a fixed TTL; a TTL of 0 disables the
- * cache.
+ * cache. Beside the rows, the cache remembers, under the same TTL and its own
+ * `maxEntries` bound, the URLs whose read fell back to a narrower request, so a
+ * later page or a repeat call goes straight to the fallback instead of repeating
+ * a read that gives up again.
  * @module services/observations/response-cache
  */
 
@@ -37,6 +40,8 @@ interface Entry {
 
 export class ResponseCache {
   private readonly entries = new Map<string, Entry>();
+  /** URLs whose read fell back, each with when it was recorded. */
+  private readonly fallbacks = new Map<string, number>();
   private heldRows = 0;
   private readonly maxEntries: number;
   private readonly now: () => Date;
@@ -73,6 +78,31 @@ export class ResponseCache {
     for (const [oldest, entry] of this.entries) {
       if (this.entries.size <= this.maxEntries && this.heldRows <= this.rowBudget) break;
       this.remove(oldest, entry);
+    }
+  }
+
+  /** Whether a read of `url` fell back within the TTL, refreshing its recency. */
+  fellBack(url: string): boolean {
+    const recordedAt = this.fallbacks.get(url);
+    if (recordedAt === undefined) return false;
+    this.fallbacks.delete(url);
+    if (this.now().getTime() - recordedAt >= this.ttlMs) return false;
+    this.fallbacks.set(url, recordedAt);
+    return true;
+  }
+
+  /**
+   * Records, when the cache is on, that a read of `url` gave up and fell back to
+   * a narrower request, then evicts the least recently used records past
+   * `maxEntries`.
+   */
+  rememberFallback(url: string): void {
+    if (this.ttlMs <= 0) return;
+    this.fallbacks.delete(url);
+    this.fallbacks.set(url, this.now().getTime());
+    for (const oldest of this.fallbacks.keys()) {
+      if (this.fallbacks.size <= this.maxEntries) break;
+      this.fallbacks.delete(oldest);
     }
   }
 

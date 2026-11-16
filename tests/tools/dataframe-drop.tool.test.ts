@@ -48,7 +48,7 @@ type Output = Awaited<ReturnType<typeof dataframeDropTool.handler>>;
 type ContractResult = Awaited<ReturnType<typeof runToolContract>>;
 
 const CANVAS_UNAVAILABLE_RECOVERY =
-  'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.';
+  'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies and page through their rows inline with next_offset.';
 const CANVAS_UNAVAILABLE_MESSAGE =
   'Dataframes are unavailable in this deployment: the DataCanvas DuckDB engine could not be loaded.';
 const NO_CANVAS_MESSAGE =

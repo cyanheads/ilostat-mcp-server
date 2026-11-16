@@ -3,9 +3,11 @@
  * catalog and `/data/ref_area` JSON captures (rplumber fetch seam, filtered by the
  * upstream emulator): the three parallel calls for a country and the single
  * modelled call for an aggregate, the exact URLs (bare indicator codes, the
- * frequency riding on `id`, the reported full history split by `classif1`, `timeto`
- * at the cutoff on the modelled call), each slice at its own latest year (CHN
- * youth unemployment, CHN's female values), the local sex slice served from one cached
+ * frequency riding on `id`, the reported full history split by `classif1`, the years
+ * from five before the cutoff through it on the modelled call, never `latestyear`), each slice at its
+ * own latest year (CHN youth unemployment, CHN's female values, working poverty by
+ * sex a year behind its total) whatever the row order, a modelled slice older than
+ * the window, the local sex slice served from one cached
  * response set, the reported-missing notice and its no-model tail, headlines whose
  * dataset left the catalog (one, and all of them), a failed reported call failing the profile, modelled
  * rows past the cutoff excluded, every declared error reason, and both
@@ -27,6 +29,7 @@ import {
   CATALOG_UNAVAILABLE_RECOVERY,
   type CatalogFixture,
   callUrls,
+  challengePage,
   filterRefAreaRows,
   isRefAreaData,
   isRplumber,
@@ -89,6 +92,9 @@ const ALL_KEYS = [
 ];
 
 type Body = RawRow[] | (() => Response | Promise<Response>);
+
+/** Row orders a recorded capture is served in, for the latest-period picks. */
+const ORDERS = ['recorded', 'reversed'] as const;
 
 /**
  * `/data/ref_area`: the modelled call (the one carrying `timeto`) and the reported
@@ -167,10 +173,15 @@ function reported(dataset_id: string, value: number, period = '2021') {
   };
 }
 
-function modelled(dataset_id: string, value: number, status: Record<string, string> = {}) {
+function modelled(
+  dataset_id: string,
+  value: number,
+  status: Record<string, string> = {},
+  period = '2024',
+) {
   return {
     dataset_id,
-    period: '2024',
+    period,
     value,
     basis: 'modelled_estimate',
     ...status,
@@ -189,9 +200,19 @@ const KEN_AREA = {
 
 const REPORTED_MISSING_NOTICE =
   'No reported value exists for labour_income_share, working_poverty_rate; the modelled estimates shown for them are ILO model output, not national observations.';
-/** KEN by sex: working poverty is modelled for SEX_T only, so the model sentence names labour income share alone. */
+/** Working poverty without a modelled estimate: the model sentence names labour income share alone. */
 const WORKING_POVERTY_UNMODELLED_NOTICE =
   'No reported value exists for labour_income_share, working_poverty_rate; the modelled estimate shown for labour_income_share is ILO model output, not a national observation. working_poverty_rate has no modelled estimate either.';
+
+/**
+ * KEN's modelled capture with working poverty's `SEX_M` slice moved six years back
+ * (2013–2017), so its newest row predates the modelled call's window (2019–2024).
+ */
+const KEN_MODELLED_MALE_POVERTY_BEFORE_WINDOW = refAreaRows('kenModelled').map((row) =>
+  row.indicator === 'SDG_0111_SEX_AGE_RT' && row.sex === 'SEX_M'
+    ? { ...row, time: String(Number(row.time) - 6) }
+    : row,
+);
 
 describe('country', () => {
   it('pairs the latest reported and modelled value per headline, never filling one from the other', async () => {
@@ -206,14 +227,14 @@ describe('country', () => {
           label: 'Labour force participation rate, 15+',
           unit: '%',
           reported: reported('EAP_DWAP_SEX_AGE_RT_A', 68.698),
-          modelled: modelled('EAP_2WAP_SEX_AGE_RT_A', 67.385),
+          modelled: modelled('EAP_2WAP_SEX_AGE_RT_A', 67.418),
         },
         {
           key: 'employment_to_population_ratio',
           label: 'Employment-to-population ratio, 15+',
           unit: '%',
           reported: reported('EMP_DWAP_SEX_AGE_RT_A', 64.861),
-          modelled: modelled('EMP_2WAP_SEX_AGE_RT_A', 63.713),
+          modelled: modelled('EMP_2WAP_SEX_AGE_RT_A', 63.719),
         },
         {
           key: 'unemployment_rate',
@@ -221,21 +242,21 @@ describe('country', () => {
           unit: '%',
           // the 25+ rows in the same captures are never picked
           reported: reported('UNE_DEAP_SEX_AGE_RT_A', 5.585),
-          modelled: modelled('UNE_2EAP_SEX_AGE_RT_A', 5.449),
+          modelled: modelled('UNE_2EAP_SEX_AGE_RT_A', 5.487),
         },
         {
           key: 'youth_unemployment_rate',
           label: 'Unemployment rate, 15–24',
           unit: '%',
           reported: reported('UNE_DEAP_SEX_AGE_RT_A', 12.335),
-          modelled: modelled('UNE_2EAP_SEX_AGE_RT_A', 15.246),
+          modelled: modelled('UNE_2EAP_SEX_AGE_RT_A', 15.477),
         },
         {
           key: 'youth_neet_rate',
           label: 'Youth NEET rate',
           unit: '%',
           reported: reported('EIP_NEET_SEX_RT_A', 18.503),
-          modelled: modelled('EIP_2EET_SEX_RT_A', 19.54),
+          modelled: modelled('EIP_2EET_SEX_RT_A', 19.435),
         },
         {
           key: 'informal_employment_rate',
@@ -249,22 +270,19 @@ describe('country', () => {
           label: 'Employment, 15+',
           unit: 'thousands',
           reported: reported('EMP_TEMP_SEX_AGE_NB_A', 19575.268),
-          modelled: modelled('EMP_2EMP_SEX_AGE_NB_A', 23365.248),
+          modelled: modelled('EMP_2EMP_SEX_AGE_NB_A', 22712.782),
         },
         {
           key: 'labour_income_share',
           label: 'Labour income share of GDP',
           unit: '%',
-          modelled: modelled('LAP_2GDP_NOC_RT_A', 33.276, {
-            obs_status: 'M',
-            obs_status_label: 'Model-based extrapolation',
-          }),
+          modelled: modelled('LAP_2GDP_NOC_RT_A', 33.319),
         },
         {
           key: 'working_poverty_rate',
           label: 'Working poverty rate, 15+',
           unit: '%',
-          modelled: modelled('SDG_0111_SEX_AGE_RT_A', 33.058, {
+          modelled: modelled('SDG_0111_SEX_AGE_RT_A', 34.025, {
             obs_status: 'A',
             obs_status_label: 'Adjusted',
           }),
@@ -279,7 +297,7 @@ describe('country', () => {
     expect(refAreaCalls(wired)).toHaveLength(3);
   });
 
-  it('sends bare indicator codes, the frequency on id, full reported history in two calls, and timeto at the cutoff on the modelled call only', async () => {
+  it('sends bare indicator codes, the frequency on id, full reported history in two calls, and the years from five before the cutoff through it on the modelled call only', async () => {
     const wired = wire();
     await profile({ ref_area: 'ken' });
     const calls = refAreaCalls(wired);
@@ -295,11 +313,12 @@ describe('country', () => {
       },
       { id: 'KEN_A', indicator: PLAIN_CODES.join('+'), format: '.json' },
     ]);
+    // latestyear would give every slice of an indicator its newest year
     expect(modelledCall).toEqual({
       id: 'KEN_A',
       indicator: MODELLED_CODES.join('+'),
+      timefrom: '2019',
       timeto: '2024',
-      latestyear: 'TRUE',
       format: '.json',
     });
     // upstream answers a suffixed dataset ID with an empty array, so none is ever sent
@@ -315,7 +334,7 @@ describe('country', () => {
         .sort(),
     ).toEqual(
       [
-        `?id=KEN_A&indicator=${MODELLED_CODES.join('+')}&timeto=2024&latestyear=TRUE&format=.json`,
+        `?id=KEN_A&indicator=${MODELLED_CODES.join('+')}&timefrom=2019&timeto=2024&format=.json`,
         `?id=KEN_A&indicator=${AGED_CODES.join('+')}&classif1=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24&format=.json`,
         `?id=KEN_A&indicator=${PLAIN_CODES.join('+')}&format=.json`,
       ].sort(),
@@ -363,12 +382,123 @@ describe('country', () => {
       return [entry?.reported?.value, entry?.modelled?.value];
     };
     expect(male.result.sex).toBe('SEX_M');
-    expect(valuesOf(male.result, 'unemployment_rate')).toEqual([3.831, 4.284]);
-    expect(valuesOf(female.result, 'unemployment_rate')).toEqual([7.405, 6.743]);
-    expect(valuesOf(male.result, 'labour_income_share')).toEqual([undefined, 33.276]);
-    // World and KEN working poverty is published for SEX_T only
-    expect(valuesOf(male.result, 'working_poverty_rate')).toEqual([undefined, undefined]);
-    expect(male.enrichment.notice).toBe(WORKING_POVERTY_UNMODELLED_NOTICE);
+    expect(valuesOf(male.result, 'unemployment_rate')).toEqual([3.831, 4.197]);
+    expect(valuesOf(female.result, 'unemployment_rate')).toEqual([7.405, 6.921]);
+    expect(valuesOf(male.result, 'labour_income_share')).toEqual([undefined, 33.319]);
+    expect(male.enrichment.notice).toBe(REPORTED_MISSING_NOTICE);
+    expect(female.enrichment.notice).toBe(REPORTED_MISSING_NOTICE);
+  });
+
+  describe('a modelled slice that ends before its indicator’s (working poverty by sex, a year behind SEX_T)', () => {
+    /**
+     * The recorded modelled capture as recorded (newest first) or reversed: a pick
+     * that keeps the first or the last row it meets fails one of the two orders.
+     */
+    function kenWire(order: (typeof ORDERS)[number]) {
+      const capture = refAreaRows('kenModelled');
+      return wire({
+        routes: [
+          refAreaRoute({
+            reported: refAreaRows('kenReported'),
+            modelled: order === 'reversed' ? capture.toReversed() : capture,
+          }),
+        ],
+      });
+    }
+    const modelledOf = (result: Output) =>
+      Object.fromEntries(
+        result.indicators.map((entry) => [
+          entry.key,
+          entry.modelled && [entry.modelled.period, entry.modelled.value],
+        ]),
+      );
+
+    it.each(ORDERS)(
+      'takes each sex slice at its own latest modelled year, rows %s',
+      async (order) => {
+        const wired = kenWire(order);
+        const total = await profile({ ref_area: 'KEN' });
+        const male = await profile({ ref_area: 'KEN', sex: 'SEX_M' });
+        const female = await profile({ ref_area: 'KEN', sex: 'SEX_F' });
+        expect(modelledOf(total.result)).toEqual({
+          labour_force_participation_rate: ['2024', 67.418],
+          employment_to_population_ratio: ['2024', 63.719],
+          unemployment_rate: ['2024', 5.487],
+          youth_unemployment_rate: ['2024', 15.477],
+          youth_neet_rate: ['2024', 19.435],
+          informal_employment_rate: undefined,
+          employment: ['2024', 22712.782],
+          labour_income_share: ['2024', 33.319],
+          working_poverty_rate: ['2024', 34.025],
+        });
+        expect(modelledOf(male.result)).toEqual({
+          labour_force_participation_rate: ['2024', 71.94],
+          employment_to_population_ratio: ['2024', 68.92],
+          unemployment_rate: ['2024', 4.197],
+          youth_unemployment_rate: ['2024', 11.787],
+          youth_neet_rate: ['2024', 13.193],
+          informal_employment_rate: undefined,
+          employment: ['2024', 12123.496],
+          labour_income_share: ['2024', 33.319],
+          working_poverty_rate: ['2023', 32.793],
+        });
+        expect(modelledOf(female.result)).toEqual({
+          labour_force_participation_rate: ['2024', 63.012],
+          employment_to_population_ratio: ['2024', 58.651],
+          unemployment_rate: ['2024', 6.921],
+          youth_unemployment_rate: ['2024', 19.604],
+          youth_neet_rate: ['2024', 25.597],
+          informal_employment_rate: undefined,
+          employment: ['2024', 10589.286],
+          labour_income_share: ['2024', 33.319],
+          working_poverty_rate: ['2023', 38.353],
+        });
+        expect(
+          female.result.indicators.find((entry) => entry.key === 'working_poverty_rate')?.modelled,
+        ).toEqual(
+          modelled(
+            'SDG_0111_SEX_AGE_RT_A',
+            38.353,
+            { obs_status: 'A', obs_status_label: 'Adjusted' },
+            '2023',
+          ),
+        );
+        // three calls served every sex
+        expect(refAreaCalls(wired)).toHaveLength(3);
+      },
+    );
+
+    it('shows the 2023 value on both surfaces', async () => {
+      kenWire('recorded');
+      const result = await runToolContract(getCountryProfileTool, { ref_area: 'KEN', sex: 'M' });
+      expect(result.isError).toBeFalsy();
+      const structured = result.structuredContent as Output & { notice?: string };
+      expect(
+        structured.indicators.find((entry) => entry.key === 'working_poverty_rate')?.modelled,
+      ).toMatchObject({ period: '2023', value: 32.793, basis: 'modelled_estimate' });
+      expect(structured.notice).toBe(REPORTED_MISSING_NOTICE);
+      const text = contentText(result);
+      expect(text).toContain(
+        '| Working poverty rate, 15+ (working_poverty_rate) | — | 32.793 (2023, modelled_estimate, A Adjusted) | % |',
+      );
+      expect(text).toContain(REPORTED_MISSING_NOTICE);
+    });
+
+    it('reports no modelled value for a slice whose newest row predates the window', async () => {
+      wire({
+        routes: [
+          refAreaRoute({
+            reported: refAreaRows('kenReported'),
+            modelled: KEN_MODELLED_MALE_POVERTY_BEFORE_WINDOW,
+          }),
+        ],
+      });
+      const male = await profile({ ref_area: 'KEN', sex: 'SEX_M' });
+      const female = await profile({ ref_area: 'KEN', sex: 'SEX_F' });
+      expect(modelledOf(male.result).working_poverty_rate).toBeUndefined();
+      expect(male.enrichment.notice).toBe(WORKING_POVERTY_UNMODELLED_NOTICE);
+      expect(modelledOf(female.result).working_poverty_rate).toEqual(['2023', 38.353]);
+    });
   });
 
   describe('a slice whose data ends before its indicator’s (CHN, recorded full history)', () => {
@@ -377,7 +507,7 @@ describe('country', () => {
      * test), with the recorded history served as recorded (newest first) or reversed:
      * a pick that keeps the first or the last row it meets fails one of the two orders.
      */
-    function chnWire(order: 'recorded' | 'reversed' = 'recorded') {
+    function chnWire(order: (typeof ORDERS)[number] = 'recorded') {
       const history = refAreaRows('chnReported');
       const route = refAreaRoute({
         reported: order === 'reversed' ? history.toReversed() : history,
@@ -399,7 +529,6 @@ describe('country', () => {
       });
       return wire({ fixture, routes: [route] });
     }
-    const ORDERS = ['recorded', 'reversed'] as const;
     const reportedOf = (result: Output) =>
       Object.fromEntries(
         result.indicators.map((entry) => [
@@ -492,8 +621,12 @@ describe('country', () => {
       routes: [
         refAreaRoute({
           reported: refAreaRows('kenReported'),
-          // the verbatim capture: every modelled row is 2025, a projection under Nov. 2025
-          modelled: refAreaRows('kenModelled2025'),
+          /**
+           * Every row 2025, a projection under Nov. 2025, served past the request's
+           * timeto as an upstream ignoring it would: the service's own cutoff check
+           * is what excludes them.
+           */
+          modelled: () => rplumberBody(refAreaRows('kenModelled2025')),
         }),
       ],
     });
@@ -508,7 +641,7 @@ describe('country', () => {
     );
   });
 
-  it('words the notice for a single missing key, with and without a modelled estimate', async () => {
+  it('words the notice for a single missing key with a modelled estimate, for every sex', async () => {
     const fixture: CatalogFixture = observationCatalogFixture();
     // labour income share leaves the catalog, so working poverty is the only key without a reported value
     fixture.indicatorToc = fixture.indicatorToc.filter((row) => row.id !== 'LAP_2GDP_NOC_RT_A');
@@ -519,6 +652,23 @@ describe('country', () => {
       'No reported value exists for working_poverty_rate; the modelled estimate shown for it is ILO model output, not a national observation.',
     );
     const male = await profile({ ref_area: 'KEN', sex: 'SEX_M' });
+    expect(male.enrichment.notice).toBe(total.enrichment.notice);
+  });
+
+  it('words the notice for a single missing key with no modelled estimate', async () => {
+    const fixture: CatalogFixture = observationCatalogFixture();
+    fixture.indicatorToc = fixture.indicatorToc.filter((row) => row.id !== 'LAP_2GDP_NOC_RT_A');
+    wire({
+      fixture,
+      routes: [
+        refAreaRoute({
+          reported: refAreaRows('kenReported'),
+          modelled: KEN_MODELLED_MALE_POVERTY_BEFORE_WINDOW,
+        }),
+      ],
+    });
+    const male = await profile({ ref_area: 'KEN', sex: 'SEX_M' });
+    expect(male.result.reported_missing).toEqual(['working_poverty_rate']);
     expect(male.enrichment.notice).toBe(
       'No reported value exists for working_poverty_rate, and it has no ILO modelled estimate either.',
     );
@@ -605,26 +755,40 @@ describe('aggregate', () => {
       {
         id: 'X01_A',
         indicator: MODELLED_CODES.join('+'),
+        timefrom: '2019',
         timeto: '2024',
-        latestyear: 'TRUE',
         format: '.json',
       },
     ]);
     expect(result.ref_area).toEqual({ code: 'X01', label: 'World', kind: 'aggregate' });
     expect(result.reported_missing).toEqual(ALL_KEYS);
-    const withModel = result.indicators.filter((entry) => entry.modelled);
-    expect(withModel.map((entry) => [entry.key, entry.modelled])).toEqual([
-      [
-        'unemployment_rate',
-        { ...modelled('UNE_2EAP_SEX_AGE_RT_A', 4.869), dataset_id: 'UNE_2EAP_SEX_AGE_RT_A' },
-      ],
-      ['youth_unemployment_rate', modelled('UNE_2EAP_SEX_AGE_RT_A', 12.38)],
-      ['labour_income_share', modelled('LAP_2GDP_NOC_RT_A', 52.7)],
+    expect(result.indicators.map((entry) => [entry.key, entry.modelled])).toEqual([
+      ['labour_force_participation_rate', modelled('EAP_2WAP_SEX_AGE_RT_A', 60.978)],
+      ['employment_to_population_ratio', modelled('EMP_2WAP_SEX_AGE_RT_A', 58.001)],
+      ['unemployment_rate', modelled('UNE_2EAP_SEX_AGE_RT_A', 4.883)],
+      ['youth_unemployment_rate', modelled('UNE_2EAP_SEX_AGE_RT_A', 12.284)],
+      ['youth_neet_rate', modelled('EIP_2EET_SEX_RT_A', 19.919)],
+      ['informal_employment_rate', modelled('EMP_2IFL_SEX_RT_A', 57.773)],
+      ['employment', modelled('EMP_2EMP_SEX_AGE_NB_A', 3562431.135)],
+      ['labour_income_share', modelled('LAP_2GDP_NOC_RT_A', 52.5)],
+      ['working_poverty_rate', modelled('SDG_0111_SEX_AGE_RT_A', 8.088)],
     ]);
     expect(result.indicators.every((entry) => entry.reported === undefined)).toBe(true);
     expect(enrichment.notice).toBe(
-      `No reported value exists for ${ALL_KEYS.join(', ')}; the modelled estimates shown for unemployment_rate, youth_unemployment_rate, labour_income_share are ILO model output, not national observations. labour_force_participation_rate, employment_to_population_ratio, youth_neet_rate, informal_employment_rate, employment, working_poverty_rate have no modelled estimate either.`,
+      `No reported value exists for ${ALL_KEYS.join(', ')}; the modelled estimates shown for them are ILO model output, not national observations.`,
     );
+  });
+
+  it('takes working poverty by sex at 2023 from the same one cached call', async () => {
+    const wired = wire({ routes: [refAreaRoute({ modelled: refAreaRows('x01Modelled') })] });
+    const povertyOf = async (sex: string) =>
+      (await profile({ ref_area: 'X01', sex })).result.indicators.find(
+        (entry) => entry.key === 'working_poverty_rate',
+      )?.modelled;
+    expect(await povertyOf('SEX_T')).toEqual(modelled('SDG_0111_SEX_AGE_RT_A', 8.088));
+    expect(await povertyOf('SEX_M')).toEqual(modelled('SDG_0111_SEX_AGE_RT_A', 7.933, {}, '2023'));
+    expect(await povertyOf('SEX_F')).toEqual(modelled('SDG_0111_SEX_AGE_RT_A', 8.855, {}, '2023'));
+    expect(refAreaCalls(wired)).toHaveLength(1);
   });
 });
 
@@ -674,6 +838,63 @@ describe('errors', () => {
     });
   });
 
+  const html = (status: number) => () =>
+    new Response('<!DOCTYPE html><html><body>blocked</body></html>', {
+      status,
+      headers: { 'content-type': 'text/html; charset=UTF-8' },
+    });
+  const plain = (status: number) => () =>
+    new Response('error', { status, headers: { 'content-type': 'text/plain' } });
+
+  it.each([
+    ['404', plain(404), JsonRpcErrorCode.NotFound, undefined],
+    ['403', plain(403), JsonRpcErrorCode.Forbidden, undefined],
+    ['422', plain(422), JsonRpcErrorCode.ValidationError, undefined],
+    ['500', plain(500), JsonRpcErrorCode.ServiceUnavailable, undefined],
+    ['503', plain(503), JsonRpcErrorCode.ServiceUnavailable, undefined],
+    ['504', plain(504), JsonRpcErrorCode.Timeout, undefined],
+    ['429', () => tooManyRequests('20'), JsonRpcErrorCode.RateLimited, 'upstream_busy'],
+    ['HTML page on 200', html(200), JsonRpcErrorCode.RateLimited, 'upstream_busy'],
+    ['Cloudflare challenge', challengePage, JsonRpcErrorCode.RateLimited, 'upstream_busy'],
+  ] as const)(
+    'a %s on the modelled call alone fails the whole profile',
+    async (_label, body, code, reason) => {
+      const wired = wire({
+        routes: [refAreaRoute({ reported: refAreaRows('kenReported'), modelled: body })],
+      });
+      const error = await failure({ ref_area: 'KEN', sex: 'SEX_F' });
+      expect(error.code).toBe(code);
+      if (reason) expect(error.data).toMatchObject({ reason });
+      // The failed call is the modelled one: timefrom and timeto, never latestyear.
+      const modelledCall = refAreaCalls(wired).find((params) => params.timeto !== undefined);
+      expect(modelledCall).toMatchObject({ timefrom: '2019', timeto: '2024' });
+      expect(modelledCall).not.toHaveProperty('latestyear');
+    },
+  );
+
+  it('a modelled call that sends no response headers within headersMs fails the profile Timeout', async () => {
+    wire({
+      routes: [
+        {
+          method: 'GET',
+          match: (request) =>
+            isRefAreaData(request) && new URL(request.url).searchParams.has('timeto'),
+          // Never answers; rejects once the client's header clock aborts the request.
+          respond: (request) =>
+            new Promise<Response>((_resolve, reject) => {
+              request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                once: true,
+              });
+            }),
+        },
+        refAreaRoute({ reported: refAreaRows('kenReported'), modelled: [] }),
+      ],
+      rplumber: { timeouts: { headersMs: 20, stallMs: 1_000, bodyMs: 5_000 } },
+    });
+    const error = await failure({ ref_area: 'KEN' });
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+  });
+
   it('catalog_unavailable: the catalog could not be loaded', async () => {
     const wired = wire({
       routes: [
@@ -720,10 +941,11 @@ describe('format()', () => {
       'Kind: country · Sex: SEX_T · Income group: Lower-middle income (X03) · Region: Africa (X06) · Subregion: Sub-Saharan Africa (X13)',
       'Modelled values through 2024 (later years are projections and are excluded).',
       '| indicator | reported | modelled | unit |',
-      '| Unemployment rate, 15+ (unemployment_rate) | 5.585 (2021) | 5.449 (2024, modelled_estimate) | % |',
+      '| Unemployment rate, 15+ (unemployment_rate) | 5.585 (2021) | 5.487 (2024, modelled_estimate) | % |',
       '| Informal employment rate (informal_employment_rate) | 86.489 (2019) | — | % |',
-      '| Employment, 15+ (employment) | 19575.268 (2021) | 23365.248 (2024, modelled_estimate) | thousands |',
-      '| Labour income share of GDP (labour_income_share) | — | 33.276 (2024, modelled_estimate, M Model-based extrapolation) | % |',
+      '| Employment, 15+ (employment) | 19575.268 (2021) | 22712.782 (2024, modelled_estimate) | thousands |',
+      '| Labour income share of GDP (labour_income_share) | — | 33.319 (2024, modelled_estimate) | % |',
+      '| Working poverty rate, 15+ (working_poverty_rate) | — | 34.025 (2024, modelled_estimate, A Adjusted) | % |',
       '**Sources and notes:**',
       '- unemployment_rate: reported UNE_DEAP_SEX_AGE_RT_A from BX:3465 (HS - Continuous household survey) · note R1:3513: Repository: ILO-STATISTICS - Micro data processing · modelled UNE_2EAP_SEX_AGE_RT_A (Nov. 2025 edition)',
       '- labour_income_share: modelled LAP_2GDP_NOC_RT_A (Nov. 2025 edition)',
@@ -736,7 +958,11 @@ describe('format()', () => {
   });
 
   it('marks an indicator with neither value', async () => {
-    wire({ routes: [refAreaRoute({ modelled: refAreaRows('x01Modelled') })] });
+    // World employment without its modelled rows
+    const modelledRows = refAreaRows('x01Modelled').filter(
+      (row) => row.indicator !== 'EMP_2EMP_SEX_AGE_NB',
+    );
+    wire({ routes: [refAreaRoute({ modelled: modelledRows })] });
     const lines = render((await profile({ ref_area: 'X01' })).result).split('\n');
     expect(lines).toContain('## World (X01)');
     expect(lines).toContain('Kind: aggregate · Sex: SEX_T');
@@ -801,7 +1027,7 @@ describe('contract envelope (runToolContract)', () => {
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as Output & { notice?: string };
     expect(structured.sex).toBe('SEX_F');
-    expect(structured.notice).toBe(WORKING_POVERTY_UNMODELLED_NOTICE);
+    expect(structured.notice).toBe(REPORTED_MISSING_NOTICE);
     const text = contentText(result);
     for (const entry of structured.indicators) {
       if (entry.reported) {

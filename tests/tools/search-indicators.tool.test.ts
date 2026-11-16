@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for `ilostat_search_indicators` against the recorded catalog
  * served through `RplumberClient`'s fetch seam: the three-tier ranking, term
- * normalization, the stem fallback and its notice, sex words and the sex-filter notice, browse mode, the per-dataset frequency and aggregates filters,
+ * normalization, the stem fallback and its notice, sex words and the sex-filter notice,
+ * age words and the age-band notice, browse mode, the per-dataset frequency and aggregates filters,
  * code filters (the measure filter included) validated against the catalog, facets
  * over the fully filtered match set, every zero-hit notice fragment, cursor paging
  * past the first page, a limit past the page cap applied as the cap, blank
@@ -358,6 +359,82 @@ describe('sex words', () => {
     expect(indicators(result)).toEqual(['UNE_DEAP_SEX_EDU_RT']);
     const error = await failure({ query: 'female', breakdown: 'NOPE' });
     expect(error.data).toMatchObject({ reason: 'unknown_filter_code' });
+  });
+});
+
+describe('age words', () => {
+  const YOUTH =
+    "youth matched indicators broken down by age; youth is the 15-24 band, coded once per age classification version, so take the dataset's AGE_* codes from ilostat_describe_indicator and pass one version's codes for that band as classif1 to ilostat_query_indicator.";
+  const FEMALE =
+    'female matched indicators broken down by sex; pass sex: ["SEX_F"] to ilostat_query_indicator for female values.';
+
+  it('match the age breakdown and name the band on both surfaces', async () => {
+    wireServices();
+    const result = await runToolContract(searchIndicatorsTool, { query: 'youth unemployment' });
+    expect(result.isError).toBeFalsy();
+    // the unemployment rate by education is not broken down by age, and its text never says youth
+    expect(result.structuredContent).toMatchObject({
+      hits: [
+        { indicator: 'UNE_DEAP_SEX_AGE_RT', match_scope: 'label', breakdowns: ['sex', 'age'] },
+        { indicator: 'UNE_2EAP_SEX_AGE_RT', match_scope: 'label' },
+      ],
+      total: 2,
+      truncated: false,
+      notice: YOUTH,
+    });
+    const text = readMarkdown(contentText(result));
+    expect(text).toContain('**2 matching indicators**');
+    expect(text).toContain(`> ${YOUTH}`);
+  });
+
+  it('follow the sex sentence in query order, ahead of the paging guidance on every page', async () => {
+    wireServices();
+    const first = await runToolContract(searchIndicatorsTool, {
+      query: 'female youth unemployment',
+      limit: 1,
+    });
+    const output = first.structuredContent as Output & { notice?: string; truncated?: boolean };
+    expect(output.truncated).toBe(true);
+    expect(output.total).toBe(2);
+    expect(output.notice).toBe(
+      `${FEMALE} ${YOUTH} Showing 1 of 2 matching indicators; pass next_cursor as cursor for the next page.`,
+    );
+    expect(readMarkdown(contentText(first))).toContain(`> ${FEMALE} ${YOUTH} Showing 1 of 2`);
+    const second = await search({
+      query: 'female youth unemployment',
+      limit: 1,
+      cursor: nextCursorOf(first) ?? '',
+    });
+    expect(second.enrichment.notice).toBe(`${FEMALE} ${YOUTH}`);
+  });
+
+  it('reach the headline unemployment rate from youth unemployment on the whole catalog', async () => {
+    wireServices({ fixture: loadFullCatalogFixture() });
+    const result = await runToolContract(searchIndicatorsTool, {
+      query: 'youth unemployment',
+      limit: 2,
+    });
+    expect(result.structuredContent).toMatchObject({
+      hits: [
+        { indicator: 'UNE_TUNE_SEX_AGE_NB', match_scope: 'label' },
+        { indicator: 'UNE_DEAP_SEX_AGE_RT', match_scope: 'label' },
+      ],
+      total: 120,
+      notice: `${YOUTH} Showing 2 of 120 matching indicators; pass next_cursor as cursor for the next page.`,
+    });
+    const text = readMarkdown(contentText(result));
+    expect(text).toContain('### UNE_DEAP_SEX_AGE_RT — Unemployment rate by sex and age (%)');
+    expect(text).toContain(`> ${YOUTH} Showing 2 of 120`);
+  });
+
+  it('leave the band out when no hit is broken down by age', async () => {
+    wireServices({ fixture: loadFullCatalogFixture() });
+    // SDG 8.6.1, the youth NEET rate, is published by sex only
+    const result = await runToolContract(searchIndicatorsTool, { query: 'youth 0861' });
+    const output = result.structuredContent as Output & { notice?: string };
+    expect(indicators(output)).toEqual(['SDG_0861_SEX_RT']);
+    expect(output.notice).toBeUndefined();
+    expect(contentText(result)).not.toContain('broken down by age');
   });
 });
 
@@ -963,19 +1040,41 @@ describe('format()', () => {
     expect(text).toContain('**8 matching indicators** · catalog as of 2026-09-26T12:00:00.000Z');
     expect(text).toContain('### UNE_DEAP_SEX_AGE_RT — Unemployment rate by sex and age (%)');
     expect(text).toContain(
-      'Database: Labour Force Statistics (LFS) (LFS) · Subject: Unemployment and labour underutilization (LUU) · Breakdowns: sex, age (SEX_AGE) · Has aggregates: true · Matched on: metadata',
+      'Database: Labour Force Statistics (LFS) · Subject: Unemployment and labour underutilization (LUU) · Breakdowns: sex, age (SEX_AGE) · Has aggregates: true · Matched on: metadata',
     );
+    expect(result.hits.find((hit) => hit.indicator === 'UNE_DEAP_SEX_AGE_RT')?.database).toEqual({
+      code: 'LFS',
+      label: 'Labour Force Statistics (LFS)',
+    });
     expect(text).toContain(
       '- UNE_DEAP_SEX_AGE_RT_A · annual · 1947–2027 · 312 areas · 322,228 records · updated 2026-09-24T07:10:19 · has aggregates: true',
     );
     expect(text).toContain('- UNE_DEAP_SEX_AGE_RT_Q · quarterly · 1948–2026 · 122 areas');
     expect(text).toContain('- UNE_DEAP_SEX_AGE_RT_M · monthly · 1948–2026 · 86 areas');
+    // a database label already ending with its code renders alone, as on the Database line
     expect(text).toContain(
-      '- Databases: ILOEST (ILO Modelled Estimates (ILOEST)): 3, LFS (Labour Force Statistics (LFS)): 2',
+      '- Databases: ILO Modelled Estimates (ILOEST): 3, Labour Force Statistics (LFS): 2',
     );
     expect(text).toContain('- Frequencies: A: 8, Q: 2, M: 1');
-    expect(text).toContain('- Subjects: LUU (Unemployment and labour underutilization): 3');
+    expect(text).toContain('- Subjects: Unemployment and labour underutilization (LUU): 3');
     expect(text).toContain(`**next_cursor:** ${result.next_cursor}`);
+  });
+
+  it('appends the database code to a database label that does not end with it, on both surfaces', async () => {
+    const fixture = loadCatalogFixture();
+    tocRow(fixture, 'SDG_0552_NOC_RT_A')['database.label'] = 'SDG Labour Market Indicators';
+    wireServices({ fixture });
+    const result = await runToolContract(searchIndicatorsTool, { query: 'managerial' });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as Output).hits[0]?.database).toEqual({
+      code: 'ILOSDG',
+      label: 'SDG Labour Market Indicators',
+    });
+    expect(contentText(result)).toContain('Database: SDG Labour Market Indicators (ILOSDG) · ');
+    expect((result.structuredContent as Output).facets.databases).toEqual([
+      { code: 'ILOSDG', label: 'SDG Labour Market Indicators', count: 1 },
+    ]);
+    expect(contentText(result)).toContain('- Databases: SDG Labour Market Indicators (ILOSDG): 1');
   });
 
   it('renders "none" for empty breakdowns and empty facets', async () => {

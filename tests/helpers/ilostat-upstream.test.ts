@@ -5,7 +5,8 @@
  * builds (a code filter skipping rows without that cell, and `id` split on a
  * literal `+` only, a `%2B`-joined one answered `400`, as upstream does) and
  * emulates `latestyear`, the `/data/ref_area` emulator reproduces the recorded
- * latest-year and `classif1` captures from the recorded full history, the
+ * latest-year and `classif1` captures from the recorded full history and bounds it
+ * by `timefrom` and `timeto`, the
  * pull-based CSV body counts what was read and sees a cancel, and the in-memory
  * DuckDB canvas stages and queries rows without touching the network.
  * @module tests/helpers/ilostat-upstream.test
@@ -82,9 +83,11 @@ describe('observationCatalogFixture', () => {
     expect(observationCatalogFixture().indicatorToc).toHaveLength(23);
   });
 
-  it('serves the modelled profile captures at the 2024 cutoff, and one verbatim at 2025', () => {
-    expect(new Set(refAreaRows('kenModelled').map((row) => row.time))).toEqual(new Set(['2024']));
-    expect(new Set(refAreaRows('x01Modelled').map((row) => row.time))).toEqual(new Set(['2024']));
+  it('serves the modelled profile captures from five years before the 2024 cutoff through it, and one at 2025', () => {
+    const window = new Set(['2019', '2020', '2021', '2022', '2023', '2024']);
+    for (const name of ['kenModelled', 'x01Modelled', 'chnModelled'] as const) {
+      expect(new Set(refAreaRows(name).map((row) => row.time)), name).toEqual(window);
+    }
     expect(new Set(refAreaRows('kenModelled2025').map((row) => row.time))).toEqual(
       new Set(['2025']),
     );
@@ -164,21 +167,38 @@ describe('filterRefAreaRows', () => {
   const filtered = (params: Partial<RefAreaDataParams>) =>
     filterRefAreaRows(
       refAreaRows('chnReported'),
-      new URL(
-        urlBuilder.refAreaDataUrl({
-          area: 'CHN',
-          indicators: REPORTED,
-          latestOnly: false,
-          ...params,
-        }),
-      ),
+      new URL(urlBuilder.refAreaDataUrl({ area: 'CHN', indicators: REPORTED, ...params })),
     );
   const sorted = (rows: RawRow[]) => rows.map((row) => JSON.stringify(row)).sort();
 
   it('reproduces the recorded latestyear capture from the recorded full history', () => {
-    expect(sorted(filtered({ latestOnly: true }))).toEqual(
+    // the client never sends latestyear here, so the request is built by hand
+    const url = new URL(
+      `${RPLUMBER_ORIGIN}/data/ref_area?id=CHN_A&indicator=${REPORTED.join('+')}&latestyear=TRUE&format=.json`,
+    );
+    expect(sorted(filterRefAreaRows(refAreaRows('chnReported'), url))).toEqual(
       sorted(refAreaRows('chnReportedLatest')),
     );
+  });
+
+  it('bounds by timefrom and timeto years, both inclusive', () => {
+    const rows = filtered({ timeFrom: 2019, timeTo: 2021 });
+    expect(rows).toHaveLength(13);
+    expect(new Set(rows.map((row) => row.time))).toEqual(new Set(['2019', '2020', '2021']));
+    const youth = rows.filter(
+      (row) =>
+        row.indicator === 'UNE_DEAP_SEX_AGE_RT' &&
+        row.sex === 'SEX_T' &&
+        row.classif1 === 'AGE_YTHADULT_Y15-24',
+    );
+    expect(youth.map((row) => [row.time, row.obs_value])).toEqual([
+      ['2021', 14.25],
+      ['2020', 14.19],
+      ['2019', 11.83],
+    ]);
+    // each bound alone: the history starts in 1952 and ends in 2023, two rows at each end
+    expect(filtered({ timeFrom: 2023 }).map((row) => row.time)).toEqual(['2023', '2023']);
+    expect(filtered({ timeTo: 1952 }).map((row) => row.time)).toEqual(['1952', '1952']);
   });
 
   it('drops the indicators without classif1 under a classif1 filter, as the recorded capture does', () => {

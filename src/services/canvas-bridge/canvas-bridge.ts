@@ -1,13 +1,16 @@
 /**
  * @fileoverview Adapter between the ILOSTAT tools and the framework DataCanvas.
- * One shared canvas per tenant (its ID kept in `ctx.state`, re-minted when it
- * expires), `df_XXXXX_XXXXX` table names, per-table TTL, and provenance under
- * `df-meta/<name>` in `ctx.state`, lazily swept on every dataframe operation and
- * cleared when the canvas is re-minted.
- * Producers route their rows through {@link routeRows}: inline when they fit the
- * preview, staged in full through the framework's `spillover()` when they do not,
- * refused when they pass the row ceiling, and cut to the preview when the canvas
- * is off or staging fails. A tenant holds at most {@link STAGING_ROW_BUDGET} rows
+ * One shared canvas per tenant, resolved through `DataCanvas.acquireShared` (its
+ * ID kept in `ctx.state` under `canvas-id`, re-minted when it expires, one
+ * resolution per tenant at a time), `df_XXXXX_XXXXX` table names, per-table TTL,
+ * and provenance under `df-meta/<name>` in `ctx.state`, lazily swept on every
+ * dataframe operation and cleared before the canvas is re-minted.
+ * Producers route their rows through {@link routeRows}: one page of at most
+ * `limit` rows from `offset` inline on every path; on a first page, a result
+ * past the preview budget is also staged in full through the framework's
+ * `spillover()`, and not kept when it passes the row ceiling. With the canvas
+ * off, on a later page, or when staging fails, the source is read only as far as
+ * the page needs. A tenant holds at most {@link STAGING_ROW_BUDGET} rows
  * in {@link STAGING_DATAFRAME_CAP} dataframes: a new table evicts the oldest
  * others until it fits, one admission per tenant at a time, and one larger than
  * the row budget is never kept.
@@ -95,25 +98,52 @@ export interface StagedTable {
   rowCount: number;
 }
 
+/** The page of a producer's rows returned inline. */
+export interface RoutedPage<T> {
+  /** True when the source was read to its end. */
+  ended: boolean;
+  /** Offset of the next page; set when rows remain past this one. */
+  nextOffset?: number;
+  /** At most `limit` rows from `offset`. */
+  rows: T[];
+}
+
 /** Where a producer's rows ended up. */
 export type RouteOutcome<T> =
-  /** Every row fit the inline preview. */
-  | { kind: 'complete'; rows: T[] }
-  /** The preview is inline and every row is staged. */
-  | { kind: 'staged'; rows: T[]; table: StagedTable }
-  /** Reading stopped at the preview: the canvas is off, or staging failed. */
-  | { kind: 'preview'; rows: T[]; cause: 'canvas_off' | 'canvas_failed' }
-  /** The source passed `maxRows`; the partial table was dropped. */
+  /** A first page whose whole result is staged. */
+  | ({ kind: 'staged'; table: StagedTable } & RoutedPage<T>)
+  /**
+   * Nothing staged. `cause` is set on a first page whose result passed the
+   * preview budget or was not read to its end: the canvas is off, staging
+   * failed, or the result passed `maxRows` while staging (the partial table
+   * dropped, reading stopped one row past `maxRows`).
+   */
+  | ({ kind: 'page'; cause?: 'canvas_off' | 'canvas_failed' | 'past_ceiling' } & RoutedPage<T>)
+  /** The page reaches past `maxRows` rows of a source that holds more. */
   | { kind: 'too_large' };
 
 export interface RouteOptions<T> {
   ctx: Context;
+  /** Rows the page holds at most. */
+  limit: number;
   /**
-   * Ceiling on staged rows, at most {@link STAGING_ROW_BUDGET} (the budget when
-   * unset); passing it drops the table and reports `too_large`.
+   * Ceiling on the rows read, at most {@link STAGING_ROW_BUDGET} (the budget when
+   * unset); see `too_large`.
    */
   maxRows?: number;
-  /** Inline preview budget in serialized characters, measured on the rows as given. */
+  /**
+   * Rows a page read without staging takes at least, when the source holds them;
+   * unset, it reads one row past the page. A source that caches only a read that
+   * reached its end sets this past its cache's entry limit, so a result the cache
+   * can hold is read whole, and cached, on its first page.
+   */
+  minRead?: number;
+  /** Rows before the page; only a first page (offset 0) stages. */
+  offset: number;
+  /**
+   * The staging trigger, in serialized characters measured on the rows as given:
+   * a first page whose whole result passes it is staged in full.
+   */
   previewChars: number;
   /** Called once the rows are staged, to record the table's provenance. */
   provenance: () => Provenance;
@@ -137,7 +167,6 @@ export const STAGING_DATAFRAME_CAP = 100;
 const QUERY_ROW_CAP = 10_000;
 
 const META_PREFIX = 'df-meta/';
-const CANVAS_ID_KEY = 'canvas-id';
 const TABLE_NAME_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 /** The `missing_table` recovery where listing is off, in place of the contract's pointer at a listing. */
 const UNLISTED_MISSING_TABLE_HINT =
@@ -249,8 +278,6 @@ export interface CanvasBridgeOptions {
 export class CanvasBridge {
   /** The last admission queued per tenant; settles, never rejects, once it has run. */
   private readonly admissions = new Map<string | undefined, Promise<void>>();
-  /** The mint in flight per tenant. */
-  private readonly mints = new Map<string | undefined, Promise<CanvasInstance>>();
   private readonly now: () => Date;
 
   constructor(
@@ -266,51 +293,23 @@ export class CanvasBridge {
   }
 
   /**
-   * The tenant's shared canvas, minting one when the stored ID is unknown or
-   * expired. One mint per tenant runs at a time, and it re-reads the stored ID
-   * first, so concurrent calls that find no live canvas all land on the one
-   * minted; a second mint would orphan a canvas that counts toward the
-   * framework's per-tenant cap until it expires, and clear the provenance of
-   * tables the first call had already staged.
+   * The tenant's shared canvas through `DataCanvas.acquireShared`, its ID kept in
+   * `ctx.state` under `canvas-id` and minted when the stored one is unknown or
+   * expired. One resolution per tenant runs at a time, so concurrent calls land
+   * on one canvas, and a call cancelled while it holds the resolution fails
+   * alone. A new canvas starts empty, so before the mint every `df-meta/` record
+   * is cleared; no caller receives the new canvas until that settles. The purge
+   * reruns whenever a resolution fails or is cancelled, which deleting by key
+   * tolerates.
    */
   async acquire(ctx: Context): Promise<CanvasInstance> {
-    const live = await this.acquireStored(ctx);
-    if (live) return live;
-    const pending = this.mints.get(ctx.tenantId);
-    if (pending) return await this.canvas.acquire((await pending).canvasId, ctx);
-    const mint = this.mint(ctx).finally(() => this.mints.delete(ctx.tenantId));
-    this.mints.set(ctx.tenantId, mint);
-    return await mint;
-  }
-
-  /** The canvas the stored ID names, or `undefined` once an unknown or expired ID is cleared. */
-  private async acquireStored(ctx: Context): Promise<CanvasInstance | undefined> {
-    const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
-    if (!stored) return undefined;
-    try {
-      return await this.canvas.acquire(stored, ctx);
-    } catch (error) {
-      if (ctx.signal.aborted) throw error;
-      await ctx.state.delete(CANVAS_ID_KEY);
-      return undefined;
-    }
-  }
-
-  /**
-   * A new canvas for the tenant, unless one minted since {@link acquire} read the
-   * stored ID. A minted canvas starts empty, so every provenance record left in
-   * `ctx.state` names a table that is gone: they are cleared before the new ID
-   * is stored.
-   */
-  private async mint(ctx: Context): Promise<CanvasInstance> {
-    const live = await this.acquireStored(ctx);
-    if (live) return live;
-    const instance = await this.canvas.acquire(undefined, ctx);
-    const staleKeys: string[] = [];
-    for await (const { key } of this.iterateMeta(ctx)) staleKeys.push(key);
-    await Promise.all(staleKeys.map((key) => ctx.state.delete(key)));
-    await ctx.state.set(CANVAS_ID_KEY, instance.canvasId);
-    return instance;
+    return await this.canvas.acquireShared(ctx, {
+      onReplace: async () => {
+        const keys: string[] = [];
+        for await (const { key } of this.iterateMeta(ctx)) keys.push(key);
+        if (keys.length > 0) await ctx.state.deleteMany(keys);
+      },
+    });
   }
 
   /**
@@ -454,16 +453,16 @@ export class CanvasBridge {
 
   /**
    * One read-only SELECT over the shared canvas, system catalogs denied. The
-   * engine decides which tables exist; the `df_` identifiers {@link scanSql}
-   * finds outside comments and string literals, and in the SQL of the `query()`
-   * literals the gate admits, serve for provenance and for naming a missing
-   * dataframe when the gate rejects a statement that reads without naming one
-   * itself (see {@link rewrap}). A statement that does not
-   * read keeps the gate's statement-type rejection (a write target is an unused
-   * name by design). `register_as` stores the result as a new dataframe with a
-   * fresh TTL and provenance inherited from the recorded dataframes the SQL
-   * names, evicting the oldest others as {@link admitTable} does; a result past
-   * {@link STAGING_ROW_BUDGET} rows is dropped and fails `register_as_too_large`.
+   * engine decides which tables exist: the gate names a missing table for a
+   * read of any form (see {@link rewrap}), and refuses a write before preparing
+   * it, so a write's target, an unused name by design, is never reported
+   * missing. The `df_` identifiers {@link scanSql} finds outside comments and
+   * string literals, and in the SQL of the `query()` literals the gate admits,
+   * serve for provenance. `register_as` stores the result as a new dataframe
+   * with a fresh TTL and provenance inherited from the recorded dataframes the
+   * SQL names, evicting the oldest others as {@link admitTable} does; a result
+   * past {@link STAGING_ROW_BUDGET} rows is dropped and fails
+   * `register_as_too_large`.
    */
   async query(
     ctx: Context,
@@ -472,13 +471,10 @@ export class CanvasBridge {
   ): Promise<{ evicted: string[]; meta?: DataframeMeta; result: QueryResult }> {
     const instance = await this.acquireForTool(ctx);
     await this.sweepExpired(ctx);
-    const scan = scanSql(sql);
     const parents: DataframeMeta[] = [];
-    const unrecorded: string[] = [];
-    for (const name of scan.dataframes) {
+    for (const name of scanSql(sql).dataframes) {
       const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
       if (meta) parents.push(meta);
-      else unrecorded.push(name);
     }
     const { registerAs } = options;
     if (registerAs && (await ctx.state.get(`${META_PREFIX}${registerAs}`)) !== null) {
@@ -502,7 +498,7 @@ export class CanvasBridge {
         signal: ctx.signal,
       });
     } catch (error) {
-      throw this.rewrap(ctx, error, scan.reads ? unrecorded : undefined);
+      throw this.rewrap(ctx, error);
     }
     const { tableName } = result;
     if (!registerAs || !tableName) return { result, evicted: [] };
@@ -610,40 +606,24 @@ export class CanvasBridge {
 
   /**
    * Rebuilds a declared gate or engine rejection with the calling tool's
-   * recovery. The gate tells a missing table or a bind error apart only for a
-   * statement opening with SELECT, WITH, or FROM, and rejects any other read
-   * that fails to prepare (one opening with a comment, `(`, VALUES, PIVOT,
-   * SUMMARIZE, …) as `non_select_statement`. Such a read is reported as
-   * `missing_table` for the first of `unrecorded`, the `df_` names it reads that
-   * have no provenance, and otherwise as `invalid_sql`. `unrecorded` is
-   * `undefined` for a statement that does not read. A `denied_function` refusal
-   * naming `current_schema` keeps the gate's recovery, which says to qualify a
-   * staged column of that name; every other declared reason takes the tool's.
-   * Any other rejection leaves with the paths in its message redacted: an engine
+   * recovery. The gate reports a missing table, or the binder's detail, for a
+   * read of any form (one opening with a comment, `(`, VALUES, PIVOT,
+   * SUMMARIZE, …, as well as SELECT, WITH, or FROM); a missing `df_` table is
+   * rebuilt naming it in the minted form. A `denied_function` refusal naming
+   * `current_schema` keeps the gate's recovery, which says to qualify a staged
+   * column of that name; every other declared reason takes the tool's. Any
+   * other rejection leaves with the paths in its message redacted: an engine
    * I/O failure names a spill file under `CANVAS_TEMP_PATH`.
    */
-  private rewrap(ctx: Context, error: unknown, unrecorded: readonly string[] | undefined): unknown {
+  private rewrap(ctx: Context, error: unknown): unknown {
     if (!(error instanceof McpError)) return withoutPaths(error);
     if (error.code === JsonRpcErrorCode.ConfigurationError) return canvasUnavailable(ctx, error);
     const data: Record<string, unknown> = error.data ?? {};
-    const unpreparedRead =
-      unrecorded !== undefined &&
-      data.reason === 'non_select_statement' &&
-      data.statementType === 'UNKNOWN';
     const missing =
       data.reason === 'missing_table' && typeof data.tableName === 'string'
         ? mintedDataframeName(data.tableName)
-        : unpreparedRead
-          ? unrecorded[0]
-          : undefined;
+        : undefined;
     if (missing) return this.missingTable(ctx, missing, error);
-    if (unpreparedRead) {
-      return validationError(
-        'Canvas query failed to prepare.',
-        { reason: 'invalid_sql', ...this.recoveryFor(ctx, 'invalid_sql') },
-        { cause: error },
-      );
-    }
     const reason = data.reason === 'denied_function_in_plan' ? 'denied_function' : data.reason;
     if (typeof reason !== 'string' || !DECLARED_CANVAS_REASONS.has(reason)) {
       return withoutPaths(error);
@@ -674,44 +654,64 @@ export class CanvasBridge {
 }
 
 /**
- * Tracks the inline preview exactly as `spillover()` measures it: rows are kept
- * while their summed `JSON.stringify` length stays within the budget; the first
- * row past it marks the preview full.
+ * Watches every row a source yields: how many were read, the page's rows among
+ * them, whether the source ended, and whether the rows' summed `JSON.stringify`
+ * length passed the preview budget, measured as `spillover()` measures it and
+ * only until it passes.
  */
-class PreviewTap<T> {
-  full = false;
+class PageTap<T> {
+  ended = false;
+  overBudget = false;
+  read = 0;
   readonly rows: T[] = [];
+  private readonly budget: number;
   private chars = 0;
+  private readonly limit: number;
+  private readonly offset: number;
 
-  constructor(private readonly budget: number) {}
+  constructor(offset: number, limit: number, budget: number) {
+    this.offset = offset;
+    this.limit = limit;
+    this.budget = budget;
+  }
 
   offer(row: T): void {
-    if (this.full) return;
-    const size = JSON.stringify(row).length;
-    if (this.chars + size > this.budget) {
-      this.full = true;
-      return;
+    if (this.read >= this.offset && this.rows.length < this.limit) this.rows.push(row);
+    this.read += 1;
+    if (!this.overBudget) {
+      this.chars += JSON.stringify(row).length;
+      this.overBudget = this.chars > this.budget;
     }
-    this.rows.push(row);
-    this.chars += size;
+  }
+
+  page(): RoutedPage<T> {
+    const end = this.offset + this.rows.length;
+    return { rows: this.rows, ended: this.ended, ...(this.read > end ? { nextOffset: end } : {}) };
   }
 }
 
 /**
- * Routes a producer's rows: inline when they fit `previewChars`; staged in full
- * when they do not and a canvas is available, evicting the tenant's oldest
- * dataframes as {@link CanvasBridge.admitTable} does; refused as `too_large` past
- * `maxRows`. With no canvas, or when staging fails, reading stops at the
- * preview. A failure of the source
- * itself (the upstream stream) propagates; a canvas failure only degrades. The
- * source is always closed before this returns.
+ * Routes a producer's rows: the page of at most `limit` rows from `offset` is
+ * returned inline on every path. On a first page with a canvas, a result whose
+ * rows pass `previewChars` is also staged in full, evicting the tenant's oldest
+ * dataframes as {@link CanvasBridge.admitTable} does; one that passes `maxRows`
+ * is not kept, and its page comes back with `cause` `past_ceiling`. With no
+ * canvas, on a later page, or when staging fails, the source is read only as far
+ * as the page needs: one row past it, at least `minRead` rows, and never past
+ * `maxRows` plus the one row that proves the source holds more. On every path, a
+ * page reaching past `maxRows` rows of such a source is `too_large`. A first page
+ * with no canvas, or whose staging failed, carries a `cause` when its rows passed
+ * `previewChars` or reading stopped before the end.
+ * A failure of the source itself (the upstream stream) propagates; a canvas
+ * failure only degrades. The source is always closed before this returns.
  */
 export async function routeRows<T extends Record<string, unknown>>(
   bridge: CanvasBridge | undefined,
   options: RouteOptions<T>,
 ): Promise<RouteOutcome<T>> {
-  const { ctx } = options;
-  const tap = new PreviewTap<T>(options.previewChars);
+  const { ctx, limit, offset } = options;
+  const maxRows = options.maxRows ?? STAGING_ROW_BUDGET;
+  const tap = new PageTap<T>(offset, limit, options.previewChars);
   let sourceFailed = false;
   const tapped = (async function* () {
     try {
@@ -719,25 +719,26 @@ export async function routeRows<T extends Record<string, unknown>>(
         tap.offer(row);
         yield row;
       }
+      tap.ended = true;
     } catch (error) {
       sourceFailed = true;
       throw error;
     }
   })();
 
-  const previewOnly = async (cause: 'canvas_off' | 'canvas_failed'): Promise<RouteOutcome<T>> => {
-    if (!tap.full) {
-      for await (const _row of tapped) {
-        if (tap.full) break;
-      }
+  const unstaged = async (cause?: 'canvas_off' | 'canvas_failed'): Promise<RouteOutcome<T>> => {
+    const bound = Math.min(Math.max(offset + limit + 1, options.minRead ?? 0), maxRows + 1);
+    while (!tap.ended && tap.read < bound) {
+      if ((await tapped.next()).done) break;
     }
-    return tap.full
-      ? { kind: 'preview', rows: tap.rows, cause }
-      : { kind: 'complete', rows: tap.rows };
+    if (tap.read > maxRows && offset + limit > maxRows) return { kind: 'too_large' };
+    const unfit = offset === 0 && (tap.overBudget || !tap.ended);
+    return { kind: 'page', ...tap.page(), ...(cause && unfit ? { cause } : {}) };
   };
 
   try {
-    if (!bridge) return await previewOnly('canvas_off');
+    if (!bridge) return await unstaged('canvas_off');
+    if (offset > 0) return await unstaged();
 
     let instance: CanvasInstance;
     try {
@@ -745,10 +746,10 @@ export async function routeRows<T extends Record<string, unknown>>(
       instance = await bridge.acquire(ctx);
     } catch (error) {
       if (ctx.signal.aborted) throw error;
-      ctx.log.warning('Dataframe canvas unavailable; returning the inline preview only', {
+      ctx.log.warning('Dataframe canvas unavailable; returning the page inline only', {
         error: logText(error),
       });
-      return await previewOnly('canvas_failed');
+      return await unstaged('canvas_failed');
     }
 
     const tableName = bridge.mintTableName();
@@ -756,26 +757,29 @@ export async function routeRows<T extends Record<string, unknown>>(
     try {
       spilled = await spillover({
         canvas: instance,
-        source: tapped,
+        // No return(): spillover() closes what it reads, and a failed staging still reads its page from this source.
+        source: { [Symbol.asyncIterator]: () => ({ next: () => tapped.next() }) },
         previewChars: options.previewChars,
         schema: options.schema,
         tableName,
         ttlMs: bridge.tableTtlMs,
         signal: ctx.signal,
-        caps: { maxRows: options.maxRows ?? STAGING_ROW_BUDGET },
+        caps: { maxRows },
       });
     } catch (error) {
       if (sourceFailed || ctx.signal.aborted) throw error;
-      ctx.log.warning('Staging the full result failed; returning the inline preview only', {
+      ctx.log.warning('Staging the full result failed; returning the page inline only', {
         error: logText(error),
       });
-      return await previewOnly('canvas_failed');
+      return await unstaged('canvas_failed');
     }
 
-    if (!spilled.spilled) return { kind: 'complete', rows: spilled.previewRows };
+    if (!spilled.spilled) return { kind: 'page', ...tap.page() };
     if (spilled.truncated) {
       await instance.drop(tableName).catch(() => false);
-      return { kind: 'too_large' };
+      return offset + limit > maxRows
+        ? { kind: 'too_large' }
+        : { kind: 'page', ...tap.page(), cause: 'past_ceiling' };
     }
     try {
       const { evicted, meta } = await bridge.admitTable(
@@ -786,7 +790,7 @@ export async function routeRows<T extends Record<string, unknown>>(
       );
       return {
         kind: 'staged',
-        rows: spilled.previewRows,
+        ...tap.page(),
         table: {
           name: meta.tableName,
           rowCount: meta.rowCount,
@@ -795,12 +799,13 @@ export async function routeRows<T extends Record<string, unknown>>(
         },
       };
     } catch (error) {
-      if (ctx.signal.aborted) throw error;
+      // dropped before a cancellation rethrows too: a table with no provenance sits outside the staging budget
       await instance.drop(tableName).catch(() => false);
-      ctx.log.warning('Recording dataframe provenance failed; returning the inline preview only', {
+      if (ctx.signal.aborted) throw error;
+      ctx.log.warning('Recording dataframe provenance failed; returning the page inline only', {
         error: logText(error),
       });
-      return { kind: 'preview', rows: tap.rows, cause: 'canvas_failed' };
+      return await unstaged('canvas_failed');
     }
   } finally {
     await tapped.return(undefined).catch(() => undefined);
@@ -811,8 +816,8 @@ let bridge: CanvasBridge | undefined;
 
 /**
  * Wires the bridge during `setup()`. `canvas` is `undefined` when the framework
- * built no DataCanvas (`CANVAS_PROVIDER_TYPE=none`); producers then return their
- * inline preview only, and the dataframe tools are registered disabled.
+ * built no DataCanvas (`CANVAS_PROVIDER_TYPE=none`); producers then page their
+ * rows without staging, and the dataframe tools are registered disabled.
  */
 export function initCanvasBridge(
   canvas: DataCanvas | undefined,

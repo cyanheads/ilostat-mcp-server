@@ -2,7 +2,7 @@
  * @fileoverview Recorded-shape ILOSTAT upstream for the test suite: the trimmed
  * rplumber tables of contents and dictionaries, the whole live indicator catalog
  * for catalog-wide search tests, the `/data/indicator` CSV and
- * `/data/ref_area` JSON bodies, and the SDMX structure documents and unit probes
+ * `/data/ref_area` JSON bodies, and the SDMX structure documents
  * under `tests/fixtures/`, served through the framework's strict fetch fake; an
  * emulator that filters a recorded CSV by the request's parameters, read as
  * upstream reads them (a literal `+` joins a list; `%2B` inside `id` names one
@@ -116,7 +116,8 @@ export function loadFullCatalogFixture(): CatalogFixture {
 
 /**
  * The recorded catalog plus `observation-catalog-extras.json`: the headline
- * datasets the country profile reads (reported and modelled), the ILO modelled
+ * datasets the country profile reads (reported and modelled), with the unit
+ * columns their live catalog rows carry, the ILO modelled
  * estimates sources for KEN, USA, X01, X06, and CHN (the only source label that
  * classifies a row as modelled), KEN's and CHN's national sources, CHN in the
  * ref_area dictionary, and the note codes the data fixtures carry. Kept apart from `loadCatalogFixture()` because the
@@ -195,15 +196,16 @@ export const INDICATOR_CSV = {
 } as const;
 
 /**
- * Recorded `/data/ref_area` bodies (`format=.json`). The KEN and X01 captures were
- * recorded with `latestyear=TRUE` and trimmed to the profile's headline slices
- * (15+ and 15–24, sex-only and unbroken datasets whole) plus the 25+ rows of the
- * unemployment indicator, so local slicing has to choose. The CHN captures are
- * untrimmed, each as its entry describes. The modelled KEN and X01 captures were
- * recorded at `timeto=2025`, but the service sends the Nov. 2025 edition's cutoff,
- * `timeto=2024`: their periods are set to 2024 keeping the recorded shape and
- * values. `kenModelled2025` keeps the capture's 2025 periods verbatim, for the case
- * where rows past the cutoff must be excluded.
+ * Recorded `/data/ref_area` bodies (`format=.json`). `kenReported` was recorded
+ * with `latestyear=TRUE` and trimmed to the profile's headline slices (15+ and
+ * 15–24, sex-only and unbroken datasets whole) plus the 25+ rows of the
+ * unemployment indicator, so local slicing has to choose. The CHN captures and
+ * the modelled captures are untrimmed, each as its entry describes. The modelled
+ * KEN, X01, and CHN captures are the service's modelled call under the Nov. 2025
+ * edition's cutoff, verbatim (2026-11-16): every headline modelled indicator
+ * code, `timefrom=2019`, `timeto=2024`, every age slice the datasets publish,
+ * newest period first. Working poverty's `SEX_M` and `SEX_F` slices end in 2023,
+ * a year before `SEX_T`.
  */
 export const REF_AREA_JSON = {
   /**
@@ -213,10 +215,16 @@ export const REF_AREA_JSON = {
    * `chnReported` carries.
    */
   kenReported: 'rplumber/ref-area-ken-reported.json',
-  /** `id=KEN_A`, the modelled headline indicators at 2024 (no informality estimate for KEN). */
+  /** `id=KEN_A`, the modelled headline indicators, 2019–2024 (no informality estimate for KEN). */
   kenModelled: 'rplumber/ref-area-ken-modelled.json',
+  /**
+   * `id=KEN_A`, the modelled headline indicators recorded at `timeto=2025` with
+   * `latestyear=TRUE` (2026-09-26) and trimmed as `kenReported`: every row a 2025
+   * projection under the Nov. 2025 edition, for the case where rows past the cutoff
+   * reach the service and must be excluded.
+   */
   kenModelled2025: 'rplumber/ref-area-ken-modelled-2025.json',
-  /** `id=X01_A`, the modelled unemployment rate and labour income share at 2024. */
+  /** `id=X01_A`, all eight modelled headline indicators, 2019–2024. */
   x01Modelled: 'rplumber/ref-area-x01-modelled.json',
   /** `id=CHN_A`, the six reported headline indicators, full history (2026-10-15; no CHN informality data). */
   chnReported: 'rplumber/ref-area-chn-reported.json',
@@ -224,7 +232,7 @@ export const REF_AREA_JSON = {
   chnReportedLatest: 'rplumber/ref-area-chn-reported-latest.json',
   /** The same full history with `classif1=AGE_YTHADULT_YGE15+AGE_YTHADULT_Y15-24`: the sex-only NEET rows dropped. */
   chnReportedClassif1: 'rplumber/ref-area-chn-reported-c1.json',
-  /** `id=CHN_A`, the modelled headline indicators (recorded at `timeto=2025`, periods set to 2024 as above). */
+  /** `id=CHN_A`, the modelled headline indicators, 2019–2024 (no CHN informality estimate). */
   chnModelled: 'rplumber/ref-area-chn-modelled.json',
 } as const;
 
@@ -299,11 +307,8 @@ export function sdmxText(body: string, status: number): Response {
 }
 
 export const SDMX_404_NO_STRUCTURE = 'Could not find requested structures';
-export const SDMX_404_NO_DATA =
-  'No data is found. Please adjust your query parameters and try again.';
 export const SDMX_500_ORA =
   'ORA-00936: missing expression\nhttps://docs.oracle.com/error-help/db/ora-00936/';
-export const SDMX_422_SHORT_KEY = 'Not enough key values in query, expecting 5 got 3';
 
 /** The recorded SDMX-JSON structure document for an indicator. */
 export function structureDocument(indicator: string): Record<string, unknown> {
@@ -314,13 +319,6 @@ export function structureResponse(document: unknown): Response {
   return new Response(JSON.stringify(document), {
     status: 200,
     headers: { 'content-type': 'application/vnd.sdmx.structure+json; version=1.0; charset=utf-8' },
-  });
-}
-
-export function probeResponse(csv: string): Response {
-  return new Response(csv, {
-    status: 200,
-    headers: { 'content-type': 'application/vnd.sdmx.data+csv; charset=utf-8' },
   });
 }
 
@@ -452,9 +450,11 @@ function latestOnly<T>(entries: T[], cellOf: (entry: T) => (name: string) => str
  * Emulates `/data/ref_area` over recorded rows: keeps the rows of the requested
  * `indicator` codes, then — when `classif1` is set — only the rows carrying one of
  * its codes, dropping rows (whole indicators) with no classif1, as upstream does
- * there (verified live, unlike `/data/indicator`), then applies `latestyear=TRUE` as
- * {@link filterIndicatorCsv} does. `timeto` is not emulated: the modelled captures
- * were recorded with it, and the service's own cutoff check is under test.
+ * there (verified live, unlike `/data/indicator`), and only the rows whose year is
+ * within `timefrom` and `timeto` (both honored there, verified live), then applies
+ * `latestyear=TRUE` as {@link filterIndicatorCsv} does. The service never sends
+ * `latestyear` to this endpoint; it is emulated so a request that did would get
+ * upstream's answer.
  */
 export function filterRefAreaRows(rows: RawRow[], url: URL): RawRow[] {
   const params = upstreamParams(url);
@@ -464,11 +464,17 @@ export function filterRefAreaRows(rows: RawRow[], url: URL): RawRow[] {
   };
   const indicators = listed('indicator');
   const classif1 = listed('classif1');
-  const kept = rows.filter(
-    (row) =>
+  const from = params.has('timefrom') ? Number(params.get('timefrom')) : undefined;
+  const to = params.has('timeto') ? Number(params.get('timeto')) : undefined;
+  const kept = rows.filter((row) => {
+    const year = Number(String(row.time).slice(0, 4));
+    return (
       (!indicators || indicators.has(String(row.indicator))) &&
-      (!classif1 || classif1.has(String(row.classif1 ?? ''))),
-  );
+      (!classif1 || classif1.has(String(row.classif1 ?? ''))) &&
+      (from === undefined || year >= from) &&
+      (to === undefined || year <= to)
+    );
+  });
   const cellOf = (row: RawRow) => (name: string) => String(row[name] ?? '');
   return params.get('latestyear') === 'TRUE' ? latestOnly(kept, cellOf) : kept;
 }
@@ -632,16 +638,6 @@ export function isStructureRequest(request: Request, indicator?: string): boolea
     : url.pathname === `/rest/dataflow/ILO/DF_${indicator}/latest`;
 }
 
-/** An SDMX unit-probe request (for `indicator` and series `key`, when given). */
-export function isProbeRequest(request: Request, indicator?: string, key?: string): boolean {
-  const url = new URL(request.url);
-  if (url.origin !== SDMX_ORIGIN || !url.pathname.startsWith('/rest/data/')) return false;
-  if (indicator === undefined) return true;
-  const prefix = `/rest/data/ILO,DF_${indicator},1.0/`;
-  if (!url.pathname.startsWith(prefix)) return false;
-  return key === undefined || url.pathname === `${prefix}${key}`;
-}
-
 /** Routes serving the catalog fixture, read at request time so a test can change it between loads. */
 export function catalogRoutes(fixture: CatalogFixture): FetchMockRoute[] {
   return [
@@ -677,33 +673,17 @@ export function structureRoute(indicator: string, respond?: FetchMockResponder):
   };
 }
 
-/** Unit-probe route for `indicator` and `key`: the recorded CSV unless `respond` replaces it. */
-export function probeRoute(
-  indicator: string,
-  key: string,
-  respond?: FetchMockResponder,
-): FetchMockRoute {
-  return {
-    method: 'GET',
-    match: (request) => isProbeRequest(request, indicator, key),
-    respond: respond ?? (() => probeResponse(fixtureText(`sdmx/probe-${indicator}.csv`))),
-  };
-}
-
 /**
- * Every recorded SDMX fixture — structure plus the probe of the first constrained
- * area — and a 404 for any other dataflow, as SDMX answers an indicator it lacks.
+ * Every recorded SDMX structure, and a 404 for any other dataflow, as SDMX
+ * answers an indicator it lacks. No data route: a `/rest/data/` request has
+ * no match and fails the strict fake.
  */
 export function sdmxFixtureRoutes(): FetchMockRoute[] {
   return [
     structureRoute('UNE_DEAP_SEX_AGE_RT'),
-    probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....'),
     structureRoute('LAP_2LID_QTL_RT'),
-    probeRoute('LAP_2LID_QTL_RT', 'KEN...'),
     structureRoute('EMP_TEMP_SEX_INS_DSB_NB'),
-    probeRoute('EMP_TEMP_SEX_INS_DSB_NB', 'KEN.....'),
     structureRoute('SDG_0552_NOC_RT'),
-    probeRoute('SDG_0552_NOC_RT', 'KEN..'),
     {
       method: 'GET',
       match: (request) => isStructureRequest(request),
@@ -812,7 +792,7 @@ export function wireServices(options: WireOptions = {}): WiredServices {
   return { http, fixture, services };
 }
 
-/** The inline preview {@link wireDataframes} sets: a three-area query (52 rows) or a three-value comparison stages. */
+/** The staging threshold {@link wireDataframes} sets: a three-area query (52 rows) or a three-value comparison stages. */
 export const DATAFRAME_PREVIEW_CHARS = 600;
 
 /**

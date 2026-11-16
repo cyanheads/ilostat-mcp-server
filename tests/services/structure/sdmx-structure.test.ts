@@ -5,17 +5,14 @@
  * parentless leaves kept, the partial-codelist fallback for a dimension the
  * constraint omits, the default slice read by dimension ID from the `DEFAULT`
  * annotation, covered areas (an area value that is not an SDMX code dropped from
- * both the constraint and the codelist fallback), the probe key, and unit decoding.
+ * both the constraint and the codelist fallback), and labelling a catalog unit
+ * from the unit codelists.
  * @module tests/services/structure/sdmx-structure.test
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  type IndicatorStructure,
-  parseStructure,
-  probeKey,
-  unitFromRow,
-} from '@/services/structure/sdmx-structure.js';
+import type { UnitInfo } from '@/services/catalog/types.js';
+import { labelUnit, parseStructure } from '@/services/structure/sdmx-structure.js';
 import { structureDocument } from '../../helpers/ilostat-upstream.js';
 import { guardNetwork } from '../../helpers/network-guard.js';
 
@@ -50,10 +47,8 @@ const document = (indicator: string) => structureDocument(indicator) as unknown 
 describe('parseStructure: sex and one breakdown (UNE_DEAP_SEX_AGE_RT)', () => {
   const structure = parseStructure(structureDocument('UNE_DEAP_SEX_AGE_RT'));
 
-  it('reads version, last update, and the key dimensions in position order', () => {
-    expect(structure.version).toBe('1.0');
+  it('reads the last update', () => {
     expect(structure.lastUpdate).toBe('2026-09-20T07:33:33');
-    expect(structure.keyDimensions).toEqual(['REF_AREA', 'FREQ', 'MEASURE', 'SEX', 'AGE']);
   });
 
   it('keeps sex out of the breakdown slots and lists its codes in use', () => {
@@ -144,7 +139,6 @@ describe('parseStructure: two breakdowns (EMP_TEMP_SEX_INS_DSB_NB)', () => {
       if (dimension.id === 'SEX') dimension.position = 4;
     }
     const structure = parseStructure(doc);
-    expect(structure.keyDimensions).toEqual(['REF_AREA', 'FREQ', 'MEASURE', 'INS', 'SEX', 'DSB']);
     expect(structure.classif1?.id).toBe('INS');
     expect(structure.classif2?.id).toBe('DSB');
     expect(structure.sexCodes).toEqual(['SEX_T', 'SEX_M', 'SEX_F', 'SEX_O']);
@@ -158,7 +152,6 @@ describe('parseStructure: two breakdowns (EMP_TEMP_SEX_INS_DSB_NB)', () => {
     });
     const structure = parseStructure(doc);
     expect([structure.classif1?.id, structure.classif2?.id]).toEqual(['INS', 'DSB']);
-    expect(structure.keyDimensions).toContain('GEO');
   });
 });
 
@@ -168,7 +161,6 @@ describe('parseStructure: no breakdowns (SDG_0552_NOC_RT)', () => {
     expect(structure.classif1).toBeUndefined();
     expect(structure.sexCodes).toBeUndefined();
     expect(structure.defaultSlice).toEqual({});
-    expect(structure.keyDimensions).toEqual(['REF_AREA', 'FREQ', 'MEASURE']);
   });
 });
 
@@ -207,7 +199,7 @@ describe('parseStructure: sparse documents', () => {
 describe('parseStructure: area codes that are not SDMX codes', () => {
   const UNSAFE = ['../../../../availableconstraint?x=1#', 'KEN/..', 'usa', ''];
 
-  it('drops them from the content constraint, so none reaches a probe key', () => {
+  it('drops them from the content constraint, so none reaches describe or compare', () => {
     const doc = document('UNE_DEAP_SEX_AGE_RT');
     const areas = doc.data.contentConstraints?.[0]?.cubeRegions[0]?.keyValues.find(
       (keyValue) => keyValue.id === 'REF_AREA',
@@ -226,22 +218,18 @@ describe('parseStructure: area codes that are not SDMX codes', () => {
   });
 });
 
-describe('probeKey', () => {
-  it('selects one area with every other dimension wildcarded', () => {
-    const structure = parseStructure(structureDocument('UNE_DEAP_SEX_AGE_RT'));
-    expect(probeKey(structure, 'ABW')).toBe('ABW....');
-    const decile: IndicatorStructure = parseStructure(structureDocument('LAP_2LID_QTL_RT'));
-    expect(probeKey(decile, 'KEN')).toBe('KEN...');
-  });
-});
+describe('labelUnit', () => {
+  const structure = parseStructure(structureDocument('UNE_DEAP_SEX_AGE_RT'));
+  const persons: UnitInfo = {
+    measure: 'PS',
+    measureLabel: 'persons',
+    type: 'NB',
+    multiplier: 3,
+    multiplierLabel: 'thousands',
+  };
 
-describe('unitFromRow', () => {
-  const { unitCodelists } = parseStructure(structureDocument('UNE_DEAP_SEX_AGE_RT'));
-
-  it('decodes the unit attributes of a probed series row', () => {
-    expect(
-      unitFromRow({ UNIT_MEASURE_TYPE: 'NB', UNIT_MEASURE: 'PS', UNIT_MULT: '3' }, unitCodelists),
-    ).toEqual({
+  it("labels a catalog unit from the structure's unit codelists, the type included", () => {
+    expect(labelUnit(persons, structure)).toEqual({
       measure: 'PS',
       measureLabel: 'Persons',
       type: 'NB',
@@ -249,18 +237,35 @@ describe('unitFromRow', () => {
       multiplier: 3,
       multiplierLabel: 'Thousands',
     });
+    expect(labelUnit({ measure: 'PT', type: 'RT', multiplier: 0 }, structure)).toEqual({
+      measure: 'PT',
+      measureLabel: 'Percentage',
+      type: 'RT',
+      typeLabel: 'Rate',
+      multiplier: 0,
+      multiplierLabel: 'Units',
+    });
   });
 
-  it('keeps codes the codelists lack without inventing labels', () => {
-    expect(
-      unitFromRow({ UNIT_MEASURE_TYPE: 'GR', UNIT_MEASURE: 'US', UNIT_MULT: '0' }, unitCodelists),
-    ).toEqual({ measure: 'US', type: 'GR', multiplier: 0, multiplierLabel: 'Units' });
+  it('keeps the catalog label of each code the codelists lack, and adds no type label then', () => {
+    const currency: UnitInfo = {
+      measure: 'CR',
+      measureLabel: 'currency',
+      type: 'GR',
+      multiplier: 9,
+      multiplierLabel: 'billions',
+    };
+    expect(labelUnit(currency, structure)).toEqual(currency);
+    expect(labelUnit({ measure: 'CR', type: 'NB', multiplier: 0 }, structure)).toEqual({
+      measure: 'CR',
+      type: 'NB',
+      typeLabel: 'Number',
+      multiplier: 0,
+      multiplierLabel: 'Units',
+    });
   });
 
-  it('is undefined when a row lacks an attribute or the multiplier is not a number', () => {
-    expect(unitFromRow({ UNIT_MEASURE_TYPE: 'RT', UNIT_MULT: '0' }, unitCodelists)).toBeUndefined();
-    expect(
-      unitFromRow({ UNIT_MEASURE_TYPE: 'RT', UNIT_MEASURE: 'PT', UNIT_MULT: 'x' }, unitCodelists),
-    ).toBeUndefined();
+  it('returns the catalog unit unchanged without a structure', () => {
+    expect(labelUnit(persons, undefined)).toEqual(persons);
   });
 });

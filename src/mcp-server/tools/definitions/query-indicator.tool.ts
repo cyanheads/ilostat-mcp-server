@@ -4,8 +4,9 @@
  * distinct datasets are returned unfetched), filtered by area or area group, sex,
  * breakdown codes, source, and period. Every code is checked against the catalog
  * dictionaries before the request is sent; rows keep their source, status, notes,
- * and basis, and a result larger than the inline preview is staged in full as a
- * `df_<id>` dataframe.
+ * and basis, and come back a page at a time (`limit` from `offset`, continued by
+ * `next_offset`); a first page whose result passes the staging threshold
+ * (`ILOSTAT_PREVIEW_CHARS`) is also staged in full as a `df_<id>` dataframe.
  * @module mcp-server/tools/definitions/query-indicator
  */
 
@@ -42,14 +43,21 @@ import { inlineText } from '@/services/catalog/text.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 import { legendOf, toInlineRow } from '@/services/observations/observation-rows.js';
 import {
+  AREA_WITHOUT_ROWS_REASONS,
   checkPeriodCombination,
   DATASETS_PER_CALL,
   type QueryAppliedFilters,
   type QueryRequest,
+  type QueryResult,
 } from '@/services/observations/observation-service.js';
 
 /** Hard ceiling on dataset_ids, counted after the + and , split. */
 const MAX_DATASET_IDS = 100;
+
+/** Rows one page returns, about 1 MB of `structuredContent`; a larger `limit` is applied as this. */
+const PAGE_CAP = 5_000;
+
+const count = (n: number) => n.toLocaleString('en-US');
 
 const CodeMapSchema = (what: string) =>
   z.record(z.string(), z.string()).describe(`${what} code → label, for every code in rows.`);
@@ -105,27 +113,65 @@ function renderAppliedFilters(filters: QueryAppliedFilters): string {
 }
 
 /**
- * Why a page stopped at the inline preview. A per-series `latest_only` result was
- * read in full to find each series' latest period, so only its reduced rows are cut.
+ * How to reach the next page. When the read passed the row ceiling, a next page
+ * reaching past it is refused as `result_too_large`, so the guidance names the
+ * ceiling instead: the limit that still reads up to it, or narrowing.
  */
-function previewNotice(cause: 'canvas_off' | 'canvas_failed', shown: number, perSeries: boolean) {
-  const lead = `Showing the first ${shown} rows`;
-  if (perSeries) {
-    const why =
-      cause === 'canvas_off'
-        ? 'dataframes are off in this deployment'
-        : 'staging the full result as a dataframe failed';
-    return `${lead}: ${why}, so the latest-period rows past the inline preview are not returned. The full history was read to find each series' latest period. Narrow the request — fewer areas or specific sex/classif1 codes — to see all of them.`;
+function nextPageGuidance(next: number, limit: number, total: number, maxRows: number): string {
+  if (total <= maxRows || next + limit <= maxRows) {
+    return 'Pass next_offset as offset, with the same other arguments, for the next page.';
   }
-  return cause === 'canvas_off'
-    ? `${lead}: dataframes are off in this deployment, so reading stopped at the inline preview and the rest of the result was not fetched. Narrow the request — fewer areas, a shorter time window, or specific sex/classif1 codes — to see all of it.`
-    : `${lead}: staging the full result as a dataframe failed, so reading stopped at the inline preview. Call again, or narrow the request to see all of it.`;
+  const narrow = `narrow the request (fewer reference areas, a shorter time window, or specific sex or classif1 codes) to read rows past ${count(maxRows)}.`;
+  return next < maxRows
+    ? `The next page would reach past the ${count(maxRows)}-row ceiling: pass next_offset as offset with limit ${count(maxRows - next)} for the rows up to it, or ${narrow}`
+    : `Rows past the ${count(maxRows)}-row ceiling are not read; ${narrow}`;
+}
+
+/**
+ * Which rows a page holds, why a first page whose result passes the staging
+ * threshold was not staged, and how to reach the next page; absent when a first
+ * page holds the whole result. `total` is the result's row count, a lower bound
+ * unless `complete`.
+ */
+function pageNotice(
+  outcome: QueryResult['outcome'],
+  offset: number,
+  limit: number,
+  total: number,
+  complete: boolean,
+  maxRows: number,
+): string | undefined {
+  const shown = outcome.rows.length;
+  if (shown === 0) {
+    return offset > 0 && total > 0
+      ? `offset ${offset} is past the end of the result, which holds ${count(total)} ${total === 1 ? 'row' : 'rows'}.`
+      : undefined;
+  }
+  const cause = outcome.kind === 'page' ? outcome.cause : undefined;
+  if (offset === 0 && outcome.nextOffset === undefined && !cause) return;
+  return [
+    `Showing rows ${count(offset + 1)}–${count(offset + shown)} of ${complete ? '' : 'at least '}${count(total)}.`,
+    ...(cause === 'canvas_off'
+      ? ['Dataframes are off in this deployment, so the result is not staged for SQL.']
+      : []),
+    ...(cause === 'canvas_failed'
+      ? ['Staging the full result as a dataframe failed; call again with offset 0 to retry it.']
+      : []),
+    ...(cause === 'past_ceiling'
+      ? [
+          `The result passes the ${count(maxRows)}-row ceiling, so it is not staged for SQL; narrow the request (fewer reference areas, a shorter time window, or specific sex or classif1 codes) to stage it.`,
+        ]
+      : []),
+    ...(outcome.nextOffset === undefined
+      ? []
+      : [nextPageGuidance(outcome.nextOffset, limit, total, maxRows)]),
+  ].join(' ');
 }
 
 export const queryIndicatorTool = tool('ilostat_query_indicator', {
   title: 'Query ILOSTAT observations',
   description:
-    "Fetch observations for up to 3 ILOSTAT datasets per call, filtered by reference area or area group, sex, breakdown codes (classif1, classif2), source, and period; datasets past the first 3 come back as remaining_dataset_ids for another call. Rows keep their source, observation status, decoded notes, and a basis — reported, modelled_estimate, or projection — and the response echoes every filter applied, including the best-source default. Codes are checked against ILOSTAT's dictionaries before the request is sent: ilostat_list_reference lists valid codes and ilostat_describe_indicator lists the codes a dataset actually uses. A result larger than the inline preview is staged in full as a df_<id> dataframe for SQL through ilostat_dataframe_describe and ilostat_dataframe_query when this deployment enables dataframes. A request with no filters at all is refused when the dataset exceeds the row ceiling, and a filtered request that still exceeds it is refused with guidance to narrow it.",
+    "Fetch observations for up to 3 ILOSTAT datasets per call, filtered by reference area or area group, sex, breakdown codes (classif1, classif2), source, and period; datasets past the first 3 come back as remaining_dataset_ids for another call. Rows keep their source, observation status, decoded notes, and a basis — reported, modelled_estimate, or projection — and the response echoes every filter applied, including the best-source default. Codes are checked against ILOSTAT's dictionaries before the request is sent: ilostat_list_reference lists valid codes and ilostat_describe_indicator lists the codes a dataset actually uses. Rows come back limit at a time from offset, and next_offset continues the same request; on the first page, a result past the staging threshold is also staged in full as a df_<id> dataframe for SQL through ilostat_dataframe_describe and ilostat_dataframe_query when this deployment enables dataframes. A request with no filters at all is refused when the dataset exceeds the row ceiling; a filtered result past the ceiling is paged but not staged, and a page reaching past the ceiling is refused with guidance to narrow the request.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -173,6 +219,28 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     source_selection: blankAsUnset(z.enum(['best', 'all', 'secondary']).optional()).describe(
       'best (default): the preferred source per area and period; all: secondary sources too, each row flagged best_source; secondary: secondary sources only. Defaults to all when sources is set.',
     ),
+    limit: z
+      .number()
+      .min(1)
+      // Not .int(): it enforces the safe-integer maximum it advertises, and any larger count is applied as the cap.
+      .check((ctx) => {
+        if (!Number.isInteger(ctx.value)) {
+          ctx.issues.push({ code: 'invalid_type', expected: 'int', input: ctx.value });
+        }
+      })
+      .meta({ type: 'integer' })
+      .default(50)
+      .describe(
+        `Rows per page, at most ${count(PAGE_CAP)}; a larger value is applied as ${count(PAGE_CAP)} and the notice says so.`,
+      ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        "Rows to skip: 0 for the first page, else the previous page's next_offset, with the same other arguments. Each page re-reads the request upstream; under latest_only, combine pages only when their applied_filters.latest_mode matches.",
+      ),
   }),
 
   output: z.object({
@@ -186,7 +254,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     row_count: z
       .number()
       .describe(
-        'Rows the request returned — exact unless reading stopped early at the inline preview (summary.complete false), when it counts the rows read.',
+        'Rows in the result — exact when summary.complete is true; otherwise the rows read before reading stopped past this page, which the result holds at least.',
       ),
     rows: z
       .array(
@@ -232,7 +300,13 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
           .describe('One observation.'),
       )
       .describe(
-        'Inline preview rows; the staged dataframe holds every row when the result is larger.',
+        "This page: at most limit rows from offset, in upstream's order (under per-series latest_only, each series' latest rows, series in the order first seen). A staged dataframe holds every row.",
+      ),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset of the next page, set when rows remain past this one; pass it as offset with the same other arguments.',
       ),
     legend: z
       .object({
@@ -254,10 +328,28 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
         complete: z
           .boolean()
           .describe(
-            'False when reading stopped early at the inline preview, so the counts cover only the rows read.',
+            'True when the read reached the end of the result (always under per-series latest_only, whose history is read whole); false when reading stopped past this page, so the counts cover only the rows read.',
+          ),
+        areas_without_rows: z
+          .array(
+            z
+              .object({
+                dataset_id: z.string().describe('Queried dataset the area returned no rows from.'),
+                ref_area: z.string().describe('Requested reference area code.'),
+                reason: z
+                  .enum(AREA_WITHOUT_ROWS_REASONS)
+                  .describe(
+                    "not_covered: absent from the dataset's area list in its SDMX structure. no_rows: listed there, but no rows for these filters and period; every entry is no_rows when that list is unavailable, which notice says.",
+                  ),
+              })
+              .describe('One requested area with no rows from one queried dataset.'),
+          )
+          .optional()
+          .describe(
+            'Every requested area (ref_areas plus area_group members) that returned no rows, per queried dataset, in the order sent; empty when each returned rows. Absent when complete is false, no area was requested, or the result has no rows.',
           ),
       })
-      .describe('Summary over every row read, not just the preview.'),
+      .describe('Summary over every row read, not just the page.'),
     dataframe: DataframeSchema.optional(),
     attribution: z.string().describe('Citation to keep with any use of the data.'),
   }),
@@ -268,13 +360,11 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
       .string()
       .optional()
       .describe(
-        'Datasets left for another call, a latest_only fallback to the latest period per area and dataset, filters that could not narrow a dataset, a unit the structure service could not supply, why nothing matched, where the full result is staged, or why reading stopped early.',
+        'A limit past the page cap applied as the cap, datasets left for another call, a latest_only fallback to the latest period per area and dataset, filters that could not narrow a dataset, a unit the catalog does not list, the requested areas that returned no rows and why, why nothing matched, where the full result is staged, which rows the page holds and how to reach the next, or why a first page whose result passes the staging threshold was not staged (dataframes off, staging failed, or the result passes the row ceiling).',
       ),
-    truncated: z
-      .boolean()
-      .describe('True when reading stopped at the inline preview and more rows exist.'),
+    truncated: z.boolean().describe('True when rows remain past this page; next_offset continues.'),
     shown: z.number().describe('Rows returned inline.'),
-    cap: z.number().describe('Inline preview budget, in serialized characters.'),
+    cap: z.number().describe('The limit applied to this page.'),
   },
   enrichmentTrailer: { applied_filters: { render: renderAppliedFilters } },
 
@@ -336,7 +426,7 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The filtered result passed the row ceiling while streaming.',
+      when: 'The page (offset plus limit) reaches past the row ceiling of a result that holds more rows than the ceiling.',
       recovery:
         'Narrow the request with fewer reference areas, a shorter time window, or specific sex/classif1 codes, then call again.',
       severity: 'notice',
@@ -372,9 +462,12 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
   ],
 
   async handler(input, ctx) {
+    const limit = Math.min(input.limit, PAGE_CAP);
     const request: QueryRequest = {
       datasetIds: input.dataset_ids,
       latestOnly: input.latest_only,
+      limit,
+      offset: input.offset,
       ...(input.ref_areas?.length ? { refAreas: input.ref_areas } : {}),
       ...(input.area_group ? { areaGroup: input.area_group } : {}),
       ...(input.sex?.length ? { sex: input.sex } : {}),
@@ -391,19 +484,20 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
     const snapshot = await catalog.ready(ctx);
     const result = await observations.query(snapshot, request, ctx);
 
-    const { outcome, summary } = result;
+    const { complete, outcome, summary } = result;
     const shown = outcome.rows.length;
-    ctx.enrich({
-      applied_filters: result.appliedFilters,
-      truncated: false,
-      shown,
-      cap: result.previewChars,
-    });
-    const notices = [...result.notices];
+    ctx.enrich({ applied_filters: result.appliedFilters, truncated: false, shown, cap: limit });
+    const notices = [
+      ...(limit < input.limit
+        ? [`limit ${input.limit} was applied as ${limit}, the per-call page cap.`]
+        : []),
+      ...result.notices,
+    ];
     if (outcome.kind === 'staged') notices.push(dataframeNotice(outcome.table));
-    if (outcome.kind === 'preview') {
-      notices.push(previewNotice(outcome.cause, shown, result.perSeries));
-      ctx.enrich.truncated({ shown, cap: result.previewChars, guidance: notices.join(' ') });
+    const paging = pageNotice(outcome, input.offset, limit, summary.rows, complete, result.maxRows);
+    if (paging) notices.push(paging);
+    if (outcome.nextOffset !== undefined) {
+      ctx.enrich.truncated({ shown, cap: limit, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
     }
@@ -420,14 +514,15 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
         : {}),
       row_count: summary.rows,
       rows: outcome.rows.map(toInlineRow),
+      ...(outcome.nextOffset === undefined ? {} : { next_offset: outcome.nextOffset }),
       legend: legendOf(outcome.rows, snapshot),
       summary: {
         ref_areas: summary.refAreas,
         ...(summary.periodMin ? { period_min: summary.periodMin } : {}),
         ...(summary.periodMax ? { period_max: summary.periodMax } : {}),
         basis_counts: { ...summary.basisCounts },
-        // A per-series result was read whole, so its counts are complete even when the preview cut its rows.
-        complete: outcome.kind !== 'preview' || result.perSeries,
+        complete,
+        ...(result.areasWithoutRows ? { areas_without_rows: result.areasWithoutRows } : {}),
       },
       ...(outcome.kind === 'staged' ? { dataframe: stagedDataframe(outcome.table) } : {}),
       attribution: ATTRIBUTION,
@@ -494,6 +589,16 @@ export const queryIndicatorTool = tool('ilostat_query_indicator', {
       '',
       `**Summary:** ${result.row_count} ${result.row_count === 1 ? 'row' : 'rows'} · ${summary.ref_areas} ${summary.ref_areas === 1 ? 'area' : 'areas'}${summary.period_min ? ` · periods ${inlineText(`${summary.period_min}–${summary.period_max}`)}` : ''} · ${renderBasisCounts(summary.basis_counts)} · complete: ${summary.complete}`,
     );
+    const withoutRows = summary.areas_without_rows;
+    if (withoutRows) {
+      lines.push(`**Areas without rows:**${withoutRows.length === 0 ? ' none' : ''}`);
+      for (const entry of withoutRows) {
+        lines.push(
+          `- ${inlineText(entry.dataset_id)} · ${inlineText(entry.ref_area)}: ${entry.reason}`,
+        );
+      }
+    }
+    if (result.next_offset !== undefined) lines.push(`**next_offset:** ${result.next_offset}`);
     if (result.dataframe) lines.push(renderDataframe(result.dataframe));
     lines.push(result.attribution);
     return [{ type: 'text', text: lines.join('\n') }];

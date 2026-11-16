@@ -3,9 +3,10 @@
  * 2026-10-15), loaded through `RplumberClient` over a fetch fake: parity with the
  * word-prefix rule over a 101-query corpus, the stem fallback for a term no catalog
  * word starts with, the catalog-wide fallback decision, the stem notice and its
- * composition with the zero-hit notice, the sex words indexed beside a sex
- * breakdown, a sex word beside other terms ranking as those terms rank, the
- * sex-filter notice, and the fallback's CPU cost across the term
+ * composition with the zero-hit notice, the sex and age-group words indexed beside a
+ * sex or age breakdown, a sex or age word beside other terms ranking as those terms
+ * rank, every query without an age word left as it was, the sex-filter and age-band
+ * notices, and the fallback's CPU cost across the term
  * counts the query cap allows.
  * @module tests/services/catalog/search.test
  */
@@ -74,7 +75,7 @@ const STEM_MARK = 'matched no catalog word or word prefix';
 describe('the full catalog fixture', () => {
   it('loads every indicator and the catalog-wide vocabulary', () => {
     expect(snapshot.indicators).toHaveLength(1213);
-    expect(snapshot.searchVocabulary).toHaveLength(1469);
+    expect(snapshot.searchVocabulary).toHaveLength(1470);
   });
 });
 
@@ -136,7 +137,7 @@ describe('parity with the word-prefix rule', () => {
       seasonality: 9,
       precarity: 0,
       'informality rate': 57,
-      'youth informality': 1,
+      'youth informality': 59,
       'unionization rate': 1,
       'productive employment': 2,
       'inactive population': 26,
@@ -454,8 +455,8 @@ describe('a sex word beside other terms', () => {
     [
       'men youth unemployment',
       'youth unemployment',
-      44,
-      '5a8d9070323b0297241a415a948d9dbb5475447f8dd9951306d27d41b40aea97',
+      120,
+      '4798ee48e354e29d8c06eeb720151a99939b9c2c97a5fbe43be448ec9b1d5630',
     ],
     [
       'female informality',
@@ -558,6 +559,182 @@ describe('the sex notice', () => {
   it('is absent for a term that only starts a sex word, and for queries with no sex word', () => {
     expect(searchAll('fem labour force participation').notice).toBeUndefined();
     expect(searchAll('labour force participation').notice).toBeUndefined();
+  });
+});
+
+/** The notice sentence for an age word `term` that names `band`. */
+const ageSentence = (term: string, band: '15-24' | '25+') =>
+  `${term} matched indicators broken down by age; ${term} is the ${band} band, coded once per age classification version, so take the dataset's AGE_* codes from ilostat_describe_indicator and pass one version's codes for that band as classif1 to ilostat_query_indicator.`;
+
+/** Whether the indicator is broken down by age. */
+const byAge = (code: string) =>
+  snapshot.indicatorsByCode.get(code)?.classificationTypes.includes('AGE') ?? false;
+
+/** The indicators whose label holds youth: every indicator whose own text does. */
+const youthLabels = () =>
+  new Set(
+    searchAll('youth')
+      .hits.filter((hit) => hit.scope === 'label')
+      .map((hit) => hit.indicator.code),
+  );
+
+describe('age words match the age breakdown', () => {
+  it('333 of the 1,213 indicators are broken down by age', () => {
+    expect(snapshot.indicators.filter((indicator) => byAge(indicator.code))).toHaveLength(333);
+  });
+
+  it.each(['youth', 'youths', 'young', 'adult', 'adults'])(
+    '"%s" matches every indicator broken down by age',
+    (term) => {
+      const matched = new Set(codes(searchAll(term)));
+      const aged = snapshot.indicators.filter((indicator) => byAge(indicator.code));
+      expect(aged.filter((indicator) => !matched.has(indicator.code))).toEqual([]);
+    },
+  );
+
+  it('youth lists its 90 label hits first, in the order they rank without the age words, then the age breakdown', () => {
+    const result = searchAll('youth');
+    expect(result.total).toBe(362);
+    expect(tierCounts(result)).toEqual({ label: 90, metadata: 272 });
+    expect(digest(rankedScopes(result).slice(0, 90))).toBe(
+      'cecf592fb7d3a49ebb60c61a8d4cb608a44c54e6f076ed3dc76ac499d0139aae',
+    );
+    expect(result.hits.slice(90).every((hit) => byAge(hit.indicator.code))).toBe(true);
+  });
+
+  it('adds adult to the catalog vocabulary; youth and young were already words', () => {
+    expect(snapshot.searchVocabulary).toEqual(expect.arrayContaining(['adult', 'young', 'youth']));
+  });
+
+  it('gives an indicator without an age breakdown only the age words its own text holds', () => {
+    const unaged = snapshot.indicators.filter((indicator) => !byAge(indicator.code));
+    const holding = (word: string) =>
+      unaged.filter((indicator) => indicator.search.metadata.includes(word)).length;
+    // the NEET series, SDG 8.6.1 and 8.b.1, and other youth labels; no catalog text says young or adult there
+    expect([holding('youth'), holding('young'), holding('adult')]).toEqual([29, 0, 0]);
+  });
+});
+
+describe('a query with no age word', () => {
+  it('can change only through a catalog word that is a word prefix of an age word: a, which every indicator broken down by age already matches through age', () => {
+    const ageWords = ['youth', 'young', 'adult'];
+    expect(
+      snapshot.searchVocabulary.filter((word) => ageWords.some((age) => age.startsWith(word))),
+    ).toEqual(['a', 'adult', 'young', 'youth']);
+    expect(
+      snapshot.indicators
+        .filter((indicator) => byAge(indicator.code))
+        .every((indicator) => indicator.search.metadata.includes('age')),
+    ).toBe(true);
+    const a = searchAll('a');
+    expect(a.total).toBe(1213);
+    expect(digest(rankedScopes(a))).toBe(
+      '2d42cab01e62135320ba9916c01730b878d5a7aa2b0d33f23c504101f348d39a',
+    );
+  });
+});
+
+describe('an age word beside other terms', () => {
+  it('"youth unemployment" returns 120 hits, the headline unemployment rate second, keeping every hit youth found alone', () => {
+    const result = searchAll('youth unemployment');
+    expect(result.total).toBe(120);
+    expect(codes(result).slice(0, 2)).toEqual(['UNE_TUNE_SEX_AGE_NB', 'UNE_DEAP_SEX_AGE_RT']);
+    const labelled = youthLabels();
+    const before = codes(searchAll('unemployment')).filter((code) => labelled.has(code));
+    expect(before).toHaveLength(44);
+    expect(codes(result)).toEqual(expect.arrayContaining(before));
+  });
+
+  it('"female youth unemployment" has to match both words', () => {
+    const labelled = youthLabels();
+    const result = searchAll('female youth unemployment');
+    expect(result.total).toBe(120);
+    for (const hit of result.hits) {
+      expect(bySex(hit.indicator.code), hit.indicator.code).toBe(true);
+      expect(byAge(hit.indicator.code) || labelled.has(hit.indicator.code)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['youth unemployment rate', 'unemployment rate', 61],
+    ['female youth unemployment', 'female unemployment', 120],
+    ['young women unemployment', 'women unemployment', 106],
+    ['youth labour force participation', 'labour force participation', 22],
+    ['adult unemployment', 'unemployment', 105],
+  ] as const)('"%s" ranks its hits in the tier and order "%s" gives them', (query, base, total) => {
+    const result = searchAll(query);
+    expect(result.total).toBe(total);
+    const matched = new Set(codes(result));
+    const expected = rankedScopes(searchAll(base)).filter((entry) =>
+      matched.has(entry.slice(0, entry.indexOf(':'))),
+    );
+    expect(rankedScopes(result)).toEqual(expected);
+  });
+
+  it('"youth unemployment rate" puts the headline unemployment rate first', () => {
+    expect(codes(searchAll('youth unemployment rate'))[0]).toBe('UNE_DEAP_SEX_AGE_RT');
+  });
+});
+
+describe('the age notice', () => {
+  it.each([
+    ['youth unemployment', 'youth', '15-24'],
+    ['youths unemployment', 'youths', '15-24'],
+    ['young unemployment', 'young', '15-24'],
+    ['adult unemployment', 'adult', '25+'],
+    ['Adults unemployment rate', 'adults', '25+'],
+  ] as const)('"%s" names the band for %s', (query, term, band) => {
+    expect(searchAll(query).notice).toBe(ageSentence(term, band));
+  });
+
+  it('sits in query order with the sex sentences', () => {
+    expect(searchAll('female youth unemployment').notice).toBe(
+      `${sexSentence('female', 'SEX_F')} ${ageSentence('youth', '15-24')}`,
+    );
+    expect(searchAll('young women unemployment').notice).toBe(
+      `${ageSentence('young', '15-24')} ${sexSentence('women', 'SEX_F')}`,
+    );
+  });
+
+  it('follows the stem notice when a stemmed term combines with an age word', () => {
+    expect(searchAll('youth informality').notice).toBe(
+      `${stemSentence('informality', 'informal')} ${ageSentence('youth', '15-24')}`,
+    );
+  });
+
+  it('names the band only when an indicator broken down by age matched', () => {
+    // SDG 8.6.1, the youth NEET rate, is published by sex only
+    const neet = searchAll('youth 0861');
+    expect(codes(neet)).toEqual(['SDG_0861_SEX_RT']);
+    expect(byAge('SDG_0861_SEX_RT')).toBe(false);
+    expect(neet.notice).toBeUndefined();
+    expect(searchAll('youth 0852').notice).toBe(ageSentence('youth', '15-24'));
+  });
+
+  it('is absent when nothing matched; the zero-hit notice stands alone', () => {
+    const result = searchAll('youth astronauts');
+    expect(result.total).toBe(0);
+    expect(result.notice).toBe(
+      'No indicator matched every term. Use fewer or broader terms (for example "youth unemployment"), or browse subjects with ilostat_list_reference topic subjects and search by subject.',
+    );
+  });
+
+  it('names the band on a page whose own hits are not broken down by age, when other hits are', () => {
+    const page = searchIndicators(snapshot, {
+      query: 'youth',
+      limit: 1,
+      offset: 3,
+      aggregatesOnly: false,
+    });
+    // the NEET rate's modelled estimates, published by sex only
+    expect(codes(page)).toEqual(['EIP_2EET_SEX_RT']);
+    expect(byAge('EIP_2EET_SEX_RT')).toBe(false);
+    expect(page.notice).toBe(ageSentence('youth', '15-24'));
+  });
+
+  it('is absent for a term that only starts an age word', () => {
+    expect(searchAll('you unemployment').notice).toBeUndefined();
+    expect(searchAll('adul unemployment').notice).toBeUndefined();
   });
 });
 

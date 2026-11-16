@@ -1429,7 +1429,11 @@ describe('errors', () => {
       'denied_function',
     ],
     ['a file named as a table', () => "SELECT * FROM 'data.csv'", 'sql_read_only'],
-    ['range()', () => 'SELECT * FROM range(10)', 'plan_operator_not_allowed'],
+    [
+      'a range() over a column',
+      () => 'SELECT * FROM (SELECT 3 AS n) AS t, range(t.n)',
+      'plan_operator_not_allowed',
+    ],
   ])('fails %s with its declared reason and the contract recovery', async (_label, sql, reason) => {
     const { ctx, name } = await staged();
     const error = await failure({ sql: sql(name) }, ctx);
@@ -1546,15 +1550,18 @@ describe('errors', () => {
       'a PIVOT with no IN list in a subquery',
       (name: string) => `SELECT * FROM (PIVOT ${name} ON sex USING max(value))`,
     ],
-  ])('fails %s multi_statement with a recovery that names the IN list', async (_label, sqlFor) => {
-    const { ctx, name } = await staged();
-    const error = await failure({ sql: sqlFor(name) }, ctx);
-    expect(error.data).toMatchObject({
-      reason: 'multi_statement',
-      recovery: { hint: contractRecovery('multi_statement') },
-    });
-    expect(contractRecovery('multi_statement')).toContain('ON <column> IN (');
-  });
+  ])(
+    'fails %s non_select_statement with a recovery that names the IN list',
+    async (_label, sqlFor) => {
+      const { ctx, name } = await staged();
+      const error = await failure({ sql: sqlFor(name) }, ctx);
+      expect(error.data).toMatchObject({
+        reason: 'non_select_statement',
+        recovery: { hint: contractRecovery('non_select_statement') },
+      });
+      expect(contractRecovery('non_select_statement')).toContain('ON <column> IN (');
+    },
+  );
 
   it.each([
     [

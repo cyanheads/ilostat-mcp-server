@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for `ilostat_describe_indicator` against the recorded catalog
- * (rplumber fetch seam) and the recorded SDMX structures and unit probes (SDMX
- * fetch seam): dataset-ID and bare-indicator hits, ID normalization, the three
+ * (rplumber fetch seam) and the recorded SDMX structures (SDMX fetch seam):
+ * dataset-ID and bare-indicator hits, ID normalization, the three
  * basis-rule cutoffs, breakdown codes with totals and group headers, the default
  * slice, units, areas, degradation to `structure_status: 'unavailable'`, the miss
  * shape, both consumption paths, and the declared error reason.
@@ -24,18 +24,15 @@ import {
   CATALOG_UNAVAILABLE_RECOVERY,
   type CatalogFixture,
   callUrls,
+  FIXED_NOW,
   fixtureText,
   INDICATOR_CSV,
   indicatorDataRoute,
-  isProbeRequest,
   isRplumber,
   isStructureRequest,
   loadCatalogFixture,
   observationCatalogFixture,
-  probeRoute,
-  SDMX_404_NO_DATA,
-  SDMX_422_SHORT_KEY,
-  SDMX_500_ORA,
+  SDMX_ORIGIN,
   sdmxText,
   structureDocument,
   structureResponse,
@@ -55,7 +52,25 @@ afterEach(() => {
 type Output = Awaited<ReturnType<typeof describeIndicatorTool.handler>>;
 
 const STRUCTURE_NOTICE =
-  "Breakdown codes and units are unavailable from the ILOSTAT structure service; ilostat_list_reference topic classifications lists every breakdown code, and the label's parenthetical — (%) or (thousands) — gives the unit.";
+  'Breakdown codes are unavailable from the ILOSTAT structure service; ilostat_list_reference topic classifications lists every breakdown code.';
+
+/** UNE_DEAP_SEX_AGE_RT's unit labelled from its SDMX structure. */
+const PERCENT_UNIT = {
+  measure: 'PT',
+  measure_label: 'Percentage',
+  type: 'RT',
+  type_label: 'Rate',
+  multiplier: 0,
+  multiplier_label: 'Units',
+};
+/** The same unit as the catalog's ToC row labels it, when the structure is unavailable: no type label. */
+const PERCENT_UNIT_FROM_TOC = {
+  measure: 'PT',
+  measure_label: '%',
+  type: 'RT',
+  multiplier: 0,
+  multiplier_label: 'units',
+};
 
 const UNE_DEFINITION =
   'With the aim of promoting international comparability, statistics presented on ILOSTAT are based on standard international definitions wherever feasible and may differ from official national figures. The unemployment rate conveys the number of persons who are unemployed as a percent of the labour force. For more information, refer to the Labour Force Statistics (LFS and STLFS) database description (https://ilostat.ilo.org/methods/concepts-and-definitions/description-labour-force-statistics/).';
@@ -93,8 +108,11 @@ function contentText(result: Awaited<ReturnType<typeof runToolContract>>): strin
   return result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
 }
 
+/** Every SDMX request a call sent, as paths: structure requests only, never `/rest/data/`. */
 const sdmxCalls = (wired: ReturnType<typeof wireServices>) =>
-  callUrls(wired.http, (request) => isStructureRequest(request) || isProbeRequest(request));
+  callUrls(wired.http, (request) => new URL(request.url).origin === SDMX_ORIGIN).map(
+    (url) => url.pathname,
+  );
 
 /** The recorded catalog plus `extra` more indicators sharing UNE_DEAP_SEX_AGE_RT's measure, which already has one other. */
 function catalogWithRelated(extra: number): CatalogFixture {
@@ -120,9 +138,10 @@ function catalogWithoutIloEdition(): CatalogFixture {
 }
 
 describe('hits', () => {
-  it('describes a dataset from the catalog, the SDMX structure, and the unit probe', async () => {
-    wireServices();
+  it('describes a dataset from the catalog and one SDMX structure request, the unit labelled from it', async () => {
+    const wired = wireServices();
     const { result, enrichment } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
+    expect(sdmxCalls(wired)).toEqual(['/rest/dataflow/ILO/DF_UNE_DEAP_SEX_AGE_RT/latest']);
     expect(result).toEqual({
       found: true,
       dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
@@ -173,14 +192,7 @@ describe('hits', () => {
         },
       },
       default_slice: { sex: 'SEX_T', classif1: 'AGE_YTHADULT_YGE15' },
-      unit: {
-        measure: 'PT',
-        measure_label: 'Percentage',
-        type: 'RT',
-        type_label: 'Rate',
-        multiplier: 0,
-        multiplier_label: 'Units',
-      },
+      unit: PERCENT_UNIT,
       has_aggregates: true,
       ref_areas: { countries: ['ABW', 'KEN', 'USA'], aggregates: ['X01', 'X06'], count: 5 },
       basis_rule: {
@@ -214,12 +226,13 @@ describe('hits', () => {
     expect(result.datasets).toHaveLength(3);
   });
 
-  it('describes every frequency of a bare indicator code, with has_aggregates from any', async () => {
+  it('describes every frequency of a bare indicator code, with has_aggregates from any and the annual unit', async () => {
     wireServices();
     const { result } = await describeId('UNE_DEAP_SEX_AGE_RT');
     expect(result.found).toBe(true);
     expect(result).not.toHaveProperty('dataset_id');
     expect(result.has_aggregates).toBe(true);
+    expect(result.unit).toEqual(PERCENT_UNIT);
     expect(result.datasets?.map((dataset) => dataset.dataset_id)).toEqual([
       'UNE_DEAP_SEX_AGE_RT_A',
       'UNE_DEAP_SEX_AGE_RT_Q',
@@ -571,34 +584,51 @@ describe('degraded structure', () => {
     structure_status: 'unavailable',
   };
 
-  it('SDMX has no dataflow: structure_status unavailable, catalog fields kept, notice', async () => {
+  it('SDMX has no dataflow: structure_status unavailable, catalog fields and unit kept, notice on breakdowns', async () => {
     wireServices();
     const { result, enrichment } = await describeId('POP_2POP_SEX_NB_A');
     expect(result).toMatchObject(catalogFields);
-    for (const key of ['breakdowns', 'default_slice', 'ref_areas', 'unit']) {
+    for (const key of ['breakdowns', 'default_slice', 'ref_areas']) {
       expect(result).not.toHaveProperty(key);
     }
+    expect(result.unit).toEqual({
+      measure: 'PS',
+      measure_label: 'persons',
+      type: 'NB',
+      multiplier: 3,
+      multiplier_label: 'thousands',
+    });
     expect(result.datasets).toHaveLength(1);
     expect(result.basis_rule?.projection_after_year).toBe(2023);
     expect(enrichment).toEqual({ truncated: false, shown: 0, cap: 20, notice: STRUCTURE_NOTICE });
+    expect(render(result)).toContain('Unit: persons (PS) · type NB · multiplier 3 (thousands)');
   });
 
-  it('SDMX unreachable: degrades the same way, and is asked again on the next call', async () => {
+  it("SDMX unreachable: the unit keeps the catalog's labels, the next minute degrades without asking, and SDMX is asked again after it", async () => {
     let down = true;
+    let current = FIXED_NOW.getTime();
     const unreachable: FetchMockRoute = {
       match: (request) => down && isStructureRequest(request),
       respond: () => Promise.reject(new TypeError('fetch failed')),
     };
-    const wired = wireServices({ routes: [unreachable] });
+    const wired = wireServices({ routes: [unreachable], now: () => new Date(current) });
+    const structureCalls = () => callUrls(wired.http, (request) => isStructureRequest(request));
     const degraded = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     expect(degraded.result.structure_status).toBe('unavailable');
+    expect(degraded.result.unit).toEqual(PERCENT_UNIT_FROM_TOC);
     expect(degraded.enrichment.notice).toBe(STRUCTURE_NOTICE);
 
     down = false;
+    const remembered = await describeId('UNE_DEAP_SEX_AGE_RT_A');
+    expect(remembered.result.structure_status).toBe('unavailable');
+    expect(structureCalls()).toHaveLength(1);
+
+    current += 60_000;
     const recovered = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     expect(recovered.result.structure_status).toBe('complete');
+    expect(recovered.result.unit).toEqual(PERCENT_UNIT);
     expect(recovered.enrichment).toEqual({ truncated: false, shown: 1, cap: 20 });
-    expect(callUrls(wired.http, (request) => isStructureRequest(request))).toHaveLength(2);
+    expect(structureCalls()).toHaveLength(2);
   });
 
   it('SDMX throttling (429) degrades rather than failing the describe', async () => {
@@ -607,34 +637,48 @@ describe('degraded structure', () => {
     });
     const { result, enrichment } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     expect(result.structure_status).toBe('unavailable');
+    expect(result.unit).toEqual(PERCENT_UNIT_FROM_TOC);
     expect(enrichment.notice).toBe(STRUCTURE_NOTICE);
   });
 
-  it('unit unresolved after three areas: structure complete, unit absent, notice', async () => {
+  it('SDMX refusing every data request (403) leaves describe whole: it sends none', async () => {
     const wired = wireServices({
       routes: [
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () => sdmxText(SDMX_404_NO_DATA, 404)),
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'KEN....', () => sdmxText(SDMX_500_ORA, 500)),
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'USA....', () => sdmxText(SDMX_404_NO_DATA, 404)),
+        {
+          match: (request) => new URL(request.url).pathname.startsWith('/rest/data/'),
+          respond: () => sdmxText('403 - Forbidden: Access is denied.', 403),
+        },
       ],
     });
+    const { result, enrichment } = await describeId('EMP_TEMP_SEX_INS_DSB_NB_A');
+    expect(result.structure_status).toBe('complete');
+    expect(result.unit).toEqual({
+      measure: 'PS',
+      measure_label: 'Persons',
+      type: 'NB',
+      type_label: 'Number',
+      multiplier: 3,
+      multiplier_label: 'Thousands',
+    });
+    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 20 });
+    expect(sdmxCalls(wired)).toEqual(['/rest/dataflow/ILO/DF_EMP_TEMP_SEX_INS_DSB_NB/latest']);
+  });
+
+  it('a ToC row without unit fields: unit absent, with no notice while the structure is complete', async () => {
+    const fixture = loadCatalogFixture();
+    for (const row of fixture.indicatorToc) {
+      if (row.indicator !== 'UNE_DEAP_SEX_AGE_RT') continue;
+      for (const key of ['unit_measure', 'unit_measure.label', 'unit_mult', 'unit_mult.label']) {
+        delete row[key];
+      }
+    }
+    wireServices({ fixture });
     const { result, enrichment } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     expect(result.structure_status).toBe('complete');
     expect(result.breakdowns?.classif1?.type).toBe('AGE');
     expect(result).not.toHaveProperty('unit');
-    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 20, notice: STRUCTURE_NOTICE });
-    expect(callUrls(wired.http, (request) => isProbeRequest(request))).toHaveLength(3);
+    expect(enrichment).toEqual({ truncated: false, shown: 1, cap: 20 });
     expect(render(result)).toContain('Unit: not resolved');
-  });
-
-  it("a probe key the SDMX host rejects (422) is this server's bug and fails InternalError", async () => {
-    wireServices({
-      routes: [
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () => sdmxText(SDMX_422_SHORT_KEY, 422)),
-      ],
-    });
-    const error = await failure('UNE_DEAP_SEX_AGE_RT_A');
-    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
   });
 });
 
@@ -675,7 +719,7 @@ describe('format()', () => {
     for (const line of [
       '## UNE_DEAP_SEX_AGE_RT_A — Unemployment rate by sex and age (%)',
       'Indicator: UNE_DEAP_SEX_AGE_RT',
-      'Database: Labour Force Statistics (LFS) (LFS)',
+      'Database: Labour Force Statistics (LFS)',
       'Subject: Unemployment and labour underutilization (LUU)',
       'Measure: Unemployment rate (previous ILO definition - ICLS13) (UNE_DEAP_RT)',
       'Unit: Percentage (PT) · type Rate (RT) · multiplier 0 (Units)',
@@ -706,6 +750,27 @@ describe('format()', () => {
     }
     // in the SDMX constraint, not the classif1 dictionary
     expect(text).not.toContain('AGE_AGGREGATE_Y25-54');
+  });
+
+  it('appends the database code to a database label that does not end with it, on both surfaces', async () => {
+    const fixture = loadCatalogFixture();
+    for (const row of fixture.indicatorToc) {
+      if (row.indicator === 'UNE_DEAP_SEX_AGE_RT')
+        row['database.label'] = 'Labour Force Statistics';
+    }
+    wireServices({ fixture });
+    const result = await runToolContract(describeIndicatorTool, {
+      dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
+    });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as Output).database).toEqual({
+      code: 'LFS',
+      label: 'Labour Force Statistics',
+    });
+    const lines = result.content
+      .flatMap((block) => (block.type === 'text' ? block.text.split('\n') : []))
+      .filter((line) => line.startsWith('Database:'));
+    expect(lines).toEqual(['Database: Labour Force Statistics (LFS)']);
   });
 
   it('renders a two-breakdown dataset and a no-total default slice', async () => {
@@ -743,12 +808,7 @@ describe('format()', () => {
     );
     if (areaKey) areaKey.values = ['C00', ...countries.slice(1), 'X06', 'X99'];
     wireServices({
-      routes: [
-        structureRoute('UNE_DEAP_SEX_AGE_RT', () => structureResponse(document)),
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'C00....', () => sdmxText(SDMX_404_NO_DATA, 404)),
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'C01....', () => sdmxText(SDMX_404_NO_DATA, 404)),
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'C02....', () => sdmxText(SDMX_404_NO_DATA, 404)),
-      ],
+      routes: [structureRoute('UNE_DEAP_SEX_AGE_RT', () => structureResponse(document))],
     });
     const { result } = await describeId('UNE_DEAP_SEX_AGE_RT_A');
     expect(result.ref_areas).toEqual({
@@ -798,6 +858,24 @@ describe('format()', () => {
     expect(variantLine).toContain(' · 1 area · ');
     expect(variantLine).toContain(' · updated 24/09/2026 ## update · ');
     expect(lines.some((line) => line.startsWith('## update'))).toBe(false);
+  });
+
+  it("flattens line breaks in the catalog's unit labels on content[]; structuredContent keeps them verbatim", async () => {
+    const fixture = loadCatalogFixture();
+    const row = tocRow(fixture, 'POP_2POP_SEX_NB_A');
+    row['unit_measure.label'] = 'persons\n## injected unit';
+    row['unit_mult.label'] = 'thousands\r\n## injected multiplier';
+    wireServices({ fixture });
+    const { result } = await describeId('POP_2POP_SEX_NB_A');
+    expect(result.unit).toMatchObject({
+      measure_label: 'persons\n## injected unit',
+      multiplier_label: 'thousands\r\n## injected multiplier',
+    });
+    const lines = render(result).split(/\r\n|[\r\n]/);
+    expect(lines).toContain(
+      'Unit: persons ## injected unit (PS) · type NB · multiplier 3 (thousands ## injected multiplier)',
+    );
+    expect(lines.some((line) => line.startsWith('## injected'))).toBe(false);
   });
 
   it('flattens every line terminator in upstream codes on content[]; structuredContent keeps them verbatim', async () => {

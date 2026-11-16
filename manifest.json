@@ -47,7 +47,7 @@
     },
     "ILOSTAT_MAX_ROWS": {
       "title": "Row ceiling per query",
-      "description": "Ceiling on the rows one query may return or stage (1,000–1,000,000).",
+      "description": "Ceiling on the rows one query reads or stages (1,000–1,000,000); a filtered result past it is paged but not staged, and a page reaching past it is refused.",
       "type": "number",
       "required": false,
       "default": 500000,
@@ -55,8 +55,8 @@
       "max": 1000000
     },
     "ILOSTAT_PREVIEW_CHARS": {
-      "title": "Inline preview budget (characters)",
-      "description": "Inline preview budget in serialized characters; a larger query or comparison result is staged as a dataframe, and a dataframe SQL result returns only the leading rows that fit.",
+      "title": "Dataframe staging trigger (characters)",
+      "description": "Staging trigger in serialized characters: a query or comparison whose first page finds its result past it is staged as a dataframe; their pages are bounded by limit, not by it. A dataframe SQL result returns only the leading rows that fit.",
       "type": "number",
       "required": false,
       "default": 40000,

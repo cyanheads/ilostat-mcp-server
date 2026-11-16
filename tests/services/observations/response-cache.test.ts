@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for the process-wide response cache: least-recently-used
  * eviction (a read or a re-store refreshes recency), TTL expiry exactly at the
- * TTL, a TTL of 0 disabling the cache, the 5,000-row storage ceiling, and the
- * total-row budget across entries.
+ * TTL, a TTL of 0 disabling the cache, the 5,000-row storage ceiling, the
+ * total-row budget across entries, and the fallback records kept beside the rows
+ * under the same TTL and entry bound.
  * @module tests/services/observations/response-cache.test
  */
 
@@ -148,5 +149,60 @@ describe('ResponseCache', () => {
     const { cache: c } = cache({ ttlMs: 60_000 });
     c.set('empty', []);
     expect(c.get('empty')).toEqual([]);
+  });
+});
+
+describe('ResponseCache fallbacks', () => {
+  it('remembers a fallback for its URL alone, apart from the rows', () => {
+    const { cache: c } = cache({ ttlMs: 60_000 });
+    expect(c.fellBack('a')).toBe(false);
+    c.rememberFallback('a');
+    expect(c.fellBack('a')).toBe(true);
+    expect(c.fellBack('b')).toBe(false);
+    // a fallback record holds no rows, and stored rows record no fallback
+    expect(c.get('a')).toBeUndefined();
+    c.set('b', [row('2024')]);
+    expect(c.fellBack('b')).toBe(false);
+  });
+
+  it('forgets a fallback once its age reaches the TTL, dated from its last record', () => {
+    const { cache: c, advance } = cache({ ttlMs: 1_000 });
+    c.rememberFallback('a');
+    advance(600);
+    expect(c.fellBack('a')).toBe(true);
+    advance(399);
+    expect(c.fellBack('a')).toBe(true);
+    advance(1);
+    expect(c.fellBack('a')).toBe(false);
+    c.rememberFallback('a');
+    advance(999);
+    expect(c.fellBack('a')).toBe(true);
+  });
+
+  it('remembers no fallback when the TTL is 0', () => {
+    const { cache: c } = cache({ ttlMs: 0 });
+    c.rememberFallback('a');
+    expect(c.fellBack('a')).toBe(false);
+  });
+
+  it('keeps at most maxEntries fallbacks, evicting the least recently used', () => {
+    const { cache: c } = cache({ ttlMs: 60_000, maxEntries: 2 });
+    c.rememberFallback('a');
+    c.rememberFallback('b');
+    expect(c.fellBack('a')).toBe(true);
+    c.rememberFallback('c');
+    expect(c.fellBack('b')).toBe(false);
+    expect(c.fellBack('a')).toBe(true);
+    expect(c.fellBack('c')).toBe(true);
+  });
+
+  it('counts no fallback against the row budget', () => {
+    const { cache: c } = cache({ ttlMs: 60_000, rowBudget: 4, maxEntries: 2 });
+    c.set('rows', rows(4));
+    c.rememberFallback('x');
+    c.rememberFallback('y');
+    expect(c.get('rows')).toHaveLength(4);
+    expect(c.fellBack('x')).toBe(true);
+    expect(c.fellBack('y')).toBe(true);
   });
 });

@@ -1,24 +1,14 @@
 /**
  * @fileoverview Client for sdmx.ilo.org/rest — structure only: a dataflow's
  * structure with the codes it uses (`references=all&detail=referencepartial`,
- * SDMX-JSON), and a one-observation data probe (SDMX-CSV) whose attributes carry
- * the units the structure declares without values. Some non-2xx statuses are
- * results here: 404 means no dataflow or no data for the key, and a 500 carrying
- * an Oracle `ORA-` message means the key names an unknown member — both read as
- * "nothing here", and the Oracle text is never relayed. A 422 (wrong key arity)
- * is a bug in this server. Every path segment — the indicator from the catalog,
- * the version and area codes from a structure document — is checked against the
- * SDMX identifier grammar before a URL is built, so upstream data can never steer
- * a request off its endpoint.
+ * SDMX-JSON). A 404 is a result here: SDMX has no such dataflow. The indicator
+ * code, which comes from the catalog, is checked against the SDMX identifier
+ * grammar before the URL is built, so upstream data can never steer a request
+ * off its endpoint.
  * @module services/sdmx/sdmx-client
  */
 
-import {
-  internalError,
-  serializationError,
-  serviceUnavailable,
-} from '@cyanheads/mcp-ts-core/errors';
-import { parseCsvObjects } from '@/services/csv/parse-csv.js';
+import { serializationError } from '@cyanheads/mcp-ts-core/errors';
 import {
   type PacingOptions,
   type UpstreamClientOptions,
@@ -29,7 +19,6 @@ import {
 const BASE_URL = 'https://sdmx.ilo.org/rest';
 const SERVICE = 'ILOSTAT SDMX API (sdmx.ilo.org)';
 const STRUCTURE_ACCEPT = 'application/vnd.sdmx.structure+json;version=1.0';
-const DATA_CSV_ACCEPT = 'application/vnd.sdmx.data+csv;version=1.0.0';
 
 /**
  * Structure documents are 50–130 KB and slow to build, so SDMX runs one request at
@@ -45,32 +34,13 @@ const SDMX_PACING: PacingOptions = {
 
 const MIB = 1024 * 1024;
 
-/**
- * Body caps, far above the live responses (2026-09): structure documents run
- * 127–130 KB, and a probe answers one row per series of one area, 3–13 KB.
- */
+/** Body cap, far above the live responses (2026-09): structure documents run 127–130 KB. */
 const STRUCTURE_MAX_BYTES = 16 * MIB;
-const PROBE_MAX_BYTES = MIB;
 
-/** SDMX identifiers: an indicator or area code, and a version such as `1.0`. */
+/** An SDMX identifier; nothing that matches needs percent-encoding. */
 const CODE = /^[A-Z0-9_]+$/;
-const VERSION = /^\d+(\.\d+)*$/;
-/** A series key: codes or empty positions, `.`-separated (`USA....`). */
-const SERIES_KEY = /^[A-Z0-9_]*(\.[A-Z0-9_]*)*$/;
 
-/**
- * Refuses a path segment outside the SDMX identifier grammar. The segments come
- * from upstream data, never a caller, and nothing that passes needs percent-encoding.
- */
-function checkSegment(value: string, pattern: RegExp, what: string): void {
-  if (!pattern.test(value)) {
-    throw serializationError(
-      `ILOSTAT sent an SDMX ${what} this server will not put in a URL; no request was made.`,
-    );
-  }
-}
-
-/** Every SDMX call here is tool-initiated (describe), so each caps its queue wait. */
+/** The SDMX call is tool-initiated (describe, query, compare), so it caps its queue wait. */
 export class SdmxClient {
   private readonly http: UpstreamHttp;
 
@@ -84,7 +54,12 @@ export class SdmxClient {
 
   /** The dataflow `DF_{indicator}` with its structures and used codes; `undefined` when SDMX has no such dataflow. */
   async getDataflowStructure(indicator: string, scope: UpstreamScope): Promise<unknown> {
-    checkSegment(indicator, CODE, 'indicator code');
+    // The code comes from upstream data, never a caller; one outside the grammar is refused unsent.
+    if (!CODE.test(indicator)) {
+      throw serializationError(
+        'ILOSTAT sent an SDMX indicator code this server will not put in a URL; no request was made.',
+      );
+    }
     const url = new URL(`${BASE_URL}/dataflow/ILO/DF_${indicator}/latest`);
     url.searchParams.set('references', 'all');
     url.searchParams.set('detail', 'referencepartial');
@@ -109,45 +84,6 @@ export class SdmxClient {
               },
             );
           }
-        },
-      },
-      scope,
-    );
-  }
-
-  /**
-   * The first series row of `…/data/ILO,DF_{indicator},{version}/{key}?lastNObservations=1`,
-   * keyed by CSV column; `undefined` when there is no data for the key.
-   */
-  async probeSeries(
-    indicator: string,
-    version: string,
-    key: string,
-    scope: UpstreamScope,
-  ): Promise<Record<string, string> | undefined> {
-    checkSegment(indicator, CODE, 'indicator code');
-    checkSegment(version, VERSION, 'dataflow version');
-    checkSegment(key, SERIES_KEY, 'series key');
-    const url = new URL(`${BASE_URL}/data/ILO,DF_${indicator},${version}/${key}`);
-    url.searchParams.set('lastNObservations', '1');
-    return await this.http.request(
-      {
-        url: url.toString(),
-        operation: 'sdmx unit probe',
-        accept: DATA_CSV_ACCEPT,
-        acceptStatuses: [200, 404, 422, 500],
-        bounded: true,
-        maxBytes: PROBE_MAX_BYTES,
-        interpret: ({ status, body }) => {
-          if (status === 200) return parseCsvObjects(body)[0];
-          if (status === 404) return;
-          if (status === 500 && body.trimStart().startsWith('ORA-')) return;
-          if (status === 422) {
-            throw internalError(
-              `${SERVICE} rejected the series key built for ${indicator} (HTTP 422).`,
-            );
-          }
-          throw serviceUnavailable(`${SERVICE} failed with HTTP ${status}.`);
         },
       },
       scope,

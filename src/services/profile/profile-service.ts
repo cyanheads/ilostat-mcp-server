@@ -2,9 +2,9 @@
  * @fileoverview Headline labour-market profile for one reference area. Three
  * `/data/ref_area` calls in parallel — for a country, the reported full history
  * of the age-broken indicators (`classif1` limited to the headline codes) and of
- * the sex-only ones, and for every area the latest modelled values bounded by the
- * modelled cutoff — each slice's latest value picked locally, so one cached
- * response set per area serves every sex. The reported and
+ * the sex-only ones, and for every area the modelled values from five years
+ * before the modelled cutoff through it — each slice's latest value picked
+ * locally, so one cached response set per area serves every sex. The reported and
  * modelled slots stay separate: a missing reported value is never filled from
  * the model. `/data/ref_area` takes indicator codes without the frequency
  * suffix; a suffixed dataset ID silently returns an empty array.
@@ -19,7 +19,7 @@ import type { CatalogService } from '@/services/catalog/catalog-service.js';
 import { periodYear } from '@/services/catalog/codes.js';
 import type { CatalogSnapshot, Dataset, RefArea } from '@/services/catalog/types.js';
 import type { ResponseCache } from '@/services/observations/response-cache.js';
-import type { RplumberClient } from '@/services/rplumber/rplumber-client.js';
+import type { RefAreaDataParams, RplumberClient } from '@/services/rplumber/rplumber-client.js';
 import type { RawObservation } from '@/services/rplumber/types.js';
 
 export type ProfileSex = 'SEX_T' | 'SEX_M' | 'SEX_F';
@@ -104,6 +104,15 @@ const HEADLINES: readonly Headline[] = [
     unit: '%',
   },
 ];
+
+/**
+ * Years before the modelled cutoff the modelled call reaches back (`timefrom`).
+ * Each slice takes its own latest non-projected year from that window, since
+ * `latestyear` would give every slice of an indicator its newest year and drop a
+ * slice that ends earlier (working poverty by sex ends a year before its total).
+ * A slice whose newest row predates the window reports no modelled value.
+ */
+const MODELLED_WINDOW_YEARS = 5;
 
 /** A headline whose datasets are in the current catalog. */
 interface ActiveHeadline extends Headline {
@@ -210,10 +219,7 @@ export class ProfileService {
     const reportedCall = (slices: ActiveHeadline[], classif1?: string[]) => {
       const indicators = indicatorsOf(slices.map((h) => h.reportedDataset));
       return indicators.length > 0
-        ? this.fetch(
-            { area: area.code, indicators, latestOnly: false, ...(classif1 ? { classif1 } : {}) },
-            ctx,
-          )
+        ? this.fetch({ area: area.code, indicators, ...(classif1 ? { classif1 } : {}) }, ctx)
         : Promise.resolve([]);
     };
     const [agedRows, plainRows, modelledRows] = await Promise.all([
@@ -223,7 +229,7 @@ export class ProfileService {
         {
           area: area.code,
           indicators: indicatorsOf(headlines.map((h) => h.modelledDataset)),
-          latestOnly: true,
+          timeFrom: modelledCutoffYear - MODELLED_WINDOW_YEARS,
           timeTo: modelledCutoffYear,
         },
         ctx,
@@ -297,16 +303,7 @@ export class ProfileService {
     return active;
   }
 
-  private async fetch(
-    params: {
-      area: string;
-      classif1?: string[];
-      indicators: string[];
-      latestOnly: boolean;
-      timeTo?: number;
-    },
-    ctx: Context,
-  ): Promise<readonly RawObservation[]> {
+  private async fetch(params: RefAreaDataParams, ctx: Context): Promise<readonly RawObservation[]> {
     const url = this.options.rplumber.refAreaDataUrl(params);
     const cached = this.options.cache.get(url);
     if (cached) return cached;

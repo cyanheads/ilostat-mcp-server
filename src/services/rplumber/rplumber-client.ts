@@ -65,7 +65,7 @@ const ENDPOINT_PARAMS = {
     'type',
     'format',
   ],
-  '/data/ref_area': ['id', 'indicator', 'classif1', 'timeto', 'latestyear', 'format'],
+  '/data/ref_area': ['id', 'indicator', 'classif1', 'timefrom', 'timeto', 'format'],
 } as const satisfies Record<string, readonly string[]>;
 
 type Endpoint = keyof typeof ENDPOINT_PARAMS;
@@ -122,7 +122,8 @@ export interface RefAreaDataParams {
   classif1?: readonly string[];
   /** Indicator codes without the frequency suffix — a suffixed dataset ID silently returns `[]`. */
   indicators: readonly string[];
-  latestOnly: boolean;
+  /** Upstream reads the year only. */
+  timeFrom?: number;
   timeTo?: number;
 }
 
@@ -372,8 +373,8 @@ export class RplumberClient {
       id: `${params.area}_A`,
       indicator: params.indicators,
       classif1: params.classif1,
+      timefrom: params.timeFrom?.toString(),
       timeto: params.timeTo?.toString(),
-      latestyear: params.latestOnly ? 'TRUE' : undefined,
       format: '.json',
     });
   }

@@ -12,6 +12,18 @@ export interface CodeLabel {
   label: string;
 }
 
+/** The unit of a dataset's values, which are already in the multiplier's scale. */
+export interface UnitInfo {
+  measure: string;
+  measureLabel?: string;
+  /** Power of ten: 0 units, 3 thousands, 6 millions. */
+  multiplier: number;
+  multiplierLabel?: string;
+  /** `NB` (number) or `RT` (rate). */
+  type: string;
+  typeLabel?: string;
+}
+
 /** One ToC row: an indicator at one frequency (`UNE_DEAP_SEX_AGE_RT_A`). */
 export interface Dataset {
   classification?: string;
@@ -32,6 +44,12 @@ export interface Dataset {
   nRecordsAll: number;
   nRefArea: number;
   subject: CodeLabel;
+  /**
+   * From the row's unit columns, with their labels; the type is the indicator
+   * code's last segment and has no label here. Absent when the row lists no
+   * measure or no whole-number multiplier.
+   */
+  unit?: UnitInfo;
 }
 
 /** Normalized words an indicator is searched on, by match scope. */

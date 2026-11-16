@@ -1,14 +1,14 @@
 /**
- * @fileoverview Minimal RFC 4180 CSV reader for upstream bodies: a leading BOM,
- * quoted fields with doubled quotes and embedded line breaks, and CRLF or LF
- * record ends. One incremental reader serves both whole bodies and streamed
- * ones — a quote, an escaped quote, or a CRLF split across two chunks parses the
- * same as when it arrives whole. Rows come back keyed by the header row, so
- * readers stay header-driven rather than positional. A field is held as slices
- * of the chunks it arrived in and joined once when it ends, so it costs about
- * its own length in memory, and a field past 65,536 characters or a record past
- * 262,144 fails as a serialization error: a stray quote that swallows the rest
- * of a large download stops at the cap instead of exhausting the heap.
+ * @fileoverview Minimal RFC 4180 CSV reader for streamed upstream bodies: a
+ * leading BOM, quoted fields with doubled quotes and embedded line breaks, and
+ * CRLF or LF record ends. The reader is incremental — a quote, an escaped quote,
+ * or a CRLF split across two chunks parses the same as when it arrives whole.
+ * Rows come back keyed by the header row, so readers stay header-driven rather
+ * than positional. A field is held as slices of the chunks it arrived in and
+ * joined once when it ends, so it costs about its own length in memory, and a
+ * field past 65,536 characters or a record past 262,144 fails as a serialization
+ * error: a stray quote that swallows the rest of a large download stops at the
+ * cap instead of exhausting the heap.
  * @module services/csv/parse-csv
  */
 
@@ -129,23 +129,10 @@ class CsvRecordReader {
   }
 }
 
-/** Splits CSV text into records of raw field strings. */
-export function parseCsvRecords(text: string): string[][] {
-  const reader = new CsvRecordReader();
-  return [...reader.push(text), ...reader.end()];
-}
-
 const isBlankRecord = (record: string[]): boolean => record.every((value) => value === '');
 
 function toObject(header: string[], record: string[]): Record<string, string> {
   return Object.fromEntries(header.map((name, index) => [name, record[index] ?? '']));
-}
-
-/** Data rows keyed by the header row. A header-only body yields no rows. */
-export function parseCsvObjects(text: string): Record<string, string>[] {
-  const [header, ...rows] = parseCsvRecords(text);
-  if (!header) return [];
-  return rows.filter((row) => !isBlankRecord(row)).map((row) => toObject(header, row));
 }
 
 /**

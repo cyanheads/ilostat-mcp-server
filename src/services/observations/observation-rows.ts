@@ -10,15 +10,14 @@ import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { type Basis, classifyRow, type ProjectionCutoff } from '@/services/basis/basis.js';
 import type { BasisCounts } from '@/services/canvas-bridge/canvas-bridge.js';
 import { periodFrequency, periodSubperiod, periodYear } from '@/services/catalog/codes.js';
-import type { CatalogSnapshot, Dataset } from '@/services/catalog/types.js';
+import type { CatalogSnapshot, Dataset, UnitInfo } from '@/services/catalog/types.js';
 import type { RawObservation } from '@/services/rplumber/types.js';
-import type { UnitInfo } from '@/services/structure/sdmx-structure.js';
 
 /** A requested dataset with what classifying and labelling its rows needs. */
 export interface ResolvedDataset {
   cutoff: ProjectionCutoff;
   dataset: Dataset;
-  /** Absent when the SDMX unit lookup did not resolve. */
+  /** The catalog's unit, labelled from the SDMX structure when it loaded; absent when the catalog lists none. */
   unit?: UnitInfo;
 }
 
@@ -258,23 +257,34 @@ export function emptyBasisCounts(): BasisCounts {
   return { reported: 0, modelled_estimate: 0, projection: 0 };
 }
 
-/** Running summary over every row read: row count, distinct areas, period bounds, basis counts. */
+/** Running summary over every row read: row count, the areas each dataset has rows for, period bounds, basis counts. */
 export class ObservationSummary {
   readonly basisCounts: BasisCounts = emptyBasisCounts();
   periodMax: string | undefined;
   periodMin: string | undefined;
   rows = 0;
-  private readonly areas = new Set<string>();
+  private readonly areasByDataset = new Map<string, Set<string>>();
 
   add(row: ObservationRow): void {
     this.rows += 1;
-    this.areas.add(row.ref_area);
+    let areas = this.areasByDataset.get(row.dataset_id);
+    if (!areas) {
+      areas = new Set();
+      this.areasByDataset.set(row.dataset_id, areas);
+    }
+    areas.add(row.ref_area);
     this.basisCounts[row.basis] += 1;
     if (this.periodMin === undefined || row.period < this.periodMin) this.periodMin = row.period;
     if (this.periodMax === undefined || row.period > this.periodMax) this.periodMax = row.period;
   }
 
+  /** Distinct reference areas across every dataset. */
   get refAreas(): number {
-    return this.areas.size;
+    return new Set([...this.areasByDataset.values()].flatMap((areas) => [...areas])).size;
+  }
+
+  /** Whether a row read was for `refArea` in `datasetId`. */
+  hasRows(datasetId: string, refArea: string): boolean {
+    return this.areasByDataset.get(datasetId)?.has(refArea) ?? false;
   }
 }

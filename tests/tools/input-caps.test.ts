@@ -3,9 +3,12 @@
  * hard ceilings on the page-size `limit` inputs: each field accepts a value at its
  * cap and rejects one character (or one unit) more as invalid arguments naming the
  * field, before the handler runs, so no upstream call or catalog load is made.
+ * The row-paging inputs of query and compare reject a count below their minimum
+ * or a fraction the same way, and the query `limit` advertises no maximum.
  * @module tests/tools/input-caps.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
@@ -208,3 +211,55 @@ describe.each(LIMIT_CEILINGS)(
     });
   },
 );
+
+/** Row paging: query applies any limit past its page cap as the cap, so it advertises no maximum. */
+describe('ilostat_query_indicator and ilostat_compare_geographies paging inputs', () => {
+  const QUERY = { dataset_ids: [UNE] };
+
+  it('advertises the query limit as an integer of at least 1 with no maximum', () => {
+    const schema = z.toJSONSchema(queryIndicatorTool.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.limit).toMatchObject({ type: 'integer', minimum: 1, default: 50 });
+    expect(schema.properties.limit).not.toHaveProperty('maximum');
+  });
+
+  it.each([5_000, 5_001, 1e20])('accepts a query limit of %d', (limit) => {
+    expect(queryIndicatorTool.input.safeParse({ ...QUERY, limit }).success).toBe(true);
+  });
+
+  it.each([
+    { tool: queryIndicatorTool, args: QUERY, field: 'limit', value: 0, code: 'too_small' },
+    { tool: queryIndicatorTool, args: QUERY, field: 'limit', value: 1.5, code: 'invalid_type' },
+    { tool: queryIndicatorTool, args: QUERY, field: 'offset', value: -1, code: 'too_small' },
+    { tool: queryIndicatorTool, args: QUERY, field: 'offset', value: 1.5, code: 'invalid_type' },
+    { tool: compareGeographiesTool, args: COMPARE, field: 'limit', value: 0, code: 'too_small' },
+    {
+      tool: compareGeographiesTool,
+      args: COMPARE,
+      field: 'limit',
+      value: 1.5,
+      code: 'invalid_type',
+    },
+    { tool: compareGeographiesTool, args: COMPARE, field: 'offset', value: -1, code: 'too_small' },
+    {
+      tool: compareGeographiesTool,
+      args: COMPARE,
+      field: 'offset',
+      value: 1.5,
+      code: 'invalid_type',
+    },
+  ])(
+    '$tool.name rejects $field $value as invalid arguments naming the field',
+    async ({ tool, args, field, value, code }) => {
+      const result = await runToolContract(tool as AnyTool, { ...args, [field]: value } as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: { reason: 'invalid_arguments', issues: [{ code, path: [field] }] },
+        },
+      });
+    },
+  );
+});

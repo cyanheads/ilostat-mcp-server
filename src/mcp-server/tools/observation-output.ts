@@ -2,17 +2,18 @@
  * @fileoverview Output schemas and renderers shared by the observation tools
  * (`ilostat_query_indicator`, `ilostat_compare_geographies`): the per-dataset
  * meta block — label, frequency, database, last update, aggregates, the
- * projection cutoff, and the unit — plus basis counts, the staged-dataframe
- * handle with the dataframes its staging evicted, and the area-group echo of the
- * applied filters.
+ * projection cutoff, and the unit, whose rendering the describe tools share —
+ * plus basis counts, the staged-dataframe handle with the dataframes its staging
+ * evicted, and the area-group echo of the applied filters.
  * @module mcp-server/tools/observation-output
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { FREQUENCY_NAMES } from '@/mcp-server/tools/tool-helpers.js';
+import { FREQUENCY_NAMES, labelWithCode } from '@/mcp-server/tools/tool-helpers.js';
 import { BASES } from '@/services/basis/basis.js';
 import { evictionNotice, type StagedTable } from '@/services/canvas-bridge/canvas-bridge.js';
 import { inlineText } from '@/services/catalog/text.js';
+import type { UnitInfo } from '@/services/catalog/types.js';
 import type { ResolvedDataset } from '@/services/observations/observation-rows.js';
 import type { AreaGroupEcho } from '@/services/observations/observation-service.js';
 
@@ -21,13 +22,18 @@ const UnitSchema = z
     measure: z.string().describe('Unit code (PT percent, PS persons, LC local currency, …).'),
     measure_label: z.string().optional().describe('Unit label.'),
     type: z.string().describe('Unit type code (RT rate, NB number, …).'),
-    type_label: z.string().optional().describe('Unit type label.'),
+    type_label: z
+      .string()
+      .optional()
+      .describe("Unit type label; absent when ILOSTAT's structure service could not be read."),
     multiplier: z
       .number()
       .describe('Power of ten values are expressed in: 0 units, 3 thousands, 6 millions.'),
     multiplier_label: z.string().optional().describe('Multiplier label.'),
   })
-  .describe('Unit of the values, already in the multiplier scale; absent when unresolved.');
+  .describe(
+    "Unit of the values, from ILOSTAT's catalog, already in the multiplier scale; absent only when the catalog lists none.",
+  );
 
 export const DatasetMetaSchema = z
   .object({
@@ -105,6 +111,20 @@ export function stagedDataframe(table: StagedTable): Dataframe {
   };
 }
 
+type Unit = z.infer<typeof UnitSchema>;
+
+/** A unit as the snake_case `unit` output field; the describe tool uses it too. */
+export function unitOutput(unit: UnitInfo): Unit {
+  return {
+    measure: unit.measure,
+    ...(unit.measureLabel ? { measure_label: unit.measureLabel } : {}),
+    type: unit.type,
+    ...(unit.typeLabel ? { type_label: unit.typeLabel } : {}),
+    multiplier: unit.multiplier,
+    ...(unit.multiplierLabel ? { multiplier_label: unit.multiplierLabel } : {}),
+  };
+}
+
 export function datasetMeta({ dataset, cutoff, unit }: ResolvedDataset): DatasetMeta {
   return {
     dataset_id: dataset.id,
@@ -116,30 +136,26 @@ export function datasetMeta({ dataset, cutoff, unit }: ResolvedDataset): Dataset
     projection_after_year: cutoff.projectionAfterYear,
     projection_rule: cutoff.rule,
     ...(cutoff.edition ? { edition: cutoff.edition } : {}),
-    ...(unit
-      ? {
-          unit: {
-            measure: unit.measure,
-            ...(unit.measureLabel ? { measure_label: unit.measureLabel } : {}),
-            type: unit.type,
-            ...(unit.typeLabel ? { type_label: unit.typeLabel } : {}),
-            multiplier: unit.multiplier,
-            ...(unit.multiplierLabel ? { multiplier_label: unit.multiplierLabel } : {}),
-          },
-        }
-      : {}),
+    ...(unit ? { unit: unitOutput(unit) } : {}),
   };
+}
+
+/**
+ * A unit for an inline slot, as every tool prints it:
+ * `Percentage (PT) · type Rate (RT) · multiplier 0 (Units)`, each code alone
+ * where its label is absent (`type RT` while the structure service is down).
+ */
+export function renderUnit(unit: Unit): string {
+  const multiplier = `${unit.multiplier}${unit.multiplier_label ? ` (${unit.multiplier_label})` : ''}`;
+  return `${labelWithCode(unit.measure, unit.measure_label)} · type ${labelWithCode(unit.type, unit.type_label)} · multiplier ${inlineText(multiplier)}`;
 }
 
 /** One dataset as markdown: ID, label, unit, database, update, aggregates, basis rule. */
 export function renderDatasetMeta(meta: DatasetMeta, heading: string): string[] {
-  const unit = meta.unit
-    ? `${meta.unit.measure_label ?? meta.unit.measure} (${meta.unit.measure}) · type ${meta.unit.type_label ?? meta.unit.type} (${meta.unit.type}) · multiplier ${meta.unit.multiplier}${meta.unit.multiplier_label ? ` (${meta.unit.multiplier_label})` : ''}`
-    : 'not resolved';
   return [
     `${heading} ${meta.dataset_id} — ${inlineText(meta.label)}`,
-    `Frequency: ${inlineText(FREQUENCY_NAMES.get(meta.frequency) ?? meta.frequency)} (${inlineText(meta.frequency)}) · Database: ${inlineText(`${meta.database.label} (${meta.database.code})`)} · Updated ${inlineText(meta.last_update)} · Has aggregates: ${meta.has_aggregates}`,
-    `Unit: ${inlineText(unit)}`,
+    `Frequency: ${inlineText(FREQUENCY_NAMES.get(meta.frequency) ?? meta.frequency)} (${inlineText(meta.frequency)}) · Database: ${labelWithCode(meta.database.code, meta.database.label)} · Updated ${inlineText(meta.last_update)} · Has aggregates: ${meta.has_aggregates}`,
+    `Unit: ${meta.unit ? renderUnit(meta.unit) : 'not resolved'}`,
     `Basis rule: ILO modelled rows through ${meta.projection_after_year} are modelled_estimate, later ones projection (rule ${meta.projection_rule}${meta.edition ? `, edition ${meta.edition}` : ''}); every other source is reported.`,
   ];
 }

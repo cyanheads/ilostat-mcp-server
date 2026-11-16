@@ -1,9 +1,9 @@
 /**
  * @fileoverview One left-to-right pass over an `ilostat_dataframe_query` statement,
- * following DuckDB's lexer: the `df_` dataframe names it uses as identifiers and
- * whether it reads. Comments and string literals are skipped, so a name inside
- * one is never a reference, and an apostrophe inside one never opens a literal
- * that hides a later name. The one literal read is the argument of a `query()`
+ * following DuckDB's lexer: the `df_` dataframe names it uses as identifiers.
+ * Comments and string literals are skipped, so a name inside one is never a
+ * reference, and an apostrophe inside one never opens a literal that hides a
+ * later name. The one literal read is the argument of a `query()`
  * call in the one form the canvas gate admits, a single string literal, where a
  * table reference starts (`query ('…')` after a table or `AS` is an alias and
  * its column list): its SQL, unescaped as DuckDB runs it, is scanned as a
@@ -24,27 +24,9 @@ export interface SqlScan {
    * those apart needs a parser.
    */
   dataframes: string[];
-  /** The first token opens a read: `(` or one of {@link READ_KEYWORDS}. */
-  reads: boolean;
 }
 
 const DATAFRAME_NAME = /^df_[A-Za-z0-9]{5}_[A-Za-z0-9]{5}$/i;
-/**
- * Keywords that open a read. `EXPLAIN` is not one: it also wraps writes, and a
- * write naming a missing table is not fixed by staging it.
- */
-const READ_KEYWORDS = new Set([
-  'select',
-  'with',
-  'from',
-  'values',
-  'table',
-  'pivot',
-  'unpivot',
-  'summarize',
-  'describe',
-  'show',
-]);
 /**
  * Keywords after which a table reference starts, so `query (` there is a call:
  * the `FROM` list, every join (`CROSS JOIN`, `LEFT OUTER JOIN`, …), `LATERAL`,
@@ -349,10 +331,8 @@ function queryCallSql(sql: string, from: number): { end: number; text: string } 
  * qualifies it, or after a `,` in a `FROM` list. Anywhere else a `query ('…')`
  * that runs is an alias or CTE name with a column list, and a `query()` that is
  * a call fails to bind (a select-list call) or to parse (`FROM (query(…))`).
- * Returns the index of its first token.
  */
-function scanStatement(sql: string, depth: number, dataframes: Set<string>): number | undefined {
-  let first: number | undefined;
+function scanStatement(sql: string, depth: number, dataframes: Set<string>): void {
   /** Whether the token before this one starts a table reference. */
   let opensTableRef = false;
   /** Whether a `,` at this parenthesis depth continues a `FROM` list; the stack holds the enclosing depths'. */
@@ -360,7 +340,6 @@ function scanStatement(sql: string, depth: number, dataframes: Set<string>): num
   const enclosingFromLists: boolean[] = [];
   let index = nextToken(sql, 0);
   while (index < sql.length) {
-    first ??= index;
     const end = tokenEnd(sql, index, dataframes);
     const call =
       opensTableRef && depth < MAX_QUERY_NESTING && namesQuery(sql, index, end)
@@ -385,19 +364,11 @@ function scanStatement(sql: string, depth: number, dataframes: Set<string>): num
     }
     index = nextToken(sql, call?.end ?? end);
   }
-  return first;
 }
 
-/** Whether the token at `first` opens a read: `(` or one of {@link READ_KEYWORDS}. */
-function opensRead(sql: string, first: number | undefined): boolean {
-  if (first === undefined) return false;
-  if (sql[first] === '(') return true;
-  return READ_KEYWORDS.has(matchAt(IDENTIFIER, sql, first)?.toLowerCase() ?? '');
-}
-
-/** Scans `sql` once for the `df_` identifiers it names, `query()` literals included, and whether it reads. */
+/** Scans `sql` once for the `df_` identifiers it names, `query()` literals included. */
 export function scanSql(sql: string): SqlScan {
   const dataframes = new Set<string>();
-  const first = scanStatement(sql, 0, dataframes);
-  return { dataframes: [...dataframes], reads: opensRead(sql, first) };
+  scanStatement(sql, 0, dataframes);
+  return { dataframes: [...dataframes] };
 }

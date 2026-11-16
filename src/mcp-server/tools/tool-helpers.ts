@@ -4,7 +4,8 @@
  * period, and year inputs, each normalized in the schema before its pattern or
  * enum runs, so every form a description promises is accepted; the guards for
  * ILO-published text in `content[]` — blockquotes for multi-line text, escaped
- * table cells; and the frequency names `content[]` spells out.
+ * table cells; a code beside its label; and the frequency names `content[]`
+ * spells out.
  * @module mcp-server/tools/tool-helpers
  */
 
@@ -197,6 +198,17 @@ export function blockquote(text: string): string {
     .split(LINE_BREAK)
     .map((line) => `> ${line}`)
     .join('\n');
+}
+
+/**
+ * A code beside its label for an inline slot: `label (code)`; the label alone
+ * when it already ends with `(code)` (ILOSTAT's database labels do, as in
+ * `Labour Force Statistics (LFS)`); the code alone when there is no label.
+ * Line breaks are flattened.
+ */
+export function labelWithCode(code: string, label: string | undefined): string {
+  if (!label) return inlineText(code);
+  return inlineText(label.endsWith(`(${code})`) ? label : `${label} (${code})`);
 }
 
 /**

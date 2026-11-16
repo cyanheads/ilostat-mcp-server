@@ -57,6 +57,21 @@ export const SEX_SEARCH_WORDS: ReadonlyMap<string, 'SEX_F' | 'SEX_M'> = new Map<
   ['men', 'SEX_M'],
 ]);
 
+/**
+ * Search words naming an age group, with the band each names (as the
+ * `AGE_YTHADULT` labels give them). The catalog indexes them beside the breakdown
+ * name of every indicator broken down by age, as it does the sex words; no code is
+ * paired with them, since each age classification version codes the band apart.
+ */
+export const AGE_SEARCH_WORDS: ReadonlyMap<string, '15-24' | '25+'> = new Map<
+  string,
+  '15-24' | '25+'
+>([
+  ['youth', '15-24'],
+  ['young', '15-24'],
+  ['adult', '25+'],
+]);
+
 /** Sex input: trim, uppercase, and map `T`/`M`/`F`/`O` and `total`/`both`/`male`/`female`/`other` onto the `SEX_*` codes. */
 export function normalizeSexCode(code: string): string {
   const upper = code.trim().toUpperCase();

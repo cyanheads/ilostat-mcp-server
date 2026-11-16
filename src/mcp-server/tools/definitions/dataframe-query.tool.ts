@@ -133,7 +133,7 @@ function fitToBudget(
 export const dataframeQueryTool = tool('ilostat_dataframe_query', {
   title: 'Query staged ILOSTAT dataframes',
   description:
-    'Run a single-statement SELECT against the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by an earlier register_as. Inspect a dataframe with ilostat_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, file references, file-reading table functions, and functions that read engine settings or name a table from a string are rejected, and system catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied. Breakdown versions overlap (AGE_YTHADULT_*, AGE_AGGREGATE_*, AGE_10YRBANDS_*, AGE_5YRBANDS_*; ECO_SECTOR_*, ECO_AGGREGATE_*, ECO_ISIC4_*, ECO_ISIC3_*), so filter to one version before summing. Optional register_as stores the result as a new dataframe with a fresh TTL.',
+    'Run a single-statement SELECT against the df_<id> dataframes staged by ilostat_query_indicator and ilostat_compare_geographies or stored by an earlier register_as. Inspect a dataframe with ilostat_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, file references, file-reading table functions, and functions that read engine settings or name a table from a string are rejected, and system catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied. Breakdown versions overlap (AGE_YTHADULT_*, AGE_AGGREGATE_*, AGE_10YRBANDS_*, AGE_5YRBANDS_*, AGE_YTHBANDS_*, AGE_CLDVERSION_*; ECO_SECTOR_*, ECO_AGGREGATE_*, ECO_ISIC4_*, ECO_ISIC3_*), so filter to one version before summing. Optional register_as stores the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -248,7 +248,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The DataCanvas DuckDB engine cannot load in this deployment.',
       recovery:
-        'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.',
+        'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies and page through their rows inline with next_offset.',
       thrownBy: 'service',
     },
     {
@@ -306,18 +306,18 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
     {
       reason: 'non_select_statement',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL is not a SELECT.',
+      when: 'The SQL is not a SELECT, or holds a PIVOT with no IN list, which DuckDB cannot run as one SELECT.',
       recovery:
-        'Send only a SELECT statement against df_<id> tables, by the names the producing tools returned.',
+        'Send only a SELECT statement against df_<id> tables, by the names the producing tools returned; give a PIVOT its values as ON <column> IN (...).',
       severity: 'notice',
       thrownBy: 'service',
     },
     {
       reason: 'multi_statement',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL holds more than one statement, or a PIVOT with no IN list, which DuckDB expands into several.',
+      when: 'The SQL holds more than one statement.',
       recovery:
-        'Send exactly one SELECT statement per call and split multi-statement SQL into separate calls; give a PIVOT its values as ON <column> IN (...).',
+        'Send exactly one SELECT statement per call and split multi-statement SQL into separate calls.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -342,7 +342,7 @@ export const dataframeQueryTool = tool('ilostat_dataframe_query', {
     {
       reason: 'plan_operator_not_allowed',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The plan uses an operator outside the read-only allowlist, such as range().',
+      when: 'The plan uses an operator outside the read-only allowlist, such as SHOW TABLES or a range() over a column.',
       recovery:
         'Rewrite with read-only SELECT constructs — joins, aggregates, window functions, CTEs, and unnest() are supported.',
       severity: 'notice',

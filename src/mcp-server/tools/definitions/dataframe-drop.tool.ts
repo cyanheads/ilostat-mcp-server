@@ -41,7 +41,7 @@ export const dataframeDropTool = tool('ilostat_dataframe_drop', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The DataCanvas DuckDB engine cannot load in this deployment.',
       recovery:
-        'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.',
+        'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies and page through their rows inline with next_offset.',
       thrownBy: 'service',
     },
   ],

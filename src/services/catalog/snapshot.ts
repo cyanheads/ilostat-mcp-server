@@ -1,10 +1,10 @@
 /**
  * @fileoverview Builds a {@link CatalogSnapshot} from the raw tables of contents and
- * dictionaries: datasets grouped into indicators, the per-indicator search words (the
- * sex words beside a sex breakdown's name) and the catalog-wide search vocabulary
- * with its words grouped by stem, reference areas
- * with their region and income-group memberships, the area groups `area_group`
- * accepts, and every decoded code vocabulary. Pure.
+ * dictionaries: datasets, each with its unit, grouped into indicators, the
+ * per-indicator search words (the sex and age-group words beside a sex or age
+ * breakdown's name) and the catalog-wide search vocabulary with its words grouped
+ * by stem, reference areas with their region and income-group memberships, the
+ * area groups `area_group` accepts, and every decoded code vocabulary. Pure.
  * @module services/catalog/snapshot
  */
 
@@ -16,6 +16,7 @@ import type {
   RefAreaTocRow,
 } from '@/services/rplumber/types.js';
 import {
+  AGE_SEARCH_WORDS,
   classificationTypeOf,
   FREQUENCY_ORDER,
   normalizeAreaCode,
@@ -36,6 +37,7 @@ import {
   type NoteType,
   type RefArea,
   type SourceCode,
+  type UnitInfo,
 } from './types.js';
 
 /** Everything one catalog load fetches. */
@@ -72,7 +74,28 @@ const byCode = <T extends { code: string }>(a: T, b: T): number => a.code.locale
 const byCodeMap = <T extends { code: string }>(entries: Iterable<T>): Map<string, T> =>
   new Map([...entries].sort(byCode).map((entry) => [entry.code, entry]));
 
+/**
+ * A dataset's unit from its ToC row: the measure and multiplier columns with
+ * their labels, and the type from the indicator code's last segment (`NB`, `RT`),
+ * the code SDMX's unit-type codelist uses.
+ */
+function unitOf(row: IndicatorTocRow): UnitInfo | undefined {
+  const measure = row.unit_measure;
+  const multiplier = row.unit_mult ?? '';
+  if (!measure || !/^\d+$/.test(multiplier)) return;
+  const measureLabel = row['unit_measure.label'];
+  const multiplierLabel = row['unit_mult.label'];
+  return {
+    measure,
+    ...(measureLabel ? { measureLabel } : {}),
+    type: row.indicator.slice(row.indicator.lastIndexOf('_') + 1),
+    multiplier: Number(multiplier),
+    ...(multiplierLabel ? { multiplierLabel } : {}),
+  };
+}
+
 function toDataset(row: IndicatorTocRow): Dataset {
+  const unit = unitOf(row);
   return {
     id: row.id,
     indicator: row.indicator,
@@ -89,6 +112,7 @@ function toDataset(row: IndicatorTocRow): Dataset {
     hasAggregates: row['with.region'] === 'Y',
     subject: { code: row.subject, label: row['subject.label'] },
     database: { code: row.database, label: row['database.label'] },
+    ...(unit ? { unit } : {}),
   };
 }
 
@@ -108,6 +132,8 @@ function breakdownNames(
 
 /** The sex words, indexed beside the breakdown name of an indicator broken down by sex. */
 const SEX_WORDS = [...SEX_SEARCH_WORDS.keys()].join(' ');
+/** The age-group words, indexed beside the breakdown name of an indicator broken down by age. */
+const AGE_WORDS = [...AGE_SEARCH_WORDS.keys()].join(' ');
 
 function buildIndicators(
   toc: IndicatorTocRow[],
@@ -135,6 +161,7 @@ function buildIndicators(
       first.database,
       breakdowns.join(' '),
       types.includes('SEX') ? SEX_WORDS : undefined,
+      types.includes('AGE') ? AGE_WORDS : undefined,
       code,
     );
     indicators.push({

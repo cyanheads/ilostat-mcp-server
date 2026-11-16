@@ -1,19 +1,23 @@
 /**
  * @fileoverview Tests for the DataCanvas adapter on a real in-memory DuckDB
- * canvas: `routeRows` on its four outcomes with the character and row
- * boundaries hit exactly, the `canvas_failed` preview when acquiring, appending,
- * or recording provenance fails (and a source failure that must not degrade),
- * the `df-meta` provenance record and its expiry, a `register_as` dataframe
- * recording its SQL and `derived_from` and inheriting its parents' datasets,
- * a parent read inside a `query()` literal in each form the real gate admits and
- * at depths 1, 2, and 4 (depth 5 refused), no parent from a staged name in a
- * literal DuckDB never runs (a table aliased `query` and its column list among
- * them), `missing_table` naming an unstaged
- * one whatever the statement opens with, the per-tenant canvas and its re-mint,
- * the lazy expiry sweep, the rewrap of engine rejections (the gate's own
- * recovery kept on a refusal naming `current_schema`), `initCanvasBridge` (the `ILOSTAT_PREVIEW_CHARS` budget it
- * carries), the per-call row cap from `CANVAS_DEFAULT_ROW_LIMIT`, and the
- * failed-staging disclosure on both producers and both consumption paths.
+ * canvas: `routeRows` paging by row count on every path, with the page, read
+ * bound, row ceiling, and staging-trigger boundaries hit exactly, the
+ * `canvas_failed` page when acquiring, appending, or recording provenance fails
+ * (and a source failure or a cancellation at any of those steps, which must not
+ * degrade), the `df-meta` provenance record
+ * and its expiry, a `register_as` dataframe recording its SQL and `derived_from`
+ * and inheriting its parents' datasets, a parent read inside a `query()` literal
+ * in each form the real gate admits and at depths 1, 2, and 4 (depth 5 refused),
+ * no parent from a staged name in a literal DuckDB never runs (a table aliased
+ * `query` and its column list among them), `missing_table` naming an unstaged
+ * one whatever the statement opens with, the per-tenant canvas and its re-mint
+ * (calls racing a dead id, a cancelled holder, a refused id write, the purge
+ * before the new id is stored, a bare id an earlier bridge stored), the lazy
+ * expiry sweep, the rewrap of engine rejections (the gate's own recovery kept on
+ * a refusal naming `current_schema`), `initCanvasBridge` (the
+ * `ILOSTAT_PREVIEW_CHARS` budget it carries), the per-call row cap from
+ * `CANVAS_DEFAULT_ROW_LIMIT`, and the failed-staging disclosure on both
+ * producers and both consumption paths.
  * @module tests/services/canvas-bridge/canvas-bridge.test
  */
 
@@ -141,25 +145,44 @@ function newBridge(canvas: DataCanvas, now: () => Date = () => FIXED_NOW, dropEn
   });
 }
 
-function newContext() {
-  return createMockContext({ tenantId: TENANT, errors: dataframeQueryTool.errors });
+function newContext(signal?: AbortSignal) {
+  return createMockContext({
+    tenantId: TENANT,
+    errors: dataframeQueryTool.errors,
+    ...(signal ? { signal } : {}),
+  });
 }
 
+/** {@link routeRows} over the synthetic rows; a first page of 50 unless `offset` and `limit` say otherwise. */
 function route(
   bridge: CanvasBridge | undefined,
   ctx: Context,
   source: AsyncIterable<{ k: string }>,
-  options: { maxRows?: number; previewChars: number; provenance?: () => Provenance },
+  options: {
+    limit?: number;
+    maxRows?: number;
+    minRead?: number;
+    offset?: number;
+    previewChars: number;
+    provenance?: () => Provenance;
+  },
 ) {
   return routeRows(bridge, {
     ctx,
     source,
     schema: SCHEMA,
+    offset: options.offset ?? 0,
+    limit: options.limit ?? 50,
     previewChars: options.previewChars,
     ...(options.maxRows === undefined ? {} : { maxRows: options.maxRows }),
+    ...(options.minRead === undefined ? {} : { minRead: options.minRead }),
     provenance: options.provenance ?? (() => PROVENANCE),
   });
 }
+
+/** Rows `from` to `to`, exclusive. */
+const rowsFrom = (from: number, to: number) =>
+  Array.from({ length: to - from }, (_, index) => rowAt(from + index));
 
 async function tableNames(bridge: CanvasBridge, ctx: Context): Promise<string[]> {
   return (await (await bridge.acquire(ctx)).describe()).map((table) => table.name);
@@ -190,27 +213,188 @@ async function stage(
   return outcome.table.name;
 }
 
+/** A preview budget no synthetic source here reaches, so only the page decides how far a read goes. */
+const ROOMY = 1_000_000;
+
 describe('routeRows with dataframes off', () => {
-  it('returns every row as complete when the rows fill the preview budget exactly', async () => {
+  it('returns every row when they fit the page exactly, ended, with no next offset', async () => {
     const source = rowSource(5);
     const outcome = await route(undefined, newContext(), source.rows, {
-      previewChars: 5 * ROW_CHARS,
+      limit: 5,
+      previewChars: ROOMY,
     });
-    expect(outcome).toEqual({ kind: 'complete', rows: [0, 1, 2, 3, 4].map(rowAt) });
+    expect(outcome).toEqual({ kind: 'page', rows: rowsFrom(0, 5), ended: true });
     expect(source.state).toEqual({ pulled: 5, closed: true });
   });
 
-  it('stops one character short: the rows that fit, the source read one row past them and closed', async () => {
+  it('pages by row count, not by the preview budget: limit rows, the source read one row past them and closed', async () => {
     const source = rowSource(500);
+    // four rows fit this budget; the page still holds limit rows
     const outcome = await route(undefined, newContext(), source.rows, {
+      limit: 50,
       previewChars: 5 * ROW_CHARS - 1,
     });
     expect(outcome).toEqual({
-      kind: 'preview',
+      kind: 'page',
       cause: 'canvas_off',
-      rows: [0, 1, 2, 3].map(rowAt),
+      rows: rowsFrom(0, 50),
+      nextOffset: 50,
+      ended: false,
     });
-    expect(source.state).toEqual({ pulled: 5, closed: true });
+    expect(source.state).toEqual({ pulled: 51, closed: true });
+  });
+
+  it('returns limit rows from offset, reading one row past them', async () => {
+    const source = rowSource(500);
+    const outcome = await route(undefined, newContext(), source.rows, {
+      offset: 120,
+      limit: 7,
+      previewChars: ROOMY,
+    });
+    expect(outcome).toEqual({
+      kind: 'page',
+      rows: rowsFrom(120, 127),
+      nextOffset: 127,
+      ended: false,
+    });
+    expect(source.state).toEqual({ pulled: 128, closed: true });
+  });
+
+  it('reads at least minRead rows when the source holds them, and to its end when it holds fewer', async () => {
+    const long = rowSource(10_000);
+    expect(
+      await route(undefined, newContext(), long.rows, {
+        limit: 5,
+        minRead: 5_001,
+        previewChars: ROOMY,
+      }),
+    ).toEqual({
+      kind: 'page',
+      cause: 'canvas_off',
+      rows: rowsFrom(0, 5),
+      nextOffset: 5,
+      ended: false,
+    });
+    expect(long.state).toEqual({ pulled: 5_001, closed: true });
+
+    const short = rowSource(300);
+    expect(
+      await route(undefined, newContext(), short.rows, {
+        limit: 5,
+        minRead: 5_001,
+        previewChars: ROOMY,
+      }),
+    ).toEqual({ kind: 'page', rows: rowsFrom(0, 5), nextOffset: 5, ended: true });
+    expect(short.state).toEqual({ pulled: 300, closed: true });
+  });
+
+  it.each([
+    ['at the end', 5],
+    ['past the end', 9],
+  ])('returns no rows and no next offset for an offset %s', async (_label, offset) => {
+    const outcome = await route(undefined, newContext(), rowSource(5).rows, {
+      offset,
+      limit: 3,
+      previewChars: ROOMY,
+    });
+    expect(outcome).toEqual({ kind: 'page', rows: [], ended: true });
+  });
+
+  it('covers every row exactly once, in order, following nextOffset from offset 0', async () => {
+    const pages: { k: string }[][] = [];
+    // 50 rows at 7 a page take 8 pages; a walk still going after one more never ends
+    const maxPages = Math.ceil(50 / 7) + 1;
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      if (pages.length === maxPages) {
+        throw new Error(`nextOffset still set after ${maxPages} pages`);
+      }
+      const outcome = await route(undefined, newContext(), rowSource(50).rows, {
+        offset,
+        limit: 7,
+        previewChars: ROOMY,
+      });
+      if (outcome.kind !== 'page') throw new Error(`expected a page, got ${outcome.kind}`);
+      pages.push(outcome.rows);
+      offset = outcome.nextOffset;
+    }
+    expect(pages.map((page) => page.length)).toEqual([7, 7, 7, 7, 7, 7, 7, 1]);
+    expect(pages.flat()).toEqual(rowsFrom(0, 50));
+  });
+
+  it('reads no further than maxRows plus the row proving the source holds more, even past minRead', async () => {
+    const source = rowSource(100);
+    const outcome = await route(undefined, newContext(), source.rows, {
+      offset: 10,
+      limit: 10,
+      maxRows: 20,
+      minRead: 5_001,
+      previewChars: ROOMY,
+    });
+    expect(outcome).toEqual({ kind: 'page', rows: rowsFrom(10, 20), nextOffset: 20, ended: false });
+    expect(source.state).toEqual({ pulled: 21, closed: true });
+  });
+
+  it('refuses a page reaching past maxRows of a source that holds more as too_large', async () => {
+    const source = rowSource(100);
+    const outcome = await route(undefined, newContext(), source.rows, {
+      offset: 15,
+      limit: 10,
+      maxRows: 20,
+      previewChars: ROOMY,
+    });
+    expect(outcome).toEqual({ kind: 'too_large' });
+    expect(source.state).toEqual({ pulled: 21, closed: true });
+  });
+
+  it('returns a short last page reaching past maxRows when the source ends within it', async () => {
+    const outcome = await route(undefined, newContext(), rowSource(20).rows, {
+      offset: 15,
+      limit: 10,
+      maxRows: 20,
+      previewChars: ROOMY,
+    });
+    expect(outcome).toEqual({ kind: 'page', rows: rowsFrom(15, 20), ended: true });
+  });
+
+  it('marks a first page canvas_off when reading stopped before the end, or its rows passed the budget', async () => {
+    const source = rowSource(500);
+    expect(
+      await route(undefined, newContext(), source.rows, { limit: 2, previewChars: ROOMY }),
+    ).toEqual({
+      kind: 'page',
+      cause: 'canvas_off',
+      rows: rowsFrom(0, 2),
+      nextOffset: 2,
+      ended: false,
+    });
+    // reading stops one row past the page, never on to weigh the result against the budget
+    expect(source.state).toEqual({ pulled: 3, closed: true });
+    expect(
+      await route(undefined, newContext(), rowSource(5).rows, {
+        limit: 5,
+        previewChars: 5 * ROW_CHARS - 1,
+      }),
+    ).toEqual({ kind: 'page', cause: 'canvas_off', rows: rowsFrom(0, 5), ended: true });
+  });
+
+  it('gives no cause to a first page read to its end within the preview budget, or to a later page', async () => {
+    expect(
+      await route(undefined, newContext(), rowSource(5).rows, {
+        limit: 2,
+        minRead: 100,
+        previewChars: 5 * ROW_CHARS,
+      }),
+    ).toEqual({ kind: 'page', rows: rowsFrom(0, 2), nextOffset: 2, ended: true });
+    const later = rowSource(500);
+    expect(
+      await route(undefined, newContext(), later.rows, {
+        offset: 2,
+        limit: 2,
+        previewChars: ROW_CHARS,
+      }),
+    ).toEqual({ kind: 'page', rows: rowsFrom(2, 4), nextOffset: 4, ended: false });
+    expect(later.state.pulled).toBe(5);
   });
 
   it('propagates a failure of the source itself', async () => {
@@ -223,27 +407,30 @@ describe('routeRows with dataframes off', () => {
 });
 
 describe('routeRows with a canvas', () => {
-  it('keeps an exact fit inline: complete, no table, no provenance', async () => {
+  it('stages nothing for an exact fit of the budget: no table, no provenance, every row read', async () => {
     const bridge = newBridge(tracked(memoryCanvas()));
     const ctx = newContext();
     const provenance = vi.fn(() => PROVENANCE);
     const outcome = await route(bridge, ctx, rowSource(5).rows, {
+      limit: 2,
       previewChars: 5 * ROW_CHARS,
       provenance,
     });
-    expect(outcome).toEqual({ kind: 'complete', rows: [0, 1, 2, 3, 4].map(rowAt) });
+    // the result fits the budget, so it pages inline without a dataframe
+    expect(outcome).toEqual({ kind: 'page', rows: rowsFrom(0, 2), nextOffset: 2, ended: true });
     expect(provenance).not.toHaveBeenCalled();
     expect(await tableNames(bridge, ctx)).toEqual([]);
     expect(await metaKeys(ctx)).toEqual([]);
   });
 
-  it('stages one character past the budget: the preview inline, every row staged, provenance recorded', async () => {
+  it('stages one character past the budget: the first page inline, every row staged, provenance recorded', async () => {
     const canvas = tracked(memoryCanvas());
     const bridge = newBridge(canvas);
     const ctx = newContext();
     const source = rowSource(5);
     const pulledAtProvenance: number[] = [];
     const outcome = await route(bridge, ctx, source.rows, {
+      limit: 3,
       previewChars: 5 * ROW_CHARS - 1,
       provenance: () => {
         pulledAtProvenance.push(source.state.pulled);
@@ -252,7 +439,9 @@ describe('routeRows with a canvas', () => {
     });
     if (outcome.kind !== 'staged') throw new Error(`expected staged, got ${outcome.kind}`);
     const expiresAt = new Date(FIXED_NOW.getTime() + TTL_MS).toISOString();
-    expect(outcome.rows).toEqual([0, 1, 2, 3].map(rowAt));
+    // the page is limit rows, not the rows that fit the budget
+    expect(outcome.rows).toEqual(rowsFrom(0, 3));
+    expect(outcome).toMatchObject({ nextOffset: 3, ended: true });
     expect(outcome.table).toEqual({
       name: outcome.table.name,
       rowCount: 5,
@@ -283,6 +472,38 @@ describe('routeRows with a canvas', () => {
     });
   });
 
+  it('stages a result whose every row fits the page with no next offset', async () => {
+    const outcome = await route(
+      newBridge(tracked(memoryCanvas())),
+      newContext(),
+      rowSource(5).rows,
+      {
+        limit: 5,
+        previewChars: ROW_CHARS,
+      },
+    );
+    expect(outcome).toMatchObject({ kind: 'staged', rows: rowsFrom(0, 5), ended: true });
+    expect(outcome).not.toHaveProperty('nextOffset');
+  });
+
+  it('stages nothing on a later page: no table, no provenance, the source read one row past the page', async () => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const ctx = newContext();
+    const source = rowSource(500);
+    const provenance = vi.fn(() => PROVENANCE);
+    const outcome = await route(bridge, ctx, source.rows, {
+      offset: 2,
+      limit: 2,
+      previewChars: ROW_CHARS,
+      provenance,
+    });
+    expect(outcome).toEqual({ kind: 'page', rows: rowsFrom(2, 4), nextOffset: 4, ended: false });
+    expect(source.state).toEqual({ pulled: 5, closed: true });
+    expect(provenance).not.toHaveBeenCalled();
+    expect(await tableNames(bridge, ctx)).toEqual([]);
+    expect(await metaKeys(ctx)).toEqual([]);
+  });
+
   it('stages a source of exactly maxRows rows', async () => {
     const bridge = newBridge(tracked(memoryCanvas()));
     const outcome = await route(bridge, newContext(), rowSource(5).rows, {
@@ -292,21 +513,49 @@ describe('routeRows with a canvas', () => {
     expect(outcome).toMatchObject({ kind: 'staged', table: { rowCount: 5 } });
   });
 
-  it('refuses one row past maxRows as too_large: the partial table dropped, nothing recorded, the source closed', async () => {
+  it.each([
+    ['inside', 2],
+    ['ending at', 4],
+  ])(
+    'returns a first page %s maxRows of a result one row past it, unstaged: the partial table dropped, nothing recorded, the source closed',
+    async (_label, limit) => {
+      const bridge = newBridge(tracked(memoryCanvas()));
+      const ctx = newContext();
+      const source = rowSource(500);
+      const provenance = vi.fn(() => PROVENANCE);
+      const outcome = await route(bridge, ctx, source.rows, {
+        limit,
+        previewChars: ROW_CHARS,
+        maxRows: 4,
+        provenance,
+      });
+      expect(outcome).toEqual({
+        kind: 'page',
+        cause: 'past_ceiling',
+        rows: rowsFrom(0, limit),
+        nextOffset: limit,
+        ended: false,
+      });
+      expect(provenance).not.toHaveBeenCalled();
+      expect(await tableNames(bridge, ctx)).toEqual([]);
+      expect(await metaKeys(ctx)).toEqual([]);
+      // the fifth row proved the source passed the ceiling; nothing after it was read
+      expect(source.state).toEqual({ pulled: 5, closed: true });
+    },
+  );
+
+  it('refuses a first page reaching past maxRows of a result that passes it as too_large, dropping the partial table', async () => {
     const bridge = newBridge(tracked(memoryCanvas()));
     const ctx = newContext();
     const source = rowSource(500);
-    const provenance = vi.fn(() => PROVENANCE);
     const outcome = await route(bridge, ctx, source.rows, {
+      limit: 5,
       previewChars: ROW_CHARS,
       maxRows: 4,
-      provenance,
     });
     expect(outcome).toEqual({ kind: 'too_large' });
-    expect(provenance).not.toHaveBeenCalled();
     expect(await tableNames(bridge, ctx)).toEqual([]);
     expect(await metaKeys(ctx)).toEqual([]);
-    // the fifth row proved the source passed the ceiling; nothing after it was read
     expect(source.state).toEqual({ pulled: 5, closed: true });
   });
 
@@ -333,25 +582,30 @@ describe('routeRows when the canvas fails', () => {
           'The DuckDB native binding could not be loaded.',
         ),
       },
-      'Dataframe canvas unavailable; returning the inline preview only',
+      'Dataframe canvas unavailable; returning the page inline only',
     ],
     [
       'the append fails after three rows',
       { at: 'registerTable', afterRows: 3, error: new Error('Out of Memory Error: failed') },
-      'Staging the full result failed; returning the inline preview only',
+      'Staging the full result failed; returning the page inline only',
     ],
   ] satisfies [string, CanvasFault, string][])(
-    'falls back to the preview when %s, leaving nothing staged',
+    'falls back to the page when %s, leaving nothing staged',
     async (_label, fault, warning) => {
       const canvas = tracked(faultyCanvas(fault));
       const bridge = newBridge(canvas);
       const ctx = newContext();
       const source = rowSource(500);
-      const outcome = await route(bridge, ctx, source.rows, { previewChars: 5 * ROW_CHARS - 1 });
+      const outcome = await route(bridge, ctx, source.rows, {
+        limit: 4,
+        previewChars: 5 * ROW_CHARS - 1,
+      });
       expect(outcome).toEqual({
-        kind: 'preview',
+        kind: 'page',
         cause: 'canvas_failed',
-        rows: [0, 1, 2, 3].map(rowAt),
+        rows: rowsFrom(0, 4),
+        nextOffset: 4,
+        ended: false,
       });
       expect(warnings(ctx)).toEqual([warning]);
       expect(await metaKeys(ctx)).toEqual([]);
@@ -361,17 +615,44 @@ describe('routeRows when the canvas fails', () => {
     },
   );
 
-  it('still reports a result that fits as complete when the canvas cannot be acquired', async () => {
+  it('reads the rest of the page from the source after an append fails short of it', async () => {
+    const bridge = newBridge(
+      tracked(
+        faultyCanvas({
+          at: 'registerTable',
+          afterRows: 1,
+          error: new Error('IO Error: disk full'),
+        }),
+      ),
+    );
+    const source = rowSource(500);
+    // one row fills the budget, so staging starts on the second and fails after one appended row
+    const outcome = await route(bridge, newContext(), source.rows, {
+      limit: 10,
+      previewChars: ROW_CHARS,
+    });
+    expect(outcome).toEqual({
+      kind: 'page',
+      cause: 'canvas_failed',
+      rows: rowsFrom(0, 10),
+      nextOffset: 10,
+      ended: false,
+    });
+    expect(source.state).toEqual({ pulled: 11, closed: true });
+  });
+
+  it('gives no cause to a result that fits the budget when the canvas cannot be acquired', async () => {
     const bridge = newBridge(
       tracked(faultyCanvas({ at: 'acquire', error: new Error('engine failed to start') })),
     );
     const outcome = await route(bridge, newContext(), rowSource(5).rows, {
+      limit: 5,
       previewChars: 5 * ROW_CHARS,
     });
-    expect(outcome).toEqual({ kind: 'complete', rows: [0, 1, 2, 3, 4].map(rowAt) });
+    expect(outcome).toEqual({ kind: 'page', rows: rowsFrom(0, 5), ended: true });
   });
 
-  it('falls back to the preview and drops the table when recording provenance fails', async () => {
+  it('falls back to the page and drops the table when recording provenance fails', async () => {
     const bridge = newBridge(tracked(memoryCanvas()));
     const ctx = newContext();
     const set = ctx.state.set.bind(ctx.state);
@@ -381,15 +662,18 @@ describe('routeRows when the canvas fails', () => {
         : set(key, value, options),
     );
     const outcome = await route(bridge, ctx, rowSource(5).rows, {
+      limit: 4,
       previewChars: 5 * ROW_CHARS - 1,
     });
     expect(outcome).toEqual({
-      kind: 'preview',
+      kind: 'page',
       cause: 'canvas_failed',
-      rows: [0, 1, 2, 3].map(rowAt),
+      rows: rowsFrom(0, 4),
+      nextOffset: 4,
+      ended: true,
     });
     expect(warnings(ctx)).toEqual([
-      'Recording dataframe provenance failed; returning the inline preview only',
+      'Recording dataframe provenance failed; returning the page inline only',
     ]);
     expect(await tableNames(bridge, ctx)).toEqual([]);
   });
@@ -425,6 +709,62 @@ describe('routeRows when the canvas fails', () => {
       expect(JSON.stringify(logged)).not.toContain('/srv/canvas-tmp');
     },
   );
+
+  it('rejects with the abort, logging no warning, when the call is cancelled while the canvas resolves', async () => {
+    const { canvas, hold } = gatedCanvas();
+    const bridge = newBridge(tracked(canvas));
+    const controller = new AbortController();
+    const ctx = newContext(controller.signal);
+    const mint = hold((maybeId) => maybeId === undefined);
+    const routed = route(bridge, ctx, rowSource(500).rows, {
+      limit: 4,
+      previewChars: 5 * ROW_CHARS - 1,
+    });
+    await mint.reached; // the call holds the resolution, minting the tenant's canvas
+    controller.abort();
+    mint.open();
+    await expect(routed).rejects.toMatchObject({ name: 'AbortError' });
+    expect(warnings(ctx)).toEqual([]);
+  });
+
+  it('rejects with the abort, logging no warning, when the call is cancelled while staging', async () => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const controller = new AbortController();
+    const ctx = newContext(controller.signal);
+    // the budget holds five rows, so staging is under way when the twentieth cancels the call
+    const rows = (async function* () {
+      for (let index = 0; index < 500; index++) {
+        if (index === 20) controller.abort();
+        yield rowAt(index);
+      }
+    })();
+    await expect(
+      route(bridge, ctx, rows, { limit: 4, previewChars: 5 * ROW_CHARS - 1 }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(warnings(ctx)).toEqual([]);
+  });
+
+  it('rejects with the abort, logging no warning and leaving no table, when the call is cancelled while recording provenance', async () => {
+    const bridge = newBridge(tracked(memoryCanvas()));
+    const controller = new AbortController();
+    const ctx = newContext(controller.signal);
+    const set = ctx.state.set.bind(ctx.state);
+    let canvasId: unknown;
+    vi.spyOn(ctx.state, 'set').mockImplementation((key, value, options) => {
+      if (key === 'canvas-id') canvasId = value;
+      if (!key.startsWith('df-meta/')) return set(key, value, options);
+      controller.abort();
+      return Promise.reject(controller.signal.reason);
+    });
+    await expect(
+      route(bridge, ctx, rowSource(5).rows, { limit: 4, previewChars: 5 * ROW_CHARS - 1 }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(warnings(ctx)).toEqual([]);
+    // a table with no provenance record would sit outside the staging budget until its TTL
+    const after = newContext();
+    await after.state.set('canvas-id', canvasId);
+    expect(await tableNames(bridge, after)).toEqual([]);
+  });
 });
 
 describe('register_as provenance (derived dataframes)', () => {
@@ -934,6 +1274,75 @@ describe('an unqualified current_schema', () => {
   });
 });
 
+/** One turn of the event loop: every promise already settling has settled. */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * A {@link memoryCanvas} whose next `acquire` a test's predicate accepts (a
+ * lookup of one id, or a mint: `undefined`) waits until the test opens it, so
+ * calls on one tenant interleave in the order the test sets.
+ */
+function gatedCanvas() {
+  const canvas = memoryCanvas();
+  const acquire = canvas.acquire.bind(canvas);
+  let gate:
+    | {
+        matches: (maybeId: string | undefined) => boolean;
+        open: Promise<void>;
+        reached: () => void;
+      }
+    | undefined;
+  canvas.acquire = async (maybeId, context, options) => {
+    const held = gate;
+    if (held?.matches(maybeId)) {
+      gate = undefined;
+      held.reached();
+      await held.open;
+    }
+    return await acquire(maybeId, context, options);
+  };
+  return {
+    canvas,
+    /** Holds the next acquire `matches` accepts; `reached` settles once one is waiting. */
+    hold(matches: (maybeId: string | undefined) => boolean) {
+      const reached = Promise.withResolvers<void>();
+      const open = Promise.withResolvers<void>();
+      gate = { matches, open: open.promise, reached: reached.resolve };
+      return { reached: reached.promise, open: () => open.resolve() };
+    },
+  };
+}
+
+/**
+ * A call on `base`'s tenant state whose state operations each check this call's
+ * own signal first, as production `ctx.state` does: calls on one tenant share
+ * the store, never a cancellation. `set` and `list` stand in for those operations.
+ */
+function callOn(
+  base: Context,
+  options: {
+    list?: Context['state']['list'];
+    set?: Context['state']['set'];
+    signal?: AbortSignal;
+  } = {},
+): Context {
+  const signal = options.signal ?? new AbortController().signal;
+  const ctx = createMockContext({ tenantId: TENANT, signal });
+  const overrides: Record<string | symbol, unknown> = { list: options.list, set: options.set };
+  const state = new Proxy(base.state, {
+    get(target, property) {
+      const op = overrides[property] ?? Reflect.get(target, property);
+      if (typeof op !== 'function') return op;
+      return async (...args: unknown[]) => {
+        signal.throwIfAborted();
+        return await op.apply(target, args);
+      };
+    },
+  });
+  Object.defineProperty(ctx, 'state', { value: state });
+  return ctx;
+}
+
 describe('the tenant canvas and the expiry sweep', () => {
   it('keeps one canvas per tenant in ctx.state and re-mints it once the stored one is gone', async () => {
     const canvas = tracked(memoryCanvas());
@@ -963,6 +1372,112 @@ describe('the tenant canvas and the expiry sweep', () => {
     const names = await Promise.all([stage(bridge, fresh, 5), stage(bridge, other, 5)]);
     expect((await tableNames(bridge, fresh)).sort()).toEqual([...names].sort());
     expect((await metaKeys(fresh)).sort()).toEqual(names.map((name) => `df-meta/${name}`).sort());
+  });
+
+  it('lands two calls racing a dead stored id on one canvas, keeping the dataframe either one staged', async () => {
+    const { canvas, hold } = gatedCanvas();
+    const bridge = newBridge(tracked(canvas));
+    const base = newContext();
+    const dead = await bridge.acquire(base);
+    await canvas.drop(dead.canvasId, base);
+
+    const lookup = hold((maybeId) => maybeId === dead.canvasId);
+    const first = bridge.acquire(callOn(base));
+    await lookup.reached; // the first call read the dead id; its lookup waits
+    const second = await bridge.acquire(callOn(base)); // the second finds it dead and mints
+    const staged = await stage(bridge, callOn(base), 5);
+    lookup.open();
+
+    expect((await first).canvasId).toBe(second.canvasId);
+    expect(canvas.countForTenant(base)).toBe(1);
+    expect(await base.state.get('canvas-id')).toBe(second.canvasId);
+    expect(await tableNames(bridge, base)).toEqual([staged]);
+    expect(await metaKeys(base)).toEqual([`df-meta/${staged}`]);
+  });
+
+  it('fails only the call cancelled while it holds the resolution; the call queued behind it gets the one canvas', async () => {
+    const { canvas, hold } = gatedCanvas();
+    const bridge = newBridge(tracked(canvas));
+    const base = newContext();
+    const holder = new AbortController();
+
+    const mint = hold((maybeId) => maybeId === undefined);
+    const cancelled = bridge.acquire(callOn(base, { signal: holder.signal }));
+    await mint.reached; // the first call holds the resolution, minting
+    const queued = bridge.acquire(callOn(base));
+    await tick(); // the second call found no canvas and waits its turn
+    holder.abort();
+    mint.open();
+
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    const instance = await queued;
+    expect(canvas.countForTenant(base)).toBe(1);
+    expect(await base.state.get('canvas-id')).toBe(instance.canvasId);
+  });
+
+  it('fails a call whose canvas-id write is refused, leaving the tenant no canvas and no stored id', async () => {
+    const canvas = tracked(memoryCanvas());
+    const bridge = newBridge(canvas);
+    const base = newContext();
+    const refusing = callOn(base, {
+      set: async (key, value, options) => {
+        if (key === 'canvas-id') throw new Error('write refused');
+        await base.state.set(key, value, options);
+      },
+    });
+
+    await expect(bridge.acquire(refusing)).rejects.toThrow('write refused');
+    expect(canvas.countForTenant(base)).toBe(0);
+    expect(await base.state.get('canvas-id')).toBeNull();
+
+    const next = await bridge.acquire(callOn(base));
+    expect(canvas.countForTenant(base)).toBe(1);
+    expect(await base.state.get('canvas-id')).toBe(next.canvasId);
+  });
+
+  it('clears every df-meta/ record, past the first listing page, before a re-minted canvas id is stored', async () => {
+    const canvas = tracked(memoryCanvas());
+    const bridge = newBridge(canvas);
+    const base = newContext();
+    const gone = await bridge.acquire(base);
+    const stale = Array.from(
+      { length: 101 },
+      (_, index) => `df_STALE_${String(index).padStart(5, '0')}`,
+    );
+    await base.state.setMany(
+      new Map(stale.map((name) => [`df-meta/${name}`, { tableName: name }])),
+    );
+    await canvas.drop(gone.canvasId, base);
+
+    let recordsAtIdWrite: string[] | undefined;
+    const watched = callOn(base, {
+      // a store that serves at most three records a page, whatever page size the bridge asks for
+      list: (prefix, options) =>
+        base.state.list(prefix, { ...options, limit: Math.min(options?.limit ?? 3, 3) }),
+      set: async (key, value, options) => {
+        if (key === 'canvas-id') recordsAtIdWrite = await metaKeys(base);
+        await base.state.set(key, value, options);
+      },
+    });
+    const minted = await bridge.acquire(watched);
+    expect(minted.canvasId).not.toBe(gone.canvasId);
+    expect(recordsAtIdWrite).toEqual([]);
+  });
+
+  it('resolves a bare canvas id an earlier bridge stored, with no TTL, without a re-mint', async () => {
+    const canvas = tracked(memoryCanvas());
+    const bridge = newBridge(canvas);
+    const ctx = newContext();
+    const earlier = await canvas.acquire(undefined, ctx);
+    await ctx.state.set('canvas-id', earlier.canvasId);
+    await ctx.state.set('df-meta/df_KEPT0_00000', { tableName: 'df_KEPT0_00000' });
+
+    const instance = await bridge.acquire(ctx);
+    expect(instance.canvasId).toBe(earlier.canvasId);
+    expect(instance.isNew).toBe(false);
+    expect(await ctx.state.get('canvas-id')).toBe(earlier.canvasId);
+    expect(await metaKeys(ctx)).toEqual(['df-meta/df_KEPT0_00000']);
+    expect(canvas.countForTenant(ctx)).toBe(1);
   });
 
   it('sweeps a dataframe exactly at its expiry, dropping the table and its provenance', async () => {
@@ -1023,7 +1538,7 @@ describe('engine rejections are rebuilt with the calling tool’s contract', () 
       data: {
         reason: 'canvas_unavailable',
         recovery: {
-          hint: 'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.',
+          hint: 'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies and page through their rows inline with next_offset.',
         },
       },
     });
@@ -1078,14 +1593,21 @@ describe('engine rejections are rebuilt with the calling tool’s contract', () 
 });
 
 describe('initCanvasBridge', () => {
-  it('leaves dataframes off without a canvas: no bridge, and producers stop at the preview', async () => {
+  it('leaves dataframes off without a canvas: no bridge, and producers page without staging', async () => {
     initCanvasBridge(tracked(memoryCanvas()));
     expect(initCanvasBridge(undefined)).toBeUndefined();
     expect(getCanvasBridge()).toBeUndefined();
     const outcome = await route(getCanvasBridge(), newContext(), rowSource(50).rows, {
+      limit: 3,
       previewChars: ROW_CHARS,
     });
-    expect(outcome).toEqual({ kind: 'preview', cause: 'canvas_off', rows: [rowAt(0)] });
+    expect(outcome).toEqual({
+      kind: 'page',
+      cause: 'canvas_off',
+      rows: rowsFrom(0, 3),
+      nextOffset: 3,
+      ended: false,
+    });
   });
 
   it('reads the TTL and the drop gate from the server config when no options are given', async () => {
@@ -1165,7 +1687,7 @@ describe('a failed staging, as the producers disclose it', () => {
   }
 
   it.each(FAULTS)(
-    'query: when %s, the preview is marked incomplete on both surfaces',
+    'query: when %s, the page says so and pages on, on both surfaces',
     async (_label, fault) => {
       wireDataframes({
         canvas: tracked(faultyCanvas(fault)),
@@ -1176,59 +1698,53 @@ describe('a failed staging, as the producers disclose it', () => {
         ref_areas: ['USA', 'X01', 'KEN'],
       });
       expect(result.isError).toBeFalsy();
-      const structured = result.structuredContent as {
-        notice: string;
-        rows: unknown[];
-        shown: number;
-      };
-      const shown = structured.rows.length;
-      expect(shown).toBeGreaterThan(0);
-      const notice = `Showing the first ${shown} rows: staging the full result as a dataframe failed, so reading stopped at the inline preview. Call again, or narrow the request to see all of it.`;
-      expect(structured).toMatchObject({
+      const notice =
+        'Showing rows 1–50 of 52. Staging the full result as a dataframe failed; call again with offset 0 to retry it. Pass next_offset as offset, with the same other arguments, for the next page.';
+      // the 52-row result is read whole, so its counts are complete
+      expect(result.structuredContent).toMatchObject({
         truncated: true,
-        shown,
-        cap: 3_000,
-        summary: { complete: false },
+        shown: 50,
+        cap: 50,
+        row_count: 52,
+        next_offset: 50,
+        summary: { complete: true },
         notice,
       });
-      expect(structured).not.toHaveProperty('dataframe');
+      expect(result.structuredContent).not.toHaveProperty('dataframe');
       const text = contentText(result);
       expect(text).toContain(notice);
-      expect(text).toContain('complete: false');
+      expect(text).toContain('**next_offset:** 50');
     },
   );
 
-  it.each(FAULTS)(
-    'compare: when %s, the inline rows are cut and say why on both surfaces',
-    async (_label, fault) => {
-      // A staged comparison row with its change columns runs to ~800 characters: room for one inline
-      wireDataframes({
-        canvas: tracked(faultyCanvas(fault)),
-        observations: { previewChars: 1_200 },
-      });
-      const result = await runToolContract(compareGeographiesTool, {
-        dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
-        ref_areas: ['USA', 'X01', 'KEN'],
-      });
-      expect(result.isError).toBeFalsy();
-      const structured = result.structuredContent as {
-        comparability: { basis_counts: Record<string, number> };
-        notice: string;
-        rows: unknown[];
-      };
-      const shown = structured.rows.length;
-      expect(shown).toBeGreaterThan(0);
-      expect(shown).toBeLessThan(3);
-      const notice = `Showing ${shown} of 3 areas inline: staging the full comparison as a dataframe failed. Ranks, missing, and comparability cover every area; narrow ref_areas or area_group to see the rest.`;
-      expect(structured).toMatchObject({ truncated: true, shown, cap: 1_200 });
-      expect(structured.notice).toContain(notice);
-      expect(structured).not.toHaveProperty('dataframe');
-      expect(structured.comparability.basis_counts).toEqual({
-        reported: 2,
-        modelled_estimate: 1,
-        projection: 0,
-      });
-      expect(contentText(result)).toContain(notice);
-    },
-  );
+  it.each(FAULTS)('compare: when %s, the page says so on both surfaces', async (_label, fault) => {
+    // A staged comparison row with its change columns runs to ~800 characters, so three pass the budget
+    wireDataframes({
+      canvas: tracked(faultyCanvas(fault)),
+      observations: { previewChars: 1_200 },
+    });
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: 'UNE_DEAP_SEX_AGE_RT_A',
+      ref_areas: ['USA', 'X01', 'KEN'],
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      comparability: { basis_counts: Record<string, number> };
+      notice: string;
+      rows: unknown[];
+    };
+    const notice =
+      'Showing areas 1–3 of 3; ranks, missing, and comparability cover every area. Staging the full comparison as a dataframe failed; call again with offset 0 to retry it.';
+    expect(structured.rows).toHaveLength(3);
+    expect(structured).toMatchObject({ truncated: false, shown: 3, cap: 50 });
+    expect(structured).not.toHaveProperty('next_offset');
+    expect(structured.notice).toContain(notice);
+    expect(structured).not.toHaveProperty('dataframe');
+    expect(structured.comparability.basis_counts).toEqual({
+      reported: 2,
+      modelled_estimate: 1,
+      projection: 0,
+    });
+    expect(contentText(result)).toContain(notice);
+  });
 });

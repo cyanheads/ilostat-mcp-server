@@ -3,8 +3,8 @@
  * DuckDB canvas: a tenant holds at most 1,000,000 staged rows and 100
  * dataframes, a staging past either drops the oldest other dataframes first and
  * names them (the eviction log carries only their count), a single result past
- * the row budget is never kept (`too_large` from `routeRows`,
- * `register_as_too_large` from `ilostat_dataframe_query`), a `register_as` or a
+ * the row budget is never kept (`routeRows` returns its first page unstaged,
+ * `ilostat_dataframe_query` fails `register_as_too_large`), a `register_as` or a
  * named describe looks up one table rather than the whole canvas, concurrent
  * admissions on a tenant run one at a time (and a failed one does not stall the
  * next), and the evicted names reach both surfaces of the three tools that stage.
@@ -149,6 +149,8 @@ function stageRows(bridge: CanvasBridge, ctx: Context, count: number) {
     ctx,
     source: intSource(count).rows,
     schema: INT_SCHEMA,
+    offset: 0,
+    limit: 1,
     previewChars: 10,
     provenance: () => PROVENANCE,
   });
@@ -252,7 +254,7 @@ describe('the row budget', () => {
     expect(text).toContain(TOO_LARGE_RECOVERY);
   }, 30_000);
 
-  it('stops a producer that sets no maxRows at the budget as too_large', async () => {
+  it('stops a producer that sets no maxRows at the budget, keeping nothing and returning its first page', async () => {
     const bridge = wireBridge(() => FIXED_NOW);
     const ctx = queryContext();
     const source = intSource(ROW_BUDGET + 1);
@@ -260,6 +262,8 @@ describe('the row budget', () => {
       ctx,
       source: source.rows,
       schema: INT_SCHEMA,
+      offset: 0,
+      limit: 1,
       previewChars: 10,
       provenance: () => ({
         sourceTool: 'ilostat_query_indicator',
@@ -268,7 +272,13 @@ describe('the row budget', () => {
         attribution: ATTRIBUTION,
       }),
     });
-    expect(outcome).toEqual({ kind: 'too_large' });
+    expect(outcome).toEqual({
+      kind: 'page',
+      cause: 'past_ceiling',
+      rows: [{ k: 0 }],
+      nextOffset: 1,
+      ended: false,
+    });
     expect(source.state).toEqual({ pulled: ROW_BUDGET + 1, closed: true });
     expect(await canvasTables(bridge, ctx)).toEqual([]);
     expect(await bridge.describe(ctx)).toEqual([]);

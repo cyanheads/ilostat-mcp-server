@@ -1,13 +1,10 @@
 /**
  * @fileoverview Tests for `SdmxClient` over a fetch fake serving the recorded SDMX
- * responses: the structure and unit-probe URLs and Accept headers, and the
- * statuses that are results on this host — a 404 (no dataflow, no data for the
- * key) and a 500 carrying an Oracle `ORA-` message read as "nothing here", the
- * Oracle text never relayed — against the ones that are errors (422 is this
- * server's bug; any other 500 is the upstream failing). Path segments taken from
- * upstream data (indicator code, dataflow version, series key) are checked against
- * the SDMX identifier grammar before any URL is built, and a bad one is refused
- * without a request.
+ * responses: the structure URL and Accept header, a 404 read as "no such
+ * dataflow", a body that is not JSON, and a 5xx retried and failed with its
+ * Oracle text never relayed. The indicator code is checked against the SDMX
+ * identifier grammar before the URL is built, and a bad one is refused without a
+ * request.
  * @module tests/services/sdmx/sdmx-client.test
  */
 
@@ -19,13 +16,7 @@ import { SdmxClient } from '@/services/sdmx/sdmx-client.js';
 import type { UpstreamScope } from '@/services/upstream/upstream-http.js';
 import {
   clientOptions,
-  isProbeRequest,
-  isStructureRequest,
-  probeResponse,
-  probeRoute,
-  SDMX_404_NO_DATA,
   SDMX_404_NO_STRUCTURE,
-  SDMX_422_SHORT_KEY,
   SDMX_500_ORA,
   sdmxText,
   structureDocument,
@@ -100,125 +91,26 @@ describe('SdmxClient.getDataflowStructure', () => {
   });
 });
 
-describe('SdmxClient.probeSeries', () => {
-  it('requests one observation of the series key and returns the first row by column', async () => {
-    const { http, client } = setup([probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....')]);
-    const row = await client.probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'ABW....', scope());
-    expect(row).toMatchObject({
-      REF_AREA: 'ABW',
-      UNIT_MEASURE_TYPE: 'RT',
-      UNIT_MEASURE: 'PT',
-      UNIT_MULT: '0',
-    });
-    const request = http.calls[0]?.request;
-    expect(request?.url).toBe(
-      'https://sdmx.ilo.org/rest/data/ILO,DF_UNE_DEAP_SEX_AGE_RT,1.0/ABW....?lastNObservations=1',
-    );
-    expect(request?.headers.get('accept')).toBe('application/vnd.sdmx.data+csv;version=1.0.0');
-    expect(request?.headers.get('accept-language')).toBe('en');
-  });
-
-  it('reads a header-only body, a 404, and an ORA- 500 as no data for the key', async () => {
-    const { http, client } = setup([
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'AAA....', () =>
-        probeResponse('DATAFLOW,REF_AREA,UNIT_MULT\n'),
-      ),
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'PRK....', () => sdmxText(SDMX_404_NO_DATA, 404)),
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'ZZZ....', () => sdmxText(`\n${SDMX_500_ORA}`, 500)),
-    ]);
-    for (const key of ['AAA....', 'PRK....', 'ZZZ....']) {
-      await expect(
-        client.probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', key, scope()),
-      ).resolves.toBeUndefined();
-    }
-    expect(http.calls).toHaveLength(3);
-  });
-
-  it('fails InternalError on a 422 (a key of the wrong arity is a bug here), without retrying', async () => {
-    const { http, client } = setup([
-      probeRoute('UNE_DEAP_SEX_AGE_RT', 'USA..', () => sdmxText(SDMX_422_SHORT_KEY, 422)),
-    ]);
-    const error = (await client
-      .probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'USA..', scope())
-      .catch((caught: unknown) => caught)) as McpError;
-    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
-    expect(error.message).toContain('HTTP 422');
-    expect(http.calls).toHaveLength(1);
-  });
-
-  it('fails ServiceUnavailable on a 500 that is not an Oracle key error, after retrying', async () => {
-    const { http, client } = setup([
-      {
-        match: (request) => isProbeRequest(request),
-        respond: () => sdmxText('Internal Server Error', 500),
-      },
-    ]);
-    const error = (await client
-      .probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'USA....', scope())
-      .catch((caught: unknown) => caught)) as McpError;
-    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(error.message).toMatch(/^ILOSTAT SDMX API \(sdmx\.ilo\.org\) failed with HTTP 500\./);
-    expect(http.calls).toHaveLength(3);
-  });
-
-  it('does not treat a non-accepted status as a result', async () => {
-    const { client } = setup([
-      {
-        match: (request) => isStructureRequest(request) || isProbeRequest(request),
-        respond: () => sdmxText('gone', 410),
-      },
-    ]);
-    await expect(
-      client.probeSeries('UNE_DEAP_SEX_AGE_RT', '1.0', 'USA....', scope()),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidRequest });
-  });
-});
-
-describe('SdmxClient path segments', () => {
+describe('SdmxClient indicator code', () => {
   const anyRequest: FetchMockRoute = { match: () => true, respond: () => sdmxText('', 404) };
 
   it.each([
-    [
-      'a dataflow version with dot segments',
-      'dataflow version',
-      'UNE_DEAP_SEX_AGE_RT',
-      '1.0/../../../structure/codelist/ILO/all',
-      'USA....',
-    ],
-    [
-      'a key area with dot segments and a query',
-      'series key',
-      'UNE_DEAP_SEX_AGE_RT',
-      '1.0',
-      '../../../../availableconstraint?x=1#....',
-    ],
-    ['a key with an encoded slash', 'series key', 'UNE_DEAP_SEX_AGE_RT', '1.0', 'USA%2F....'],
-    ['an indicator carrying a path', 'indicator code', '../../structure/X', '1.0', 'USA....'],
-  ])(
-    'refuses %s on the probe without sending a request',
-    async (_label, segment, indicator, version, key) => {
-      const { http, client } = setup([anyRequest]);
-      await expect(client.probeSeries(indicator, version, key, scope())).rejects.toMatchObject({
-        code: JsonRpcErrorCode.SerializationError,
-        message: `ILOSTAT sent an SDMX ${segment} this server will not put in a URL; no request was made.`,
-      });
-      expect(http.calls).toHaveLength(0);
-    },
-  );
-
-  it('refuses an indicator carrying a path on the structure call without sending a request', async () => {
+    ['carrying a path', 'X/../../../data/ILO,DF_Y'],
+    ['with an encoded slash', 'UNE%2FDEAP'],
+  ])('refuses an indicator code %s without sending a request', async (_label, indicator) => {
     const { http, client } = setup([anyRequest]);
-    await expect(
-      client.getDataflowStructure('X/../../../data/ILO,DF_Y', scope()),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.SerializationError });
+    await expect(client.getDataflowStructure(indicator, scope())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.SerializationError,
+      message:
+        'ILOSTAT sent an SDMX indicator code this server will not put in a URL; no request was made.',
+    });
     expect(http.calls).toHaveLength(0);
   });
 
-  it('sends a key of plain codes and empty positions unchanged', async () => {
-    const { http, client } = setup([anyRequest]);
-    await client.probeSeries('SDG_0552_NOC_RT', '1.0.0', 'X01..', scope());
-    expect(new URL(http.calls[0]?.request.url ?? '').pathname).toBe(
-      '/rest/data/ILO,DF_SDG_0552_NOC_RT,1.0.0/X01..',
+  it('does not treat a non-accepted status as a result', async () => {
+    const { client } = setup([{ match: () => true, respond: () => sdmxText('gone', 410) }]);
+    await expect(client.getDataflowStructure('UNE_DEAP_SEX_AGE_RT', scope())).rejects.toMatchObject(
+      { code: JsonRpcErrorCode.InvalidRequest },
     );
   });
 });

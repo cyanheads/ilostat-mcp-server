@@ -8,7 +8,7 @@
  */
 
 const BEFORE_DATAFRAMES =
-  'ILOSTAT labour statistics are addressed by dataset ID, an indicator code plus a frequency suffix (UNE_DEAP_SEX_AGE_RT_A is the annual unemployment rate; _Q quarterly, _M monthly): find one with ilostat_search_indicators, read its unit and breakdown codes with ilostat_describe_indicator, fetch values with ilostat_query_indicator, and decode any code with ilostat_list_reference. Every value carries a basis (reported, modelled_estimate, or projection): never present a modelled or projected value as reported, and never sum across overlapping classification versions (AGE_YTHADULT_*, AGE_AGGREGATE_*, AGE_10YRBANDS_*, AGE_5YRBANDS_*; ECO_SECTOR_*, ECO_AGGREGATE_*, ECO_ISIC4_*, ECO_ISIC3_*).';
+  'ILOSTAT labour statistics are addressed by dataset ID, an indicator code plus a frequency suffix (UNE_DEAP_SEX_AGE_RT_A is the annual unemployment rate; _Q quarterly, _M monthly): find one with ilostat_search_indicators, read its unit and breakdown codes with ilostat_describe_indicator, fetch values with ilostat_query_indicator, and decode any code with ilostat_list_reference. Every value carries a basis (reported, modelled_estimate, or projection): never present a modelled or projected value as reported, and never sum across overlapping classification versions (AGE_YTHADULT_*, AGE_AGGREGATE_*, AGE_10YRBANDS_*, AGE_5YRBANDS_*, AGE_YTHBANDS_*, AGE_CLDVERSION_*; ECO_SECTOR_*, ECO_AGGREGATE_*, ECO_ISIC4_*, ECO_ISIC3_*).';
 
 const DATAFRAMES =
   'Large results are staged as df_<id> dataframes: inspect one by name with ilostat_dataframe_describe and run SQL over them with ilostat_dataframe_query.';

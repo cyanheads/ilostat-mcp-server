@@ -4,19 +4,22 @@
  * catalog is matched by its light suffix stem instead, decided against the whole
  * catalog so a filter never changes how a term matches, and named in the notice.
  * The sex words (`female`, `women`, `male`, `men`) are indexed beside the breakdown
- * name of every indicator broken down by sex, and a term naming one of them, when
- * such an indicator matched, has the notice name the `sex` filter for its values.
+ * name of every indicator broken down by sex, and the age-group words (`youth`,
+ * `young`, `adult`) beside that of every indicator broken down by age. A term naming
+ * one of them, when an indicator with that breakdown matched, has the notice name
+ * the `sex` filter for its values, or the age band and where its codes come from.
  * The ranking is a transparent three-tier rule with no score:
  * tier 1 when every term matches the label, tier 2 when every term matches across
  * label, subject, database, breakdown names, and code, tier 3 when the definition
- * text is needed. A sex word beside other terms must match but sets no tier, so
- * `female unemployment rate` ranks its hits as `unemployment rate` does. Within a
- * tier, indicators covering more reference areas come first, then indicator code. Facets and the zero-hit notice are computed over the
- * fully filtered match set, locally.
+ * text is needed. A sex or age word beside other terms must match but sets no tier,
+ * so `female youth unemployment` ranks its hits as `unemployment` does. Within a
+ * tier, indicators covering more reference areas come first, then indicator code.
+ * Facets and the zero-hit notice are computed over the fully filtered match set,
+ * locally.
  * @module services/catalog/search
  */
 
-import { SEX_SEARCH_WORDS } from './codes.js';
+import { AGE_SEARCH_WORDS, SEX_SEARCH_WORDS } from './codes.js';
 import { pageOf } from './paging.js';
 import { stemOf, termMatches, wordsOf } from './text.js';
 import type { CatalogSnapshot, CodeLabel, Dataset, Indicator } from './types.js';
@@ -60,7 +63,7 @@ export interface SearchResult {
   facets: SearchFacets;
   hits: SearchHit[];
   nextCursor?: string;
-  /** Zero-hit guidance, a note that the query held no searchable word, the terms matched by stem, the sex filter a sex word names, or that the cursor starts past the last match. */
+  /** Zero-hit guidance, a note that the query held no searchable word, the terms matched by stem, the sex filter a sex word names, the age band an age word names, or that the cursor starts past the last match. */
   notice?: string;
   total: number;
 }
@@ -92,22 +95,28 @@ function sexCodeOf(term: string): 'SEX_F' | 'SEX_M' | undefined {
   return SEX_SEARCH_WORDS.get(term.replace(/s$/, ''));
 }
 
+/** The age band a term names when it is one of {@link AGE_SEARCH_WORDS} or its plural. */
+function ageBandOf(term: string): '15-24' | '25+' | undefined {
+  return AGE_SEARCH_WORDS.get(term.replace(/s$/, ''));
+}
+
 /**
  * One matcher per term. A term that is a word or word prefix of any catalog word
  * keeps that rule; any other term matches the catalog words sharing its stem, and
- * the catalog word its stem spells. A sex word beside other terms is required but
- * not ranked: no label holds one, so ranking by it would drop every hit out of the
- * label tier. A query of sex words alone ranks by them.
+ * the catalog word its stem spells. A sex or age word beside other terms is
+ * required but not ranked: few labels hold one, so ranking by it would drop the
+ * indicators broken down by sex or age out of the label tier. A query of sex and
+ * age words alone ranks by them.
  */
 function termMatchers(
   snapshot: CatalogSnapshot,
   terms: string[],
 ): { matchers: QueryMatchers; stemmed: StemmedTerm[] } {
   const ranked: TermMatcher[] = [];
-  const sexWords: TermMatcher[] = [];
+  const groupWords: TermMatcher[] = [];
   const stemmed: StemmedTerm[] = [];
   for (const term of terms) {
-    const group = sexCodeOf(term) ? sexWords : ranked;
+    const group = sexCodeOf(term) || ageBandOf(term) ? groupWords : ranked;
     if (termMatches(term, snapshot.searchVocabulary)) {
       group.push((words) => termMatches(term, words));
       continue;
@@ -118,7 +127,7 @@ function termMatchers(
     if (forms.length > 0) stemmed.push({ term, words: forms });
   }
   const matchers =
-    ranked.length > 0 ? { ranked, required: sexWords } : { ranked: sexWords, required: [] };
+    ranked.length > 0 ? { ranked, required: groupWords } : { ranked: groupWords, required: [] };
   return { matchers, stemmed };
 }
 
@@ -268,12 +277,19 @@ export function searchIndicators(snapshot: CatalogSnapshot, params: SearchParams
       `${term} matched no catalog word or word prefix, so it was matched by stem: ${words.join(', ')}. Check the hits are about ${term}; if those words mean something else, search a synonym instead.`,
     );
   }
-  if (hits.some((hit) => hit.indicator.classificationTypes.includes('SEX'))) {
-    for (const term of terms) {
-      const code = sexCodeOf(term);
-      if (!code) continue;
+  const bySex = hits.some((hit) => hit.indicator.classificationTypes.includes('SEX'));
+  const byAge = hits.some((hit) => hit.indicator.classificationTypes.includes('AGE'));
+  for (const term of terms) {
+    const code = bySex ? sexCodeOf(term) : undefined;
+    if (code) {
       notices.push(
         `${term} matched indicators broken down by sex; pass sex: ["${code}"] to ilostat_query_indicator for ${code === 'SEX_F' ? 'female' : 'male'} values.`,
+      );
+    }
+    const band = byAge ? ageBandOf(term) : undefined;
+    if (band) {
+      notices.push(
+        `${term} matched indicators broken down by age; ${term} is the ${band} band, coded once per age classification version, so take the dataset's AGE_* codes from ilostat_describe_indicator and pass one version's codes for that band as classif1 to ilostat_query_indicator.`,
       );
     }
   }

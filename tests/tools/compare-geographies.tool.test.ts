@@ -7,7 +7,7 @@
  * value, change over N years, ties, the three sorts, every missing reason, the
  * comparability flags and notices, the default slice from SDMX, `invalid_slice`
  * in both variants, `structure_unavailable` and the unit and area-list notices
- * of a partial SDMX failure, staging and the canvas-off preview, every declared error
+ * of a partial SDMX failure, staging and paging by limit and offset, every declared error
  * reason, and both consumption paths (`structuredContent` and `content[]`).
  * @module tests/tools/compare-geographies.tool.test
  */
@@ -37,12 +37,12 @@ import {
   isRplumber,
   memoryCanvas,
   observationCatalogFixture,
-  probeRoute,
   RPLUMBER_ORIGIN,
   retiredDatasetResponse,
-  SDMX_422_SHORT_KEY,
+  SDMX_ORIGIN,
   sdmxText,
   structureRoute,
+  tocRow,
   tooManyRequests,
   upstreamParams,
   type WireOptions,
@@ -74,7 +74,14 @@ const INVALID_SLICE_RECOVERY =
 const STRUCTURE_UNAVAILABLE_RECOVERY =
   "ILOSTAT's structure service could not supply the dataset's total codes; pass an explicit classif1 and classif2 code for each breakdown the dataset has — ilostat_list_reference topic classifications lists them.";
 const UNE_COVERAGE_NOTICE = `The area list of ${UNE} is unavailable from the ILOSTAT structure service, so no missing area is marked not_covered, even one ${UNE} does not cover.`;
-const UNE_UNIT_NOTICE = `The unit of ${UNE} is unavailable from the ILOSTAT structure service; the dataset label's parenthetical — (%) or (thousands) — gives it.`;
+/** UNE_DEAP_SEX_AGE_RT_A's unit as its ToC row labels it, when the structure is unavailable: no type label. */
+const UNE_UNIT_FROM_TOC = {
+  measure: 'PT',
+  measure_label: '%',
+  type: 'RT',
+  multiplier: 0,
+  multiplier_label: 'units',
+};
 
 const CSV_HEADER =
   '"ref_area","source","indicator","sex","classif1","time","obs_value","obs_status"';
@@ -200,10 +207,6 @@ const STRUCTURE_DOWN = structureRoute('UNE_DEAP_SEX_AGE_RT', () =>
   Promise.reject(new TypeError('fetch failed')),
 );
 
-/** The SDMX host rejecting the unit-probe key this server built for `indicator` (a server bug). */
-const probe422 = (indicator: string, key: string) =>
-  probeRoute(indicator, key, () => sdmxText(SDMX_422_SHORT_KEY, 422));
-
 function canvasOn(): DataCanvas {
   const canvas = memoryCanvas();
   canvases.push(canvas);
@@ -297,7 +300,7 @@ describe('latest mode', () => {
       },
       truncated: false,
       shown: 3,
-      cap: 40_000,
+      cap: 50,
       notice:
         'Values span 3 periods, 2021 to 2025; pass period for a like-for-like comparison. 1 value is an ILO modelled estimate and 2 are reported; they are not directly comparable. 2 areas have no value; see missing.',
     });
@@ -883,6 +886,29 @@ describe('change provenance and breaks', () => {
     );
   });
 
+  it('sends a repeat or later page of a fallen-back comparison straight to the two periods, with no range request', async () => {
+    const wired = wireYouth(INDICATOR_CSV.youthBreaks, { observations: { maxRows: 1 } });
+    const args = {
+      dataset_id: UNE,
+      ref_areas: ['ARE', 'UGA'],
+      classif1: YOUTH,
+      period: '2025',
+      change_years: 9,
+    };
+    const first = await compare(args);
+    const isRange = (url: URL) => upstreamParams(url).has('timefrom');
+    expect(dataUrls(wired).map(isRange)).toEqual([true, false]);
+
+    // the two-period rows were cached on the first call, so neither call below sends a request
+    const repeat = await compare(args);
+    const later = await compare({ ...args, offset: 1 });
+    expect(dataUrls(wired).map(isRange)).toEqual([true, false]);
+    expect(repeat.result).toEqual(first.result);
+    expect(repeat.enrichment.notice).toBe(first.enrichment.notice);
+    expect(later.enrichment.applied_filters).toMatchObject({ time: ['2025', '2016'] });
+    expect(later.result.missing).toEqual(first.result.missing);
+  });
+
   it('renders an unread span as unknown in the change cell, never as no break', async () => {
     wireYouth(INDICATOR_CSV.youthBreaks, { observations: { maxRows: 1 } });
     const result = await runToolContract(compareGeographiesTool, {
@@ -1192,11 +1218,11 @@ describe('slice', () => {
     );
   });
 
-  it('compares an explicit slice without the structure service, and says the unit and area coverage are unknown', async () => {
+  it("compares an explicit slice without the structure service, with the catalog's unit, and says the area coverage is unknown", async () => {
     wire({ routes: [STRUCTURE_DOWN] });
     const args = { dataset_id: UNE, ref_areas: ['USA', 'JOR'], classif1: 'AGE_YTHADULT_YGE15' };
     const { result, enrichment } = await compare(args);
-    expect(result.dataset).not.toHaveProperty('unit');
+    expect(result.dataset.unit).toEqual(UNE_UNIT_FROM_TOC);
     expect(result.slice).toEqual({
       sex: 'SEX_T',
       classif1: 'AGE_YTHADULT_YGE15',
@@ -1207,9 +1233,9 @@ describe('slice', () => {
     expect(result.missing).toEqual([
       { ref_area: 'JOR', label: 'Jordan', reason: 'no_value_in_window' },
     ]);
-    const notice = `1 area has no value; see missing. ${UNE_COVERAGE_NOTICE} ${UNE_UNIT_NOTICE}`;
+    const notice = `1 area has no value; see missing. ${UNE_COVERAGE_NOTICE}`;
     expect(enrichment.notice).toBe(notice);
-    expect(render(result)).toContain('Unit: not resolved');
+    expect(render(result)).toContain('Unit: % (PT) · type RT · multiplier 0 (units)');
 
     const contract = await runToolContract(compareGeographiesTool, args);
     expect(contract.isError).toBeFalsy();
@@ -1217,20 +1243,56 @@ describe('slice', () => {
     expect(contentText(contract)).toContain(notice);
   });
 
-  it('says only the unit is unknown when the unit probe fails but the area list was read', async () => {
-    wire({
+  it('stages comparison rows with the catalog unit while the structure service is down', async () => {
+    const canvas = canvasOn();
+    wire({ canvas, observations: { previewChars: 1_200 }, routes: [STRUCTURE_DOWN] });
+    const ctx = newContext();
+    const { result } = await compare(
+      { dataset_id: UNE, ref_areas: ['USA', 'X01', 'KEN'], classif1: 'AGE_YTHADULT_YGE15' },
+      ctx,
+    );
+    const name = result.dataframe?.name ?? '';
+    expect(name).toMatch(/^df_/);
+    const canvasId = await ctx.state.get<string>('canvas-id');
+    const instance = await canvas.acquire(canvasId ?? undefined, ctx);
+    const staged = await instance.query(`SELECT DISTINCT unit, unit_multiplier FROM ${name}`);
+    expect(staged.rows).toEqual([{ unit: '%', unit_multiplier: 0 }]);
+  });
+
+  it('SDMX refusing every data request (403) changes nothing: unit and area list come whole, and none is sent', async () => {
+    const wired = wire({
       routes: [
-        probeRoute('UNE_DEAP_SEX_AGE_RT', 'ABW....', () =>
-          Promise.reject(new TypeError('fetch failed')),
-        ),
+        {
+          match: (request) => new URL(request.url).pathname.startsWith('/rest/data/'),
+          respond: () => sdmxText('403 - Forbidden: Access is denied.', 403),
+        },
       ],
     });
     const args = { dataset_id: UNE, ref_areas: ['USA', 'JOR'] };
     const { result, enrichment } = await compare(args);
-    expect(result.dataset).not.toHaveProperty('unit');
+    expect(result.dataset).toEqual(UNE_META);
     expect(result.missing).toEqual([{ ref_area: 'JOR', label: 'Jordan', reason: 'not_covered' }]);
-    const notice = `1 area has no value; see missing. ${UNE_UNIT_NOTICE}`;
+    expect(enrichment.notice).toBe('1 area has no value; see missing.');
+    expect(
+      callUrls(wired.http, (request) => new URL(request.url).origin === SDMX_ORIGIN).map(
+        (url) => url.pathname,
+      ),
+    ).toEqual(['/rest/dataflow/ILO/DF_UNE_DEAP_SEX_AGE_RT/latest']);
+  });
+
+  it('says the catalog lists no unit for a dataset whose ToC row has none, without pointing at the label', async () => {
+    const fixture = observationCatalogFixture();
+    const row = tocRow(fixture, UNE);
+    for (const key of ['unit_measure', 'unit_measure.label', 'unit_mult', 'unit_mult.label']) {
+      delete row[key];
+    }
+    wire({ fixture });
+    const args = { dataset_id: UNE, ref_areas: ['USA', 'JOR'] };
+    const { result, enrichment } = await compare(args);
+    expect(result.dataset).not.toHaveProperty('unit');
+    const notice = `1 area has no value; see missing. The ILOSTAT catalog lists no unit for ${UNE}.`;
     expect(enrichment.notice).toBe(notice);
+    expect(render(result)).toContain('Unit: not resolved');
 
     const contract = await runToolContract(compareGeographiesTool, args);
     expect(contract.structuredContent).toMatchObject({ notice });
@@ -1239,15 +1301,13 @@ describe('slice', () => {
 });
 
 describe('routing', () => {
-  it('stages a comparison larger than the preview; ranks, missing, and comparability cover every area', async () => {
+  it('stages a comparison larger than the preview on its first page; ranks, missing, and comparability cover every area', async () => {
     const canvas = canvasOn();
-    // A staged row with its change columns runs to ~800 characters: room for one area inline
+    // A staged row with its change columns runs to ~800 characters, so the three areas pass this budget
     wire({ canvas, observations: { previewChars: 1_200 } });
     const ctx = newContext();
-    const { result, enrichment } = await compare(
-      { dataset_id: UNE, ref_areas: ['USA', 'X01', 'KEN', 'JOR'], change_years: 1 },
-      ctx,
-    );
+    const args = { dataset_id: UNE, ref_areas: ['USA', 'X01', 'KEN', 'JOR'], change_years: 1 };
+    const { result, enrichment } = await compare({ ...args, limit: 1 }, ctx);
     const name = result.dataframe?.name ?? '';
     expect(name).toMatch(/^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/);
     expect(result.dataframe).toEqual({
@@ -1255,19 +1315,29 @@ describe('routing', () => {
       row_count: 3,
       expires_at: '2026-09-27T12:00:00.000Z',
     });
-    expect(result.rows.length).toBeGreaterThan(0);
-    expect(result.rows.length).toBeLessThan(3);
+    expect(result.rows.map((row) => [row.ref_area, row.rank])).toEqual([['KEN', 1]]);
+    expect(result.next_offset).toBe(1);
     expect(result.missing).toHaveLength(1);
     expect(result.comparability.basis_counts).toEqual({
       reported: 2,
       modelled_estimate: 1,
       projection: 0,
     });
-    // The inline rows stop before the last area, so truncated is true; the dataframe holds the rest
-    expect(enrichment).toMatchObject({ truncated: true, shown: result.rows.length, cap: 1_200 });
+    // areas remain past the page, so truncated is true whether or not the dataframe holds them
+    expect(enrichment).toMatchObject({ truncated: true, shown: 1, cap: 1 });
     expect(enrichment.notice).toContain(
-      `Showing ${result.rows.length} of 3 areas inline; ranks, missing, and comparability cover every area. Full result staged as ${name} (3 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL.`,
+      `Full result staged as ${name} (3 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL. Showing areas 1–1 of 3; ranks, missing, and comparability cover every area. Pass next_offset as offset, with the same other arguments, for the next page.`,
     );
+
+    // a later page stages nothing
+    const later = await compare({ ...args, limit: 1, offset: 1 }, ctx);
+    expect(later.result.rows.map((row) => [row.ref_area, row.rank])).toEqual([['X01', 2]]);
+    expect(later.result.next_offset).toBe(2);
+    expect(later.result).not.toHaveProperty('dataframe');
+    expect(later.enrichment.notice).toContain(
+      'Showing areas 2–2 of 3; ranks, missing, and comparability cover every area. Pass next_offset as offset, with the same other arguments, for the next page.',
+    );
+    expect(later.enrichment.notice).not.toContain('Full result staged');
 
     const canvasId = await ctx.state.get<string>('canvas-id');
     const instance = await canvas.acquire(canvasId ?? undefined, ctx);
@@ -1303,28 +1373,80 @@ describe('routing', () => {
         change_delta: 0.26,
       },
     ]);
+    // the first page's table is the only one: the later page staged nothing
+    expect((await instance.describe()).map((table) => table.name)).toEqual([name]);
   });
 
-  it('with dataframes off, cuts the inline rows at the preview and says so', async () => {
-    wire({ observations: { previewChars: 1_200 } });
-    const { result, enrichment } = await compare({
-      dataset_id: UNE,
-      ref_areas: ['USA', 'X01', 'KEN'],
-    });
-    const shown = result.rows.length;
-    expect(shown).toBeGreaterThan(0);
-    expect(shown).toBeLessThan(3);
-    expect(result).not.toHaveProperty('dataframe');
-    expect(result.comparability.basis_counts).toEqual({
-      reported: 2,
-      modelled_estimate: 1,
-      projection: 0,
-    });
-    expect(enrichment).toMatchObject({ truncated: true, shown, cap: 1_200 });
-    expect(enrichment.notice).toContain(
-      `Showing ${shown} of 3 areas inline: dataframes are off in this deployment. Ranks, missing, and comparability cover every area; narrow ref_areas or area_group to see the rest.`,
-    );
-  });
+  it.each([
+    ['value_desc', ['KEN', 'X01', 'USA'], [1, 2, 3]],
+    ['value_asc', ['USA', 'X01', 'KEN'], [3, 2, 1]],
+  ] as const)(
+    'with dataframes off, pages every area exactly once under %s, ranks, missing, and comparability the same on each page',
+    async (sort, order, ranks) => {
+      wire({ observations: { previewChars: 1_200 } });
+      const args = { dataset_id: UNE, ref_areas: ['USA', 'X01', 'KEN', 'JOR'], sort };
+      const pages: Awaited<ReturnType<typeof compare>>[] = [];
+      // three areas with a value at one a page; a walk still going after one more never ends
+      const maxPages = order.length + 1;
+      let offset: number | undefined = 0;
+      while (offset !== undefined) {
+        if (pages.length === maxPages) {
+          throw new Error(`next_offset still set after ${maxPages} pages`);
+        }
+        const page = await compare({ ...args, limit: 1, offset });
+        pages.push(page);
+        offset = page.result.next_offset;
+      }
+      expect(pages.map((page) => page.result.rows.map((row) => row.ref_area))).toEqual(
+        order.map((area) => [area]),
+      );
+      expect(pages.flatMap((page) => page.result.rows.map((row) => row.rank))).toEqual(ranks);
+      for (const { result } of pages) {
+        expect(result).not.toHaveProperty('dataframe');
+        expect(result.missing).toEqual([
+          { ref_area: 'JOR', label: 'Jordan', reason: 'not_covered' },
+        ]);
+        expect(result.comparability).toEqual({
+          periods: ['2025', '2024', '2021'],
+          mixed_periods: true,
+          basis_counts: { reported: 2, modelled_estimate: 1, projection: 0 },
+          distinct_sources: 3,
+        });
+      }
+      const [first, second, last] = pages;
+      expect(first?.enrichment).toMatchObject({ truncated: true, shown: 1, cap: 1 });
+      expect(first?.enrichment.notice).toContain(
+        'Showing areas 1–1 of 3; ranks, missing, and comparability cover every area. Dataframes are off in this deployment, so the comparison is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.',
+      );
+      expect(second?.enrichment.notice).toContain(
+        'Showing areas 2–2 of 3; ranks, missing, and comparability cover every area. Pass next_offset as offset, with the same other arguments, for the next page.',
+      );
+      expect(last?.result).not.toHaveProperty('next_offset');
+      expect(last?.enrichment).toMatchObject({ truncated: false, shown: 1 });
+      expect(last?.enrichment.notice).toContain(
+        'Showing areas 3–3 of 3; ranks, missing, and comparability cover every area.',
+      );
+      expect(last?.enrichment.notice).not.toContain('next_offset');
+    },
+  );
+
+  it.each([3, 7])(
+    'returns no areas and a notice, not an error, for offset %i at or past the end',
+    async (offset) => {
+      wire();
+      const result = await runToolContract(compareGeographiesTool, {
+        dataset_id: UNE,
+        ref_areas: ['USA', 'X01', 'KEN'],
+        offset,
+      });
+      expect(result.isError).toBeFalsy();
+      const notice = `offset ${offset} is past the end of the 3 areas with a value.`;
+      expect(result.structuredContent).toMatchObject({ rows: [], truncated: false, shown: 0 });
+      expect(result.structuredContent).not.toHaveProperty('next_offset');
+      expect((result.structuredContent as { notice: string }).notice).toContain(notice);
+      expect(contentText(result)).toContain(notice);
+    },
+  );
 
   it('serves a repeat comparison from the response cache', async () => {
     const wired = wire();
@@ -1491,35 +1613,14 @@ describe('errors', () => {
     expect(error.data).toMatchObject({ reason: 'areas_required' });
   });
 
-  it.each([
-    ['a defaulted slice', {}],
-    ['an explicit slice', { classif1: 'AGE_YTHADULT_YGE15' }],
-  ])(
-    "InternalError: a unit-probe key the SDMX host rejects (422) is this server's bug, under %s",
-    async (_label, slice) => {
-      const wired = wire({ routes: [probe422('UNE_DEAP_SEX_AGE_RT', 'ABW....')] });
-      const args = { dataset_id: UNE, ref_areas: ['USA'], ...slice };
-      const error = await failure(args);
-      expect(error.code).toBe(JsonRpcErrorCode.InternalError);
-      expect(error.message).toBe(
-        'ILOSTAT SDMX API (sdmx.ilo.org) rejected the series key built for UNE_DEAP_SEX_AGE_RT (HTTP 422).',
-      );
-      expect(dataUrls(wired)).toHaveLength(0);
-
-      const result = await runToolContract(compareGeographiesTool, args);
-      expect(result.isError).toBe(true);
-      expect(result.structuredContent).toMatchObject({
-        error: { code: JsonRpcErrorCode.InternalError },
-      });
-      expect(contentText(result)).toContain('rejected the series key');
-    },
-  );
-
-  it('invalid_slice for a breakdown the dataset lacks wins over a structure lookup that would fail', async () => {
-    wire({ routes: [probe422('SDG_0552_NOC_RT', 'KEN..')] });
+  it('invalid_slice for a breakdown the dataset lacks is decided before any structure request', async () => {
+    const wired = wire();
     const error = await failure({ dataset_id: 'SDG_0552_NOC_RT_A', ref_areas: ['KEN'], sex: 'T' });
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.data).toMatchObject({ reason: 'invalid_slice', fields: ['sex'] });
+    expect(callUrls(wired.http, (request) => new URL(request.url).origin === SDMX_ORIGIN)).toEqual(
+      [],
+    );
   });
 
   it.each([
@@ -1675,8 +1776,10 @@ describe('contract envelope (runToolContract)', () => {
     });
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as Output & Record<string, unknown>;
-    expect(structured).toMatchObject({ truncated: false, shown: 3, cap: 40_000 });
+    expect(structured).toMatchObject({ truncated: false, shown: 3, cap: 50 });
+    expect(structured).not.toHaveProperty('next_offset');
     const text = contentText(result);
+    expect(text).not.toContain('next_offset');
     for (const row of structured.rows) {
       expect(text).toContain(
         `| ${row.rank} | ${row.ref_area} — ${row.label} (${row.kind}) | ${row.value} | ${row.period} | ${row.basis} |`,
@@ -1722,6 +1825,29 @@ describe('contract envelope (runToolContract)', () => {
     expect(text).toContain('2 areas have no value; see missing.');
   });
 
+  it('an all-missing comparison at a later offset adds no past-the-end sentence on either surface', async () => {
+    wire();
+    const result = await runToolContract(compareGeographiesTool, {
+      dataset_id: UNE,
+      ref_areas: ['JOR', 'ABW'],
+      offset: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      rows: [],
+      missing: [
+        { ref_area: 'JOR', reason: 'not_covered' },
+        { ref_area: 'ABW', reason: 'no_value_in_window' },
+      ],
+      shown: 0,
+      notice: '2 areas have no value; see missing.',
+    });
+    expect(result.structuredContent).not.toHaveProperty('next_offset');
+    const text = contentText(result);
+    expect(text).toContain('2 areas have no value; see missing.');
+    expect(text).not.toContain('past the end');
+  });
+
   it('counts one modelled and one reported value in the singular on both surfaces', async () => {
     wire();
     const result = await runToolContract(compareGeographiesTool, {
@@ -1763,20 +1889,29 @@ describe('contract envelope (runToolContract)', () => {
     );
   });
 
-  it('a partial page validates as truncated, the disclosure on both surfaces', async () => {
+  it('a partial page validates as truncated: the same rows, next_offset, and notice on both surfaces', async () => {
     wire({ observations: { previewChars: 1_200 } });
     const result = await runToolContract(compareGeographiesTool, {
       dataset_id: UNE,
       ref_areas: ['USA', 'X01', 'KEN'],
+      limit: 2,
     });
     expect(result.isError).toBeFalsy();
-    const structured = result.structuredContent as Output & { shown: number };
-    expect(structured).toMatchObject({ truncated: true, cap: 1_200 });
-    expect(structured.shown).toBeGreaterThan(0);
-    expect(structured.rows).toHaveLength(structured.shown);
-    expect(contentText(result)).toContain(
-      `Showing ${structured.shown} of 3 areas inline: dataframes are off in this deployment.`,
-    );
+    const structured = result.structuredContent as Output & { notice: string };
+    expect(structured).toMatchObject({ truncated: true, shown: 2, cap: 2, next_offset: 2 });
+    expect(areasOf(structured)).toEqual(['KEN', 'X01']);
+    const disclosure =
+      'Showing areas 1–2 of 3; ranks, missing, and comparability cover every area. Dataframes are off in this deployment, so the comparison is not staged for SQL. Pass next_offset as offset, with the same other arguments, for the next page.';
+    expect(structured.notice).toContain(disclosure);
+    const text = contentText(result);
+    for (const row of structured.rows) {
+      expect(text).toContain(
+        `| ${row.rank} | ${row.ref_area} — ${row.label} (${row.kind}) | ${row.value} | ${row.period} | ${row.basis} |`,
+      );
+    }
+    expect(text).not.toContain('| 3 | USA');
+    expect(text).toContain('**next_offset:** 2');
+    expect(text).toContain(disclosure);
   });
 
   it('a staged page validates as truncated and names the dataframe on both surfaces', async () => {
@@ -1785,19 +1920,19 @@ describe('contract envelope (runToolContract)', () => {
     const result = await runToolContract(compareGeographiesTool, {
       dataset_id: UNE,
       ref_areas: ['USA', 'X01', 'KEN'],
+      limit: 2,
     });
     expect(result.isError).toBeFalsy();
-    const structured = result.structuredContent as Output & { notice: string; shown: number };
+    const structured = result.structuredContent as Output & { notice: string };
     const name = structured.dataframe?.name ?? '';
     expect(name).toMatch(/^df_/);
-    expect(structured).toMatchObject({ truncated: true, cap: 1_200 });
-    expect(structured.rows).toHaveLength(structured.shown);
-    expect(structured.shown).toBeGreaterThan(0);
-    expect(structured.shown).toBeLessThan(3);
-    const disclosure = `Showing ${structured.shown} of 3 areas inline; ranks, missing, and comparability cover every area. Full result staged as ${name} (3 rows)`;
+    expect(structured).toMatchObject({ truncated: true, shown: 2, cap: 2, next_offset: 2 });
+    expect(structured.rows).toHaveLength(2);
+    const disclosure = `Full result staged as ${name} (3 rows) — use ilostat_dataframe_describe to inspect its columns, then ilostat_dataframe_query to analyze it with SQL. Showing areas 1–2 of 3; ranks, missing, and comparability cover every area. Pass next_offset as offset, with the same other arguments, for the next page.`;
     expect(structured.notice).toContain(disclosure);
     const text = contentText(result);
     expect(text).toContain(disclosure);
+    expect(text).toContain('**next_offset:** 2');
     expect(text).toContain(`**Dataframe:** ${name} (3 rows, expires 2026-09-27T12:00:00.000Z)`);
   });
 

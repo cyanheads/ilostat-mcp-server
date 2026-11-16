@@ -84,6 +84,43 @@ describe('catalog snapshot', () => {
     );
   });
 
+  it("carries each dataset's unit from its ToC row, the type from the indicator code's last segment", async () => {
+    const snapshot = await loadSnapshot();
+    expect(snapshot.datasets.get('UNE_DEAP_SEX_AGE_RT_A')?.unit).toEqual({
+      measure: 'PT',
+      measureLabel: '%',
+      type: 'RT',
+      multiplier: 0,
+      multiplierLabel: 'units',
+    });
+    expect(snapshot.datasets.get('EMP_TEMP_SEX_INS_DSB_NB_Q')?.unit).toEqual({
+      measure: 'PS',
+      measureLabel: 'persons',
+      type: 'NB',
+      multiplier: 3,
+      multiplierLabel: 'thousands',
+    });
+  });
+
+  it('leaves the unit absent for a row without a measure or a whole-number multiplier, and a label absent where the row has none', async () => {
+    const fixture = loadCatalogFixture();
+    delete tocRow(fixture, 'SDG_0552_NOC_RT_A').unit_measure;
+    delete tocRow(fixture, 'UNE_2EAP_SEX_AGE_RT_A').unit_mult;
+    tocRow(fixture, 'LAP_2GDP_NOC_RT_A').unit_mult = '0.5';
+    const pop = tocRow(fixture, 'POP_2POP_SEX_NB_A');
+    delete pop['unit_measure.label'];
+    pop['unit_mult.label'] = '';
+    const snapshot = await loadSnapshot(fixture);
+    for (const id of ['SDG_0552_NOC_RT_A', 'UNE_2EAP_SEX_AGE_RT_A', 'LAP_2GDP_NOC_RT_A']) {
+      expect(snapshot.datasets.get(id), id).not.toHaveProperty('unit');
+    }
+    expect(snapshot.datasets.get('POP_2POP_SEX_NB_A')?.unit).toEqual({
+      measure: 'PS',
+      type: 'NB',
+      multiplier: 3,
+    });
+  });
+
   it('names breakdowns from classif.labels, else from the classification-type dictionary', async () => {
     const fixture = loadCatalogFixture();
     tocRow(fixture, 'EMP_TEMP_SEX_INS_DSB_NB_A')['classif.labels'] = '';

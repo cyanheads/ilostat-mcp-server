@@ -2,11 +2,11 @@
 
 **Server:** ilostat-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
-**Dependency hold:** `@duckdb/node-api` stays on `^1.5.6-r.2`, not 2.x — on DuckDB 2 the framework's canvas SQL gate refuses `SHOW <table>`, which 1.5.x answers ([cyanheads/mcp-ts-core#800](https://github.com/cyanheads/mcp-ts-core/issues/800)).
+**Dependency hold:** `@duckdb/node-api` stays on `^1.5.6-r.2`, not 2.x — DuckDB 2 gives every instance an `async_threads` pool (four per core) that the framework's canvas provider does not bound, so each live canvas holds about 49 threads on a 12-core host instead of about 3. The fuzz suite's canvases then pass macOS's 8,192-thread process cap and Bun aborts in `WTF::Thread::create`. Lift it once the framework sets `async_threads` on canvas instances ([cyanheads/mcp-ts-core#870](https://github.com/cyanheads/mcp-ts-core/issues/870)).
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -147,7 +147,7 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 const ServerConfigSchema = z.object({
   catalogRefreshHours: z.coerce.number().int().min(1).max(168).default(6).describe('Hours between catalog checks (1–168).'),
   maxRows: z.coerce.number().int().min(1_000).max(1_000_000).default(500_000).describe('Row ceiling per query.'),
-  previewChars: z.coerce.number().int().min(1_000).default(40_000).describe('Inline preview budget, in characters.'),
+  previewChars: z.coerce.number().int().min(1_000).default(40_000).describe('Staging trigger, in characters.'),
   cacheTtlSeconds: z.coerce.number().int().min(0).default(900).describe('Response cache TTL (0 disables).'),
   datasetTtlSeconds: z.coerce.number().int().min(60).default(86_400).describe('Per-table dataframe TTL.'),
   dataframeDropEnabled: z.stringbool().default(false).describe('Exposes ilostat_dataframe_drop.'),
@@ -290,9 +290,9 @@ src/
     attribution.ts                      # the CC BY 4.0 attribution string
     upstream/                           # paced, retried GET per host; 429/challenge → upstream_busy
     rplumber/                           # rplumber.ilo.org client: tables of contents, dictionaries, data
-    sdmx/                               # sdmx.ilo.org client: dataflow structure, unit probe
+    sdmx/                               # sdmx.ilo.org client: dataflow structure
     catalog/                            # in-memory catalog snapshot, search, reference listings, paging
-    structure/                          # per-indicator SDMX structure + unit, cached
+    structure/                          # per-indicator SDMX structure, cached
     observations/                       # request validation, streaming, rows, comparison, response cache
     profile/                            # headline country profile
     basis/                              # reported / modelled_estimate / projection rules
@@ -411,7 +411,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/` at a package root, and `SKILL.md` — a `skills/` deeper in a package, like the MCP SDK's `dist/ext/skills/` runtime modules, ships); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp`, which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases, and `better-sqlite3`'s `deps/` and `src/` C sources. The package-root agent-doc selector in `clean-mcpb.ts` and `lint-packaging.ts` is a local port of the fix for [cyanheads/mcp-ts-core#794](https://github.com/cyanheads/mcp-ts-core/issues/794): a `maintenance` script resync overwrites it until the framework ships that fix, so restore it in both files (`tests/scripts/bundle-agent-docs.test.ts` fails without it). This server's bundle therefore ships portable and without the DuckDB native binding, so `manifest.json` fixes `CANVAS_PROVIDER_TYPE=none`: the three dataframe tools are not listed in the bundle, query and compare stop at the inline preview and say so, and every other tool works normally. `CANVAS_PROVIDER_TYPE` is not a user option there. MCPB is stdio-only; the npm, Docker, and HTTP installs are unaffected.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package, like the MCP SDK's `dist/ext/skills/` runtime modules, is runtime code and ships); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp`, which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases, and `better-sqlite3`'s `deps/` and `src/` C sources. `clean-mcpb.ts` and `lint-packaging.ts` carry the same agent-doc selector, and `tests/scripts/bundle-agent-docs.test.ts` holds the pair to it: the runtime `skills/` modules stay, package-root agent docs go. This server's bundle therefore ships portable and without the DuckDB native binding, so `manifest.json` fixes `CANVAS_PROVIDER_TYPE=none`: the three dataframe tools are not listed in the bundle, query and compare page their rows with `next_offset` and say they are not staged, and every other tool works normally. `CANVAS_PROVIDER_TYPE` is not a user option there. MCPB is stdio-only; the npm, Docker, and HTTP installs are unaffected.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

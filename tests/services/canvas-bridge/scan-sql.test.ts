@@ -1,10 +1,9 @@
 /**
  * @fileoverview Tests for `scanSql`, the one left-to-right pass that finds the
- * `df_` names an `ilostat_dataframe_query` statement names as identifiers and
- * whether it reads: line comments (ended by LF or CR), nested block comments,
- * `'…'` literals, `E'…'` strings with backslash escapes, and `$tag$…$tag$`
- * strings are skipped; bare and double-quoted identifiers are read whole; the
- * SQL of a `query()` call over one string literal is read as DuckDB unescapes
+ * `df_` names an `ilostat_dataframe_query` statement names as identifiers: line
+ * comments (ended by LF or CR), nested block comments, `'…'` literals, `E'…'`
+ * strings with backslash escapes, and `$tag$…$tag$` strings are skipped; bare and
+ * double-quoted identifiers are read whole; the SQL of a `query()` call over one string literal is read as DuckDB unescapes
  * it, through every form the canvas gate admits, in every position where DuckDB
  * runs it as a call, and down to the gate's four nesting levels, and no other
  * literal is, a table alias's or CTE's column list after `query` included; and
@@ -250,22 +249,6 @@ describe('scanSql', () => {
       scanSql(`SELECT * FROM ${B}, query('SELECT * FROM ${A}'), DF_bbbbb_22222, df_CCCCC_33333`)
         .dataframes,
     ).toEqual([B, A, 'df_CCCCC_33333']);
-  });
-
-  it.each([
-    ['SELECT', 'SELECT 1', true],
-    ['WITH', 'with x AS (SELECT 1) SELECT * FROM x', true],
-    ['FROM', `FROM ${A}`, true],
-    ['a parenthesis', '(SELECT 1)', true],
-    ['comments first', "-- it's\n/* a /* b */ c */ SELECT 1", true],
-    ['FROM query()', `FROM query('SELECT * FROM ${A}')`, true],
-    ['DROP', `DROP TABLE ${A}`, false],
-    ['a longer identifier', 'selectx 1', false],
-    ['a quoted identifier', '"select" 1', false],
-    ['a string', "'SELECT' 1", false],
-    ['query() alone', `query('SELECT * FROM ${A}')`, false],
-  ])('reads when the first token is SELECT, WITH, FROM, or ( — here %s', (_label, sql, reads) => {
-    expect(scanSql(sql).reads).toBe(reads);
   });
 });
 

@@ -20,6 +20,16 @@ export const IndicatorTocRowSchema = z.object({
   /** Absent on datasets without breakdowns. */
   classification: z.string().optional(),
   'classif.labels': z.string().optional(),
+  /**
+   * Unit code (`PT`, `PS`, `CR`, …). The four unit columns are on every live row;
+   * optional so a row without them leaves its dataset without a unit rather than
+   * failing the whole table.
+   */
+  unit_measure: z.string().optional(),
+  'unit_measure.label': z.string().optional(),
+  /** Power of ten as a digit string (`0`, `3`, `6`). */
+  unit_mult: z.string().optional(),
+  'unit_mult.label': z.string().optional(),
   'data.start': z.number(),
   'data.end': z.number(),
   /** `dd/mm/yyyy HH:MM:SS`, no zone. */

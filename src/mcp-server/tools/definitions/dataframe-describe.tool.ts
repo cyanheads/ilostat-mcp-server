@@ -10,7 +10,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { BasisCountsSchema, renderBasisCounts } from '@/mcp-server/tools/observation-output.js';
+import {
+  BasisCountsSchema,
+  renderBasisCounts,
+  renderUnit,
+} from '@/mcp-server/tools/observation-output.js';
 import { blankAsUnset, dataframeNameInput } from '@/mcp-server/tools/tool-helpers.js';
 import { requireCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { inlineText } from '@/services/catalog/text.js';
@@ -29,13 +33,19 @@ interface DatasetUnit {
  * (`Persons (PS) · type Number (NB) · multiplier 3 (Thousands)`), its label alone
  * on a record kept before the unit fields existed, nothing when unresolved.
  */
-function renderUnit(dataset: DatasetUnit): string {
+function datasetUnit(dataset: DatasetUnit): string {
   const { unit_measure: measure, unit_type: type, unit_multiplier: multiplier } = dataset;
   if (measure === undefined || type === undefined || multiplier === undefined) {
     return dataset.unit ? ` · unit ${inlineText(dataset.unit)}` : '';
   }
-  const label = dataset.unit_multiplier_label ? ` (${dataset.unit_multiplier_label})` : '';
-  return ` · unit ${inlineText(`${dataset.unit ?? measure} (${measure}) · type ${dataset.unit_type_label ?? type} (${type}) · multiplier ${multiplier}${label}`)}`;
+  return ` · unit ${renderUnit({
+    measure,
+    ...(dataset.unit ? { measure_label: dataset.unit } : {}),
+    type,
+    ...(dataset.unit_type_label ? { type_label: dataset.unit_type_label } : {}),
+    multiplier,
+    ...(dataset.unit_multiplier_label ? { multiplier_label: dataset.unit_multiplier_label } : {}),
+  })}`;
 }
 
 export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
@@ -137,7 +147,7 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The DataCanvas DuckDB engine cannot load in this deployment.',
       recovery:
-        'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies with narrower filters so the result fits inline.',
+        'Dataframes are off in this deployment; call ilostat_query_indicator or ilostat_compare_geographies and page through their rows inline with next_offset.',
       thrownBy: 'service',
     },
     {
@@ -226,7 +236,7 @@ export const dataframeDescribeTool = tool('ilostat_dataframe_describe', {
       );
       for (const dataset of frame.datasets) {
         lines.push(
-          `- Dataset: ${dataset.dataset_id} — ${inlineText(dataset.label)}${renderUnit(dataset)} · updated ${inlineText(dataset.last_update)}`,
+          `- Dataset: ${dataset.dataset_id} — ${inlineText(dataset.label)}${datasetUnit(dataset)} · updated ${inlineText(dataset.last_update)}`,
         );
       }
       if (frame.coverage) {

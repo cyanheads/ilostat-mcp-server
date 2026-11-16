@@ -4,7 +4,10 @@
  * latest non-projected period, an optional change over N years with the earlier
  * value's provenance and source, basis, and break flags, a rank by value, the
  * areas without a value and why, and flags for mixed periods and mixed bases.
- * The slice defaults to the dataset's totals.
+ * The slice defaults to the dataset's totals. Every area is computed in one call;
+ * the rows come back a page at a time (`limit` from `offset`, continued by
+ * `next_offset`), and a first page whose comparison passes the staging threshold
+ * (`ILOSTAT_PREVIEW_CHARS`) also stages it as a `df_<id>` dataframe.
  * @module mcp-server/tools/definitions/compare-geographies
  */
 
@@ -41,7 +44,10 @@ import type { CatalogSnapshot } from '@/services/catalog/types.js';
 import { getIlostatServices } from '@/services/ilostat-services.js';
 import type { ComparisonRow } from '@/services/observations/comparison.js';
 import { codeLabels, noteCodesOf, UNLABELLED } from '@/services/observations/observation-rows.js';
-import type { CompareAppliedFilters } from '@/services/observations/observation-service.js';
+import type {
+  CompareAppliedFilters,
+  CompareResult,
+} from '@/services/observations/observation-service.js';
 
 const AppliedFiltersSchema = z
   .object({
@@ -195,10 +201,42 @@ function renderAppliedFilters(filters: CompareAppliedFilters): string {
   return `**Applied filters:** ${parts.join(' · ')}`;
 }
 
+/**
+ * Which areas a page holds, why a first page whose comparison passes the staging
+ * threshold was not staged, and how to reach the next page; absent when a first
+ * page holds every area with a value. `total` counts the areas with a value.
+ */
+function pageNotice(
+  outcome: CompareResult['outcome'],
+  offset: number,
+  total: number,
+): string | undefined {
+  const shown = outcome.rows.length;
+  if (shown === 0) {
+    return offset > 0 && total > 0
+      ? `offset ${offset} is past the end of the ${total} ${total === 1 ? 'area' : 'areas'} with a value.`
+      : undefined;
+  }
+  const cause = outcome.kind === 'page' ? outcome.cause : undefined;
+  if (offset === 0 && outcome.nextOffset === undefined && !cause) return;
+  return [
+    `Showing areas ${offset + 1}–${offset + shown} of ${total}; ranks, missing, and comparability cover every area.`,
+    ...(cause === 'canvas_off'
+      ? ['Dataframes are off in this deployment, so the comparison is not staged for SQL.']
+      : []),
+    ...(cause === 'canvas_failed'
+      ? ['Staging the full comparison as a dataframe failed; call again with offset 0 to retry it.']
+      : []),
+    ...(outcome.nextOffset === undefined
+      ? []
+      : ['Pass next_offset as offset, with the same other arguments, for the next page.']),
+  ].join(' ');
+}
+
 export const compareGeographiesTool = tool('ilostat_compare_geographies', {
   title: 'Compare areas on an ILOSTAT dataset',
   description:
-    "Compare reference areas on one ILOSTAT dataset and one slice — a sex code plus breakdown codes, defaulting to the dataset's totals — giving each area's value at a common period or at its latest non-projected period, optional change over N years, and a rank, with each value's period, source, status, and basis (reported, modelled_estimate, or projection). A change carries the earlier value's source, basis, status, and notes, and flags whether the source or basis differs or the series breaks between the two values. Areas without a value are listed separately with the reason, and the response flags mixed periods and mixed bases rather than hiding them. Select areas by code list, by group (X01 for every country, an ILO region or subregion, or a World Bank income group), or both; X-coded aggregates require a dataset with aggregates.",
+    "Compare reference areas on one ILOSTAT dataset and one slice — a sex code plus breakdown codes, defaulting to the dataset's totals — giving each area's value at a common period or at its latest non-projected period, optional change over N years, and a rank, with each value's period, source, status, and basis (reported, modelled_estimate, or projection). A change carries the earlier value's source, basis, status, and notes, and flags whether the source or basis differs or the series breaks between the two values. Areas without a value are listed separately with the reason, and the response flags mixed periods and mixed bases rather than hiding them. The areas with a value come back limit at a time from offset, in the sort order, and next_offset continues; ranks, missing, and comparability always cover every area. Select areas by code list, by group (X01 for every country, an ILO region or subregion, or a World Bank income group), or both; X-coded aggregates require a dataset with aggregates.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -248,6 +286,15 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
     ).describe(
       'Row order: value_desc (default), value_asc, or ref_area. rank is always by value, highest first.',
     ),
+    limit: z.number().int().min(1).default(50).describe('Areas per page.'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        "Areas to skip, in the sort order: 0 for the first page, else the previous page's next_offset, with the same other arguments.",
+      ),
   }),
 
   output: z.object({
@@ -304,7 +351,13 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
           .describe('One area with a value.'),
       )
       .describe(
-        'Areas with a value, in the requested order; the staged dataframe holds all when larger.',
+        'This page of the areas with a value: at most limit from offset, in the requested order. A staged dataframe holds every area.',
+      ),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset of the next page, set when areas remain past this one; pass it as offset with the same other arguments.',
       ),
     legend: z
       .object({
@@ -351,15 +404,15 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       .string()
       .optional()
       .describe(
-        'Mixed periods, mixed bases, changes that are not like-for-like, missing areas, a unit or area list the structure service could not supply, where the full comparison is staged, or why the inline rows stop early.',
+        'Mixed periods, mixed bases, changes that are not like-for-like, missing areas, a unit the catalog does not list or an area list the structure service could not supply, where the full comparison is staged, which areas the page holds and how to reach the next, or why a first page whose comparison passes the staging threshold was not staged.',
       ),
     truncated: z
       .boolean()
       .describe(
-        'True when the inline rows stop before the last area — also when a dataframe holds the full comparison.',
+        'True when areas remain past this page, whether or not a dataframe holds the full comparison; next_offset continues.',
       ),
     shown: z.number().describe('Rows returned inline.'),
-    cap: z.number().describe('Inline preview budget, in serialized characters.'),
+    cap: z.number().describe('The limit applied to this page.'),
   },
   enrichmentTrailer: { applied_filters: { render: renderAppliedFilters } },
 
@@ -478,6 +531,8 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
         lookbackYears: input.lookback_years,
         includeProjections: input.include_projections,
         sort: input.sort,
+        limit: input.limit,
+        offset: input.offset,
         ...(input.ref_areas?.length ? { refAreas: input.ref_areas } : {}),
         ...(input.area_group ? { areaGroup: input.area_group } : {}),
         ...(input.sex ? { sex: input.sex } : {}),
@@ -495,22 +550,14 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       applied_filters: result.appliedFilters,
       truncated: false,
       shown,
-      cap: result.previewChars,
+      cap: input.limit,
     });
     const notices = [...result.notices];
-    if (outcome.kind === 'staged') {
-      notices.push(
-        `Showing ${shown} of ${comparison.entries.length} areas inline; ranks, missing, and comparability cover every area.`,
-        dataframeNotice(outcome.table),
-      );
-    }
-    if (outcome.kind === 'preview') {
-      notices.push(
-        `Showing ${shown} of ${comparison.entries.length} areas inline: ${outcome.cause === 'canvas_off' ? 'dataframes are off in this deployment' : 'staging the full comparison as a dataframe failed'}. Ranks, missing, and comparability cover every area; narrow ref_areas or area_group to see the rest.`,
-      );
-    }
-    if (outcome.kind !== 'complete') {
-      ctx.enrich.truncated({ shown, cap: result.previewChars, guidance: notices.join(' ') });
+    if (outcome.kind === 'staged') notices.push(dataframeNotice(outcome.table));
+    const paging = pageNotice(outcome, input.offset, comparison.entries.length);
+    if (paging) notices.push(paging);
+    if (outcome.nextOffset !== undefined) {
+      ctx.enrich.truncated({ shown, cap: input.limit, guidance: notices.join(' ') });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
     }
@@ -551,6 +598,7 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
           ...(change ? { change } : {}),
         };
       }),
+      ...(outcome.nextOffset === undefined ? {} : { next_offset: outcome.nextOffset }),
       legend: comparisonLegend(outcome.rows, snapshot),
       missing: comparison.missing.map(({ refArea, reason }) => {
         const label = snapshot.refAreas.get(refArea)?.label;
@@ -613,6 +661,7 @@ export const compareGeographiesTool = tool('ilostat_compare_geographies', {
       '',
       `**Comparability:** periods ${inlineText(comparability.periods.join(', ')) || 'none'} · mixed_periods: ${comparability.mixed_periods} · ${renderBasisCounts(comparability.basis_counts)} · ${comparability.distinct_sources} distinct ${comparability.distinct_sources === 1 ? 'source' : 'sources'}`,
     );
+    if (result.next_offset !== undefined) lines.push(`**next_offset:** ${result.next_offset}`);
     if (result.dataframe) lines.push(renderDataframe(result.dataframe));
     lines.push(result.attribution);
     return [{ type: 'text', text: lines.join('\n') }];
