@@ -1,6 +1,6 @@
 # ilostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-29 19:17:23
+Generated on: 2026-11-16 06:13:23
 
 ```text
 ilostat-mcp-server/
@@ -27,6 +27,7 @@ ilostat-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -229,10 +230,6 @@ ilostat-mcp-server/
 │   │   │   ├── une-deap-youth-breaks.csv
 │   │   │   └── youth-series-dictionaries.json
 │   │   └── sdmx/
-│   │       ├── probe-EMP_TEMP_SEX_INS_DSB_NB.csv
-│   │       ├── probe-LAP_2LID_QTL_RT.csv
-│   │       ├── probe-SDG_0552_NOC_RT.csv
-│   │       ├── probe-UNE_DEAP_SEX_AGE_RT.csv
 │   │       ├── structure-EMP_TEMP_SEX_INS_DSB_NB.json
 │   │       ├── structure-LAP_2LID_QTL_RT.json
 │   │       ├── structure-SDG_0552_NOC_RT.json
@@ -288,6 +285,7 @@ ilostat-mcp-server/
 │   │   ├── get-country-profile.tool.test.ts
 │   │   ├── input-caps.test.ts
 │   │   ├── list-reference.tool.test.ts
+│   │   ├── observation-output.test.ts
 │   │   ├── query-indicator.tool.test.ts
 │   │   ├── search-indicators.tool.test.ts
 │   │   ├── tool-definitions.test.ts
@@ -303,6 +301,7 @@ ilostat-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

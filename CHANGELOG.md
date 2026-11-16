@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-15 · ⚠️ Breaking
+
+ilostat_query_indicator and ilostat_compare_geographies page their rows with limit, offset, and next_offset; query names requested areas that returned no rows; units come from the catalog; youth, young, and adult reach age-broken indicators. Breaking: ilostat_dataframe_query refuses 35 system-catalog names as aliases.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-29 · ⚠️ Breaking
 
 Published ilostat-guide skill, sex-word search (female, men, women, male) and derived forms like disabled, provenance for query() dataframe reads, and the .mcpb bundle running with dataframes off. Breaking: an unqualified current_schema column now fails denied_function.
