@@ -1,8 +1,10 @@
 /**
  * @fileoverview The bundle cleaner (`scripts/clean-mcpb.ts`) and the packaging
  * check that verifies it (`scripts/lint-packaging.ts`) select agent-doc entries
- * only at a package root: a dependency's root `skills/` is stripped, while the
- * MCP SDK's `dist/ext/skills/` runtime modules stay in the bundle.
+ * only at a package root: a dependency's root `skills/`, `AGENTS.md`, and
+ * `CLAUDE.md` are stripped, while the MCP SDK's `dist/ext/skills/` runtime
+ * modules, a `CLAUDE.md` deeper in a package, and the server's own root files
+ * stay in the bundle.
  * @module tests/scripts/bundle-agent-docs.test
  */
 
@@ -34,6 +36,8 @@ const STRIPPED = [
   'node_modules/outer/node_modules/@scope/inner/skills/guide/notes.md',
   'node_modules/@scope/outer/node_modules/inner/.claude/settings.json',
   'node_modules/some-pkg/docs/SKILL.md',
+  'node_modules/some-pkg/CLAUDE.md',
+  'node_modules/@scope/pkg/AGENTS.md',
 ];
 
 const KEPT = [
@@ -44,7 +48,9 @@ const KEPT = [
   'node_modules/@scope/skills/index.js',
   'node_modules/skills/index.js',
   'node_modules/some-pkg/lib/skills/loader.js',
+  'node_modules/some-pkg/docs/CLAUDE.md',
   'skills/ilostat-guide/SKILL.md',
+  'CLAUDE.md',
   'dist/index.js',
 ];
 
